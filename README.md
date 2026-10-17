@@ -1,31 +1,34 @@
-# Pixel Zombie LAN — v0.4.1
+# Pixel Zombie LAN — v0.4.2
 
-A landscape Android zombie wave-defense prototype built with Godot 4. Supports an offline solo run and a host-authoritative local Wi-Fi session for up to four players (ENet UDP port 24567). Internet is not needed after installation.
+A landscape Android zombie wave-defense prototype built with Godot 4. It supports offline solo play and a host-authoritative local Wi-Fi session for up to four players (ENet UDP port 24567); an internet connection is not needed after installation.
 
-## What's new in v0.4.1
-- Corrected the playable lane to fit inside the actual asphalt corridor: the character body is constrained so heads and feet stay within the curb/road area near both ends.
-- Added a per-wave 90-second countdown, shortening by 3 seconds per wave until a 55-second minimum. When the timer expires, the game enters overtime and zombies become 18% faster; all wave zombies must still be eliminated before the next wave.
-- Added a proper squad Game Over overlay when every connected player is down. It stops combat, shows the wave/status, and offers Restart Run or Return to Safehouse. A LAN client may request a restart from the host.
-- Restart clears zombies, effects, cooldowns and wave counters, then restores players and medkits.
-- Leaving a session clears runtime actors without silently writing zombie positions to the save. New Solo/Host runs start with a clean arena. Manual Save is explicit; Continue Saved is a separate home-screen option.
-- Added eight original, compact procedural WAV sound effects: gun pop, hit thud, zombie attack groan, death groan, heal cue, wave-start cue, wave-clear stinger, and Game Over sting. LAN hosts relay gameplay SFX events to clients.
-- Version code 14 / version name 0.4.1.
+## What's new in v0.4.2
+- Moved the upper playable boundary closer to the background's sidewalk/road seam while keeping the character ground point on asphalt. The lower edge remains clamped before the foreground curb and fence.
+- Added a three-grenade starting inventory and a dedicated touch button. A thrown grenade arcs forward, then explodes with area damage and synced sound/visual effects.
+- Added a random supply-drop loop. Each crate can contain ammunition, grenades, barricade kits, or a medkit; the landed crate is labeled to show its loot. Full inventory converts the excess into ammunition.
+- Added buildable timber barricades. Place one in the direction the survivor faces; the wall blocks zombies in the same lane, has an HP bar, and can be attacked/destroyed by zombies. Wall kits can come from drops.
+- Added six original procedural SFX for grenade toss, explosion, supply drop, wall placement, wall break, and pickup.
+- Android version code 15 / version name 0.4.2.
 
 ## Controls
-- Left virtual analog: move only inside the road lane.
-- Hold FIRE: shoot repeatedly every 0.30 seconds in the direction the survivor last faced.
-- HEAL: consume one medkit to restore up to 35 HP.
-- Pause: resume, manually save, or abandon the session.
-- On Game Over, Restart Run starts a clean attempt (clients ask the host); Return to Safehouse leaves the session.
+- Left virtual analog: move around the middle defense lane.
+- Hold FIRE: fire repeated horizontal shots in the direction the survivor last faced. Ammo is consumed per shot.
+- HEAL: spend a medkit to restore up to 35 HP.
+- GREN: throw one grenade (starts with 3; supply drops can replenish them).
+- WALL: spend one wall kit to place a destructible barricade in front of the survivor.
+- Pause: resume, manually save, or leave the session.
+
+## Supply drops and barricades
+The first supply drop arrives after a short delay, descends under a parachute, and lands in the asphalt lane. Landed crates show their randomized loot label: ammo, grenades, wall kits, or medkit. Touch a crate to collect it. Survivors start with two wall kits; use WALL while facing the desired direction. Walls occupy the shared world, block aligned zombies, and lose durability when attacked.
 
 ## LAN multiplayer
-The host opens Multiplayer LAN → Create World, then shares its hotspot IPv4 address. Friends on the same hotspot select Join World and enter that address. Android hotspot isolation/firewall behavior varies; physical-device testing is required.
+The host opens Multiplayer LAN → Create World, then shares its hotspot IPv4 address. Friends connected to the same hotspot select Join World and enter that address. Android hotspot isolation varies by device, so physical-device testing is still required.
 
 ## Saved runs
-Saving is manual from the host pause menu/lobby. The home screen offers Continue Saved only as an explicit action. New Solo Run and Create World deliberately start clean and do not load old zombie positions. Exiting does not auto-save.
+Saving is manual from the host pause menu/lobby. Continue Saved is explicit; new solo/host runs clear previous zombie and effect state. Leaving does not auto-save.
 
 ## Build
-Push the source ZIP contents so `project.godot` is in the repository root. GitHub Actions imports assets, validates scripts with a headless scene start, checks landscape/res references/audio files, exports a debug APK and uploads a source artifact.
+Push the source ZIP contents so `project.godot` is in the repository root. GitHub Actions imports assets, validates resource references and sound files, checks script markers, runs a headless scene startup, exports a debug APK and uploads a source ZIP.
 
-## Limits
-This remains a prototype. The WAV sound effects are generated procedurally for this project to avoid uncertain third-party sound licensing. LAN behavior and the final on-device visuals/audio should be tested on the target phones before distribution.
+## Prototype/testing note
+SFX are synthesized locally for this project instead of copied from third-party audio packs. Static checks can verify resource paths and formats, but Godot's runtime compilation and actual four-device LAN behavior must be confirmed by GitHub Actions and device testing.

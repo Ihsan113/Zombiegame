@@ -104,9 +104,14 @@ jobs:
               raise SystemExit('Broken res:// references: ' + ', '.join(missing_refs))
           script = (root / 'scripts/game.gd').read_text()
           required_markers = [
-              'const ARENA_TOP_RATIO := 0.565',
+              'const ARENA_TOP_RATIO := 0.520',
               'const ARENA_BOTTOM_RATIO := 0.865',
-              '_arena_top() + 40.0, _arena_bottom() - 40.0',
+              'const ARENA_TOP_CLEARANCE := 22.0',
+              'const ARENA_BOTTOM_CLEARANCE := 40.0',
+              'const GRENADE_MAX_CARRY := 5',
+              'const MAX_BARRICADES := 8',
+              'const GRENADE_BLAST_RADIUS := 112.0',
+              '_arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE',
               'func _character_visual_position(',
               'func _draw_footstep_dust(',
               'func _draw_zombie_attack_swipe(',
@@ -117,13 +122,29 @@ jobs:
               'func receive_sfx_event(',
               'var wave_time_remaining',
               'var animation_clock := 0.0',
+              'func _host_throw_grenade(id: int)',
+              'func _host_build_wall(id: int)',
+              'func _spawn_airdrop()',
+              'func _update_airdrops(delta: float)',
+              'func _update_grenades(delta: float)',
+              'func _draw_barricade(wall: Dictionary, pos: Vector2)',
+              '"grenades": 3',
+              '"wall_kits": 2',
+              '"ammo": 120',
+              'var loot_kind := "ammo"',
+              'loot_tag = "GREN +%d"',
+              'loot_kind = "medkit"',
+              'loot_kind = "wall"',
+              'loot_kind = "grenade"',
+              'barricades.remove_at(blocking_wall_index)',
+              'if float(wall.get("hp", 0.0)) <= 0.0:',
           ]
           missing_markers = [marker for marker in required_markers if marker not in script]
           if missing_markers:
               raise SystemExit('Missing arena/animation implementation markers: ' + ', '.join(missing_markers))
           import wave
           audio_dir = root / 'assets' / 'audio'
-          clips = ['shot', 'hit', 'attack', 'death', 'heal', 'wave_clear', 'wave_start', 'game_over']
+          clips = ['shot', 'hit', 'attack', 'death', 'heal', 'wave_clear', 'wave_start', 'game_over', 'grenade_throw', 'explosion', 'airdrop', 'wall_build', 'wall_break', 'pickup']
           for clip in clips:
               audio_path = audio_dir / (clip + '.wav')
               if not audio_path.is_file() or audio_path.stat().st_size < 1000:
@@ -174,7 +195,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.1-APK
+          name: PixelZombieLAN-v0.4.2-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -183,15 +204,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.1-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.2-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.1-source.zip
+          test -s build/PixelZombieLAN-v0.4.2-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.1-source
-          path: build/PixelZombieLAN-v0.4.1-source.zip
+          name: PixelZombieLAN-v0.4.2-source
+          path: build/PixelZombieLAN-v0.4.2-source.zip
           if-no-files-found: error
           retention-days: 14
