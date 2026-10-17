@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.3.6
+# Pixel Zombie LAN — wave defense prototype v0.3.7
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -71,11 +71,15 @@ func _ready() -> void:
         push_warning("Pixel Zombie LAN: theme fallback font was not available at startup.")
     # Prefer detailed raster assets. Draw functions retain a visible fallback if a texture is missing.
     sprite_atlas = load("res://assets/sprite_atlas.png") as Texture2D
-    background_texture = load("res://assets/arena_bg.jpg") as Texture2D
     if sprite_atlas == null:
-        push_warning("Pixel Zombie LAN: sprite_atlas.png could not be loaded; using vector fallback characters.")
+        sprite_atlas = load("res://assets/sprite_atlas.svg") as Texture2D
+    background_texture = load("res://assets/arena_bg.jpg") as Texture2D
     if background_texture == null:
-        push_warning("Pixel Zombie LAN: arena_bg.jpg could not be loaded; using procedural fallback background.")
+        background_texture = load("res://assets/arena_bg.svg") as Texture2D
+    if sprite_atlas == null:
+        push_warning("Pixel Zombie LAN: neither PNG nor SVG sprite atlas loaded; simple fallback characters will be drawn.")
+    if background_texture == null:
+        push_warning("Pixel Zombie LAN: neither JPG nor SVG background loaded; procedural fallback background will be drawn.")
     screen_size = get_viewport_rect().size
     multiplayer.peer_connected.connect(_on_peer_connected)
     multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -115,16 +119,6 @@ func _arena_top() -> float:
 
 func _arena_bottom() -> float:
     return screen_size.y * ARENA_BOTTOM_RATIO
-
-func _move_offline_player(delta: float) -> void:
-    if not players.has(local_player_id):
-        _spawn_local_player()
-    var p: Dictionary = players[local_player_id]
-    p["x"] = clampf(float(p.get("x", screen_size.x * 0.5)) + joystick_vector.x * PLAYER_SPEED * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
-    p["y"] = clampf(float(p.get("y", screen_size.y * 0.68)) + joystick_vector.y * PLAYER_SPEED * delta, _arena_top() + 30.0, _arena_bottom() - 30.0)
-    if absf(joystick_vector.x) > 0.14:
-        p["face_x"] = -1.0 if joystick_vector.x < 0.0 else 1.0
-    players[local_player_id] = p
 
 func _request_fire_once() -> void:
     if is_host:
@@ -765,7 +759,7 @@ func _draw_home() -> void:
     _draw_ui_button("home_lan", Rect2(bx, card_y + 92, bw, 66), "MULTIPLAYER LAN", "HOST OR JOIN UP TO 4 PLAYERS", Color("#91bd79"), true)
     _draw_ui_button("home_solo", Rect2(bx, card_y + 171, bw, 60), "SOLO SURVIVAL", "PLAY OFFLINE ON THIS DEVICE", Color("#78a9d3"), false)
     _draw_ui_button("home_controls", Rect2(bx, card_y + 244, bw, 52), "HOW TO PLAY", "MOVE · FIRE · HEAL · SAVE", Color("#d4b979"), false)
-    draw_string(ui_font, Vector2(bx, card_y + card_h - 20), "BUILD 0.3.6  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#8f9d91"))
+    draw_string(ui_font, Vector2(bx, card_y + card_h - 20), "BUILD 0.3.7  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#8f9d91"))
 
 func _draw_help() -> void:
     _draw_apocalypse_backdrop(true)
@@ -995,7 +989,7 @@ func _draw_action_button(id: String, pos: Vector2, radius: float, label: String,
     if is_pressed:
         draw_circle(pos, radius + 7.0, Color(1.0, 0.48, 0.22, 0.20))
     draw_circle(pos + Vector2(2, 3), radius, Color(0.0, 0.0, 0.0, 0.35))
-    draw_circle(pos, color.lightened(0.22) if is_pressed else color)
+    draw_circle(pos, radius, color.lightened(0.22) if is_pressed else color)
     draw_arc(pos, radius, 0, TAU, 28, Color(1.0, 0.83, 0.59, 0.98) if is_pressed else Color(0.91, 0.94, 0.85, 0.86), 2.5 if is_pressed else 2.0)
     draw_string(ui_font, pos + Vector2(-radius + 3, 4), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 6, 11, Color.WHITE)
 
@@ -1010,13 +1004,15 @@ func _draw_atlas_character(pos: Vector2, kind: int, zombie: bool, scale_value: f
     if sprite_atlas == null:
         draw_rect(Rect2(pos + Vector2(-8, -9), Vector2(16, 18)), _player_color(kind + 1))
         return
-    # The detailed PNG atlas has four 64x80 character cells per character row.
+    # PNG atlas: 64x80 cells (320x192). SVG fallback: 80x80 cells (320x240).
+    var svg_layout := sprite_atlas.get_height() >= 240
+    var cell_width := 80 if svg_layout else 64
     var source_y := 80 if zombie else 0
-    var source_x := clampi(kind, 0, 3) * 64
+    var source_x := clampi(kind, 0, 3) * cell_width
     var size := Vector2(58.0, 70.0) * scale_value
     if zombie and kind == 2:
         size = Vector2(64.0, 70.0) * scale_value
-    var source_rect := Rect2(source_x, source_y, 64, 80)
+    var source_rect := Rect2(source_x, source_y, cell_width, 80)
     if facing_left:
         draw_set_transform(pos, 0.0, Vector2(-1.0, 1.0))
         draw_texture_rect_region(sprite_atlas, Rect2(-size.x * 0.5, -size.y * 0.5, size.x, size.y), source_rect, Color.WHITE, false, true)
@@ -1073,14 +1069,6 @@ func _draw_combat_effects() -> void:
                 effect_size = Vector2(30, 30)
             var fx_alpha := minf(1.0, alpha * 1.25)
             draw_texture_rect_region(sprite_atlas, Rect2(start_pos - effect_size * 0.5, effect_size), Rect2(source_x, 160, 32, 32), Color(1, 1, 1, fx_alpha), false, true)
-
-func _draw_building(pos: Vector2, size: Vector2, body_color: Color) -> void:
-    draw_rect(Rect2(pos + Vector2(5, 6), size), Color("#111713"))
-    draw_rect(Rect2(pos, size), body_color)
-    draw_rect(Rect2(pos + Vector2(8, 8), Vector2(maxf(size.x - 16, 2), 5)), Color("#59655a"))
-    draw_rect(Rect2(pos + Vector2(14, 22), Vector2(18, 19)), Color("#202c29"))
-    draw_rect(Rect2(pos + Vector2(size.x - 34, 22), Vector2(18, 19)), Color("#202c29"))
-    draw_rect(Rect2(pos + Vector2(size.x * 0.5 - 8, size.y - 22), Vector2(16, 22)), Color("#242a24"))
 
 func _player_label(id: int) -> String:
     var ids: Array = players.keys()

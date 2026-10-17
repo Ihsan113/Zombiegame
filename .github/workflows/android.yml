@@ -79,11 +79,56 @@ jobs:
           grep -Fx 'screen/orientation=0' export_presets.cfg
           ! grep -Eq 'screen_set_orientation|window/handheld/orientation=1|screen/orientation=1' scripts/game.gd project.godot export_presets.cfg
 
+      - name: Verify project resources and landscape settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          root = Path('.')
+          required = [Path('project.godot'), Path('Main.tscn'), Path('scripts/game.gd'), Path('export_presets.cfg'), Path('assets/game_icon.png')]
+          missing = [str(path) for path in required if not (root / path).is_file()]
+          if missing:
+              raise SystemExit('Missing required project files: ' + ', '.join(missing))
+          project = (root / 'project.godot').read_text()
+          preset = (root / 'export_presets.cfg').read_text()
+          if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
+              raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
+          sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
+          refs = set()
+          for source in sources:
+              refs.update(re.findall(r"res://([^\"\'\s)]+)", source.read_text()))
+          missing_refs = sorted(ref for ref in refs if not (root / ref).exists())
+          if missing_refs:
+              raise SystemExit('Broken res:// references: ' + ', '.join(missing_refs))
+          print(f'Validated {len(refs)} resource references and landscape settings.')
+          PYCODE
+
       - name: Import and validate project scripts
         shell: bash
         run: |
           set -euo pipefail
-          ./godot --headless --editor --path . --quit
+          import_log="$(mktemp)"
+          if ! ./godot --headless --editor --path . --quit >"$import_log" 2>&1; then
+            cat "$import_log"
+            exit 1
+          fi
+          cat "$import_log"
+          if grep -Eq 'SCRIPT ERROR:|Parse Error:|Failed to load script' "$import_log"; then
+            echo "::error::Godot reported a script parse/load error during import."
+            exit 1
+          fi
+          smoke_log="$(mktemp)"
+          if ! ./godot --headless --path . --quit-after 3 >"$smoke_log" 2>&1; then
+            cat "$smoke_log"
+            exit 1
+          fi
+          cat "$smoke_log"
+          if grep -Eq 'SCRIPT ERROR:|Parse Error:|Failed to load script' "$smoke_log"; then
+            echo "::error::Godot reported a script parse/load error while starting Main.tscn."
+            exit 1
+          fi
 
       - name: Export debug APK
         shell: bash
@@ -96,7 +141,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.3.6-APK
+          name: PixelZombieLAN-v0.3.7-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -105,15 +150,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.3.6-source.zip \
+          zip -r build/PixelZombieLAN-v0.3.7-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.3.6-source.zip
+          test -s build/PixelZombieLAN-v0.3.7-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.3.6-source
-          path: build/PixelZombieLAN-v0.3.6-source.zip
+          name: PixelZombieLAN-v0.3.7-source
+          path: build/PixelZombieLAN-v0.3.7-source.zip
           if-no-files-found: error
           retention-days: 14

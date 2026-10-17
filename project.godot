@@ -2,6 +2,7 @@ config_version=5
 
 [application]
 config/name="Pixel Zombie LAN"
+config/icon="res://assets/game_icon.png"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/description="Four-player offline hotspot zombie survival prototype"

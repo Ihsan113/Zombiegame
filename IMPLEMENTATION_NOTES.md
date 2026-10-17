@@ -1,10 +1,21 @@
-# Implementation notes — v0.3.6
+# Implementation notes — v0.3.7
 
-- Main entry point: `Main.tscn` → `scripts/game.gd`.
-- **Landscape must use enum value 0**: `project.godot` contains `window/handheld/orientation=0` and `export_presets.cfg` contains `screen/orientation=0`. Value 1 is portrait and was the root cause of the previous build reverting to vertical orientation.
-- Runtime `DisplayServer.screen_set_orientation` is intentionally not used.
-- `_draw()` paints an opaque background underlay before the home/world UI. The background loads from `assets/arena_bg.jpg`; if missing, the draw routines render a solid procedural fallback.
-- `assets/arena_bg.jpg` is 1200×540. `assets/sprite_atlas.png` is a 320×192 transparent atlas with four 64×80 survivor cells, four 64×80 zombie cells, and 32×32 combat-effect cells.
-- FIRE supports touch-and-hold repeat firing at 0.30-second intervals and release-to-stop behavior.
-- LAN uses ENet/UDP port 24567. Four-device hotspot connectivity still requires physical testing.
-- GitHub Actions validates orientation, imports project resources, exports a debug APK and uploads a source ZIP. CI success does not replace testing on the target phone.
+## Startup failure diagnosis
+The blank dark screen was traced to the v0.3.6 GitHub Actions logs. Godot reported a GDScript parse error in `_draw_action_button()`: `draw_circle(pos, color)` omitted the required radius argument. Because `scripts/game.gd` did not compile, `Main.tscn` could not execute the script's `_draw()` callback, and the app stayed on the engine's default clear color. The invocation is now `draw_circle(pos, radius, color)`.
+
+## Entry point and rendering
+- Main scene: `Main.tscn`.
+- Script: `scripts/game.gd`.
+- `_ready()` loads art in this order: `sprite_atlas.png` then `sprite_atlas.svg`; `arena_bg.jpg` then `arena_bg.svg`.
+- The PNG atlas is 320×192: four 64×80 survivor cells, four 64×80 zombie cells, and 32×32 effect cells. The SVG fallback is 320×240 with 80×80 character cells; the renderer detects which layout is loaded.
+- `assets/game_icon.png` is used by Godot project settings and removes the earlier no-icon export warning.
+
+## Controls and multiplayer
+- Landscape orientation is set in both `project.godot` and `export_presets.cfg`; both use orientation enum value `0`.
+- FIRE supports tap-to-fire plus hold-to-repeat at 0.30-second intervals, then release-to-stop.
+- LAN uses ENet/UDP port 24567 and targets four phones on the same local hotspot. Physical device networking has not been verified in this workspace.
+
+## Build safeguards
+The GitHub Actions workflow now validates required files, checks static `res://` resource paths and landscape settings, scans Godot editor-import output for script parse/load errors, and launches `Main.tscn` headlessly before APK export. This prevents a build from being marked successful solely because an APK file was exported despite a failed script load.
+
+The script fix and resource references were checked statically. This workspace does not contain a local Godot executable and cannot download one, so a fresh Godot export and physical Android test must still run after pushing this ZIP.
