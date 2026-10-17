@@ -1,18 +1,15 @@
 # Changelog
 
-## 0.2.0 — LAN foundation pass
-- Switched the project to landscape orientation.
-- Updated the CI build target to the official Godot 4.7.2 stable release.
-- Reworked multiplayer movement so clients send input vectors and the host computes authoritative positions.
-- Changed state sync to ordered-unreliable snapshots at approximately 10 Hz and client input at approximately 20 Hz.
-- Moved firing, player damage, healing and medkit consumption to the host.
-- Added cooldowns to firing and healing.
-- Made host LAN-IP information remain visible in the HUD while player join/disconnect messages change.
-- Added IPv4 input validation and improved the join prompt.
-- Added client position interpolation, landscape UI refinements, simple building placeholders and basic save-data validation.
-- Added `README.md`, implementation notes, versioning and CI artifact instructions.
+## 0.3.5 — Android startup and landscape fix
+- Fixed conflicting portrait/landscape configuration: the project and Android export preset both request landscape before the first frame.
+- Removed runtime screen rotation from `_ready()` to avoid forcing rotation while Android/Godot is initializing the viewport.
+- Added an opaque canvas safety underlay and warnings for missing background/sprite assets so a missing texture does not leave an empty black canvas.
+- Included the latest hold-to-fire control and detailed 64×80 PNG sprite atlas handling.
+- Replaced the tiny 400×180 background with a 1200×540 generated apocalyptic street backdrop.
+- Android version code/name set to 8 / 0.3.5.
 
-## Known limitations
-- Not compiled or tested in Godot in the current environment.
-- Artwork and collision are placeholders; no tilemap, loot system, crafting, weapon inventory, animations, sound or host migration yet.
-- Hotspot peer-to-peer connectivity varies by Android device and must be tested on real phones.
+## 0.3.4 — detailed sprites, arena art and hold-to-fire
+- Uses the detailed transparent PNG sprite atlas for four survivors, four zombie types and combat effects.
+- Adds a ruined-city skyline, sunset haze, wrecked vehicles, road texture, barricades, fence and debris.
+- Holding FIRE automatically shoots at about 3.3 shots per second; releasing stops firing.
+- Bullets use a moving projectile with a very short trail instead of a continuous laser beam.

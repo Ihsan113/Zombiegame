@@ -1,17 +1,9 @@
-# Implementation notes — v0.2.0
+# Implementation notes — v0.3.5
 
-## Networking model
-- The host listens on UDP port `24567` with capacity for three remote peers (four players total including host).
-- Clients send normalized input vectors; the host owns position, zombie AI, HP, shots, healing and medkit consumption.
-- Host world snapshots are sent around 10 times per second. Client joystick input is sent around 20 times per second.
-- This is a LAN prototype, not a hardened public multiplayer service. Validate all requests and add rate limits/timeout handling before wider release.
-
-## Save model
-- The host writes `version`, `seed`, `time` and `zombies` to `user://world_save.json`.
-- Loading clamps saved zombie positions and HP to expected bounds and creates a fresh player session.
-- Save schema migration and corruption recovery beyond basic JSON checks are future work.
-
-## Build
-- Workflow uses the latest stable Godot 4.7.2 release as listed in the official Godot archive as of 2026-10-17.
-- Workflow stores export templates in `~/.local/share/godot/export_templates/4.7.2.stable`, configures Java/Android SDK paths, imports the project, exports an Android debug APK, and uploads it.
-- The workflow has not been executed in this environment. Its result is the required validation step before installing the APK.
+- Main entry point: `Main.tscn` → `scripts/game.gd`.
+- Landscape is set before launch in `project.godot` (`window/handheld/orientation=1`) and Android export preset (`screen/orientation=1`). Runtime `DisplayServer.screen_set_orientation` was removed to avoid a startup rotation race/stale viewport.
+- `_draw()` paints an opaque background safety layer first. `_draw_apocalypse_backdrop()` uses `assets/arena_bg.jpg` and falls back to a procedural colored backdrop if loading fails.
+- `assets/arena_bg.jpg` is 1200×540. `assets/sprite_atlas.png` is a transparent 320×192 atlas: four 64×80 survivor cells, four 64×80 zombie cells, and 32×32 combat effects.
+- FIRE supports touch-and-hold repeat firing at 0.30-second intervals and release-to-stop behavior.
+- Local multiplayer uses ENet/UDP port 24567. Host-authoritative game state is intended for up to four local Wi-Fi phones; physical hotspot multiplayer is not covered by CI.
+- Workflow exports a debug APK. CI success validates import/export but cannot establish that the app renders correctly on every phone; test the output package on the target device.
