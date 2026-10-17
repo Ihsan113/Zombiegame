@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.3.7
+# Pixel Zombie LAN — wave defense prototype v0.3.8
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -12,8 +12,8 @@ const WAVE_ZOMBIE_COUNT := 25
 const SHOT_RANGE_MAX := 560.0
 const SHOT_LANE_TOLERANCE := 25.0
 const FIRE_REPEAT_INTERVAL := 0.30
-const ARENA_TOP_RATIO := 0.50
-const ARENA_BOTTOM_RATIO := 0.88
+const ARENA_TOP_RATIO := 0.565
+const ARENA_BOTTOM_RATIO := 0.92
 const SNAPSHOT_INTERVAL := 0.10 # 10 world snapshots/second
 const INPUT_INTERVAL := 0.05    # 20 input updates/second
 const SAVE_PATH := "user://world_save.json"
@@ -119,6 +119,12 @@ func _arena_top() -> float:
 
 func _arena_bottom() -> float:
     return screen_size.y * ARENA_BOTTOM_RATIO
+
+func _control_scale() -> float:
+    return clampf(screen_size.y / 540.0, 0.88, 1.12)
+
+func _joystick_radius() -> float:
+    return 48.0 * _control_scale()
 
 func _request_fire_once() -> void:
     if is_host:
@@ -727,62 +733,90 @@ func _draw_apocalypse_backdrop(darkened: bool = false) -> void:
     if background_texture != null:
         draw_texture_rect(background_texture, Rect2(0, 0, w, h), false, Color.WHITE)
     else:
-        draw_rect(Rect2(0, 0, w, h), Color("#243841"))
-        draw_rect(Rect2(0, h * 0.52, w, h * 0.48), Color("#29312e"))
+        draw_rect(Rect2(0, 0, w, h), Color("#17222b"))
+        draw_rect(Rect2(0, h * 0.54, w, h * 0.46), Color("#202322"))
+    # A cool night grade and subtle blood-red edge tint make every menu feel cohesive.
     if darkened:
-        draw_rect(Rect2(0, 0, w, h), Color(0.015, 0.025, 0.035, 0.50))
+        draw_rect(Rect2(0, 0, w, h), Color(0.012, 0.022, 0.034, 0.48))
+        draw_rect(Rect2(0, 0, w * 0.16, h), Color(0.16, 0.012, 0.025, 0.12))
+        draw_rect(Rect2(w * 0.84, 0, w * 0.16, h), Color(0.16, 0.012, 0.025, 0.12))
+    draw_rect(Rect2(0, 0, w, 3), Color("#a83d43"))
+    draw_rect(Rect2(0, h - 3, w, 3), Color(0.01, 0.015, 0.02, 0.78))
 
 func _draw_home() -> void:
-    _draw_apocalypse_backdrop(false)
+    _draw_apocalypse_backdrop(true)
     var w := screen_size.x
     var h := screen_size.y
-    draw_rect(Rect2(24, 28, 7, 76), Color("#d8bd75"))
-    draw_string(ui_font, Vector2(45, 49), "DANZKU ORIGINAL  /  SURVIVAL SERIES", HORIZONTAL_ALIGNMENT_LEFT, w * 0.48, 12, Color("#b8c4bb"))
-    _draw_title_text(Vector2(43, h * 0.29), "PIXEL ZOMBIE", 39, Color("#f2ecd9"))
-    _draw_title_text(Vector2(43, h * 0.40), "SURVIVAL", 47, Color("#cfe7b1"))
-    draw_string(ui_font, Vector2(47, h * 0.46), "THE CITY FELL. YOUR SQUAD DIDN'T.", HORIZONTAL_ALIGNMENT_LEFT, w * 0.48, 13, Color("#e0c68c"))
-    draw_string(ui_font, Vector2(47, h * 0.51), "LOOT  ·  BUILD  ·  SURVIVE TOGETHER", HORIZONTAL_ALIGNMENT_LEFT, w * 0.47, 12, Color("#c3d0ca"))
-    var party_y := h * 0.76
-    _draw_survivor(Vector2(w * 0.115, party_y), Color("#75d8a0"), 1.0)
-    _draw_survivor(Vector2(w * 0.185, party_y + 7), Color("#78b7ff"), 0.90)
-    _draw_survivor(Vector2(w * 0.255, party_y + 2), Color("#ffc66d"), 1.05)
-    _draw_survivor(Vector2(w * 0.325, party_y + 9), Color("#e994e8"), 0.90)
-    draw_string(ui_font, Vector2(47, h - 25), "4 SURVIVORS  •  LOCAL WI-FI CO-OP  •  NO INTERNET REQUIRED", HORIZONTAL_ALIGNMENT_LEFT, w * 0.50, 11, Color("#b7c2b8"))
+    var left_w := w * 0.57
 
-    var card_w := minf(400.0, w * 0.42)
-    var card_x := w - card_w - 34.0
-    var card_y := 56.0
-    var card_h := h - 96.0
-    _draw_panel(Rect2(card_x, card_y, card_w, card_h), "MAIN MENU", "CHOOSE YOUR NEXT MOVE")
-    var bx := card_x + 22.0
-    var bw := card_w - 44.0
-    _draw_ui_button("home_lan", Rect2(bx, card_y + 92, bw, 66), "MULTIPLAYER LAN", "HOST OR JOIN UP TO 4 PLAYERS", Color("#91bd79"), true)
-    _draw_ui_button("home_solo", Rect2(bx, card_y + 171, bw, 60), "SOLO SURVIVAL", "PLAY OFFLINE ON THIS DEVICE", Color("#78a9d3"), false)
-    _draw_ui_button("home_controls", Rect2(bx, card_y + 244, bw, 52), "HOW TO PLAY", "MOVE · FIRE · HEAL · SAVE", Color("#d4b979"), false)
-    draw_string(ui_font, Vector2(bx, card_y + card_h - 20), "BUILD 0.3.7  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#8f9d91"))
+    # Mission dossier header and title hierarchy.
+    draw_rect(Rect2(28, 26, 6, 66), Color("#c74449"))
+    draw_string(ui_font, Vector2(45, 43), "DANZKU ORIGINAL  /  OUTBREAK DIVISION", HORIZONTAL_ALIGNMENT_LEFT, left_w - 70, 11, Color("#d0c4b7"))
+    draw_string(ui_font, Vector2(45, 60), "CASE FILE 07     •     QUARANTINE ACTIVE", HORIZONTAL_ALIGNMENT_LEFT, left_w - 70, 9, Color("#b86b6b"))
+
+    _draw_title_text(Vector2(42, h * 0.31), "PIXEL", 36, Color("#f2eee4"))
+    _draw_title_text(Vector2(42, h * 0.415), "ZOMBIE", 51, Color("#cf4b4e"))
+    draw_string(ui_font, Vector2(46, h * 0.475), "SURVIVAL PROTOCOL  //  NIGHT SHIFT", HORIZONTAL_ALIGNMENT_LEFT, left_w - 80, 13, Color("#e1c58e"))
+    draw_rect(Rect2(46, h * 0.50, minf(290.0, left_w - 90.0), 2), Color("#9c4547"))
+    draw_string(ui_font, Vector2(46, h * 0.545), "THE CITY FELL. HOLD THE LINE.", HORIZONTAL_ALIGNMENT_LEFT, left_w - 80, 13, Color("#e4e1d7"))
+    draw_string(ui_font, Vector2(46, h * 0.58), "SCAVENGE  •  RELOAD  •  SURVIVE TOGETHER", HORIZONTAL_ALIGNMENT_LEFT, left_w - 80, 10, Color("#aeb9b1"))
+
+    # Four survivors are staged together with restrained team-color ground rings.
+    var party_y := h * 0.765
+    var party_x := [w * 0.105, w * 0.19, w * 0.275, w * 0.36]
+    var party_offsets := [0.0, 5.0, -2.0, 4.0]
+    var party_scales := [1.0, 0.91, 1.02, 0.91]
+    for i in range(4):
+        var center := Vector2(float(party_x[i]), party_y + float(party_offsets[i]))
+        draw_arc(center + Vector2(0, 27), 20.0 * float(party_scales[i]), 0, TAU, 32, _player_color(i + 1), 2.0)
+        draw_circle(center + Vector2(0, 27), 16.0 * float(party_scales[i]), Color(0.015, 0.02, 0.02, 0.58))
+        _draw_survivor(center, _player_color(i + 1), float(party_scales[i]))
+    draw_rect(Rect2(42, h - 37, left_w - 72, 22), Color(0.015, 0.025, 0.03, 0.75))
+    draw_rect(Rect2(42, h - 37, 3, 22), Color("#a83d43"))
+    draw_string(ui_font, Vector2(54, h - 22), "LOCAL CO-OP  /  4 SURVIVORS  /  NO INTERNET", HORIZONTAL_ALIGNMENT_LEFT, left_w - 100, 10, Color("#c8d0c8"))
+
+    # A compact, balanced safehouse panel with uniform interaction targets.
+    var card_w := minf(392.0, w * 0.405)
+    var card_x := w - card_w - 28.0
+    var card_y := 35.0
+    var card_h := h - 70.0
+    _draw_panel(Rect2(card_x, card_y, card_w, card_h), "SAFEHOUSE TERMINAL", "PROTOCOL 04  /  STAY ALIVE")
+    var bx := card_x + 20.0
+    var bw := card_w - 40.0
+    _draw_ui_button("home_lan", Rect2(bx, card_y + 83.0, bw, 66.0), "MULTIPLAYER LAN", "HOST OR JOIN UP TO FOUR SURVIVORS", Color("#d64e51"), true)
+    _draw_ui_button("home_solo", Rect2(bx, card_y + 163.0, bw, 60.0), "SOLO SURVIVAL", "DEFEND THIS SAFEHOUSE OFFLINE", Color("#c18a55"), false)
+    _draw_ui_button("home_controls", Rect2(bx, card_y + 236.0, bw, 54.0), "FIELD MANUAL", "MOVE  /  FIRE  /  HEAL  /  SAVE", Color("#9cae91"), false)
+
+    var signal_rect := Rect2(bx, card_y + 316.0, bw, 42.0)
+    draw_rect(signal_rect, Color(0.12, 0.045, 0.05, 0.88))
+    draw_rect(Rect2(signal_rect.position, Vector2(3, signal_rect.size.y)), Color("#9e4146"))
+    draw_circle(Vector2(signal_rect.position.x + 17, signal_rect.position.y + 21), 4.0, Color("#dc685b"))
+    draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "LOCAL SIGNAL ONLY  /  UDP %d" % PORT, HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
+    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.3.8  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
 
 func _draw_help() -> void:
     _draw_apocalypse_backdrop(true)
     var w := screen_size.x
     var h := screen_size.y
     _draw_ui_button("help_back", Rect2(30, 22, 110, 36), "‹  BACK", "", Color("#86958a"), false)
-    _draw_title_text(Vector2(40, 88), "FIELD GUIDE", 31, Color("#f0ead8"))
+    _draw_title_text(Vector2(40, 88), "FIELD MANUAL", 31, Color("#f0ead8"))
     draw_string(ui_font, Vector2(42, 111), "THE BASICS YOU NEED TO MAKE IT THROUGH THE NIGHT", HORIZONTAL_ALIGNMENT_LEFT, w - 84, 11, Color("#b4c7b6"))
     var panel := Rect2(34, 135, w - 68, h - 174)
-    _draw_panel(panel, "SURVIVAL CONTROLS", "SIMPLE TO LEARN. HARD TO SURVIVE.")
+    _draw_panel(panel, "SURVIVAL CONTROLS", "KEEP YOUR CREW ALIVE AFTER DARK.")
     var gap := 14.0
     var col_w := (panel.size.x - 52.0 - gap * 2.0) / 3.0
     var card_y := panel.position.y + 82.0
     var card_h := 150.0
     var cards := [
-        {"title": "01  MOVE", "body": "Use the left\nvirtual analog to\nwalk around the city.", "color": Color("#91bd79")},
-        {"title": "02  FIGHT", "body": "Hold FIRE for bursts.\nShots travel straight left\nor right based on facing.", "color": Color("#c77b6d")},
-        {"title": "03  HEAL", "body": "HEAL consumes one\nmedkit and restores\nhealth when needed.", "color": Color("#78a9d3")}
+        {"title": "01  MOVE", "body": "Use the left\nvirtual analog to\nwalk around the city.", "color": Color("#a9b77f")},
+        {"title": "02  FIGHT", "body": "Hold FIRE for bursts.\nShots travel straight left\nor right based on facing.", "color": Color("#cc5151")},
+        {"title": "03  HEAL", "body": "HEAL consumes one\nmedkit and restores\nhealth when needed.", "color": Color("#c19a68")}
     ]
     for i in range(cards.size()):
         var cx := panel.position.x + 20.0 + i * (col_w + gap)
         var card_rect := Rect2(cx, card_y, col_w, card_h)
-        draw_rect(card_rect, Color(0.05, 0.09, 0.08, 0.96))
+        draw_rect(card_rect, Color(0.035, 0.045, 0.048, 0.97))
+        draw_rect(card_rect, Color("#3e4543"), false, 1.0)
         draw_rect(Rect2(cx, card_y, col_w, 4), cards[i].color)
         draw_string(ui_font, Vector2(cx + 15, card_y + 34), cards[i].title, HORIZONTAL_ALIGNMENT_LEFT, col_w - 30, 15, Color("#f0eedf"))
         draw_string(ui_font, Vector2(cx + 15, card_y + 65), cards[i].body, HORIZONTAL_ALIGNMENT_LEFT, col_w - 26, 12, Color("#bac8bc"))
@@ -796,8 +830,8 @@ func _draw_lobby() -> void:
     var w := screen_size.x
     var h := screen_size.y
     _draw_ui_button("lobby_back", Rect2(28, 20, 104, 36), "‹  HOME", "", Color("#86958a"), false)
-    _draw_title_text(Vector2(34, 88), "CO-OP LOBBY", 29, Color("#f0ead8"))
-    draw_string(ui_font, Vector2(36, 109), "FOUR SURVIVORS. ONE WORLD. ZERO INTERNET.", HORIZONTAL_ALIGNMENT_LEFT, w * 0.54, 11, Color("#b4c7b6"))
+    _draw_title_text(Vector2(34, 88), "SAFEHOUSE LOBBY", 29, Color("#f0ead8"))
+    draw_string(ui_font, Vector2(36, 109), "FOUR SURVIVORS. ONE LAST STAND. NO INTERNET.", HORIZONTAL_ALIGNMENT_LEFT, w * 0.54, 11, Color("#b4c7b6"))
 
     var left_x := 30.0
     var left_w := w * 0.56
@@ -835,21 +869,21 @@ func _draw_lobby() -> void:
     var rx := right_x + 18.0
     var rbw := right_w - 36.0
     if not is_host and not _is_connected_client():
-        _draw_ui_button("lobby_host", Rect2(rx, panel_y + 82, rbw, 60), "CREATE WORLD", "THIS PHONE BECOMES THE HOST", Color("#91bd79"), true)
-        _draw_ui_button("lobby_join", Rect2(rx, panel_y + 154, rbw, 60), "JOIN WORLD", "ENTER THE HOST'S WI-FI IP", Color("#78a9d3"), false)
+        _draw_ui_button("lobby_host", Rect2(rx, panel_y + 82, rbw, 60), "CREATE WORLD", "THIS PHONE BECOMES THE HOST", Color("#cc4c50"), true)
+        _draw_ui_button("lobby_join", Rect2(rx, panel_y + 154, rbw, 60), "JOIN WORLD", "ENTER THE HOST'S WI-FI IP", Color("#c18a55"), false)
         draw_string(ui_font, Vector2(rx, panel_y + 247), "No online account needed.\nOnly the host needs to create a world.", HORIZONTAL_ALIGNMENT_LEFT, rbw, 11, Color("#a8b7ac"))
     elif is_host:
         draw_string(ui_font, Vector2(rx, panel_y + 79), "HOST ADDRESS", HORIZONTAL_ALIGNMENT_LEFT, rbw, 10, Color("#a4b8a8"))
         draw_string(ui_font, Vector2(rx, panel_y + 109), host_lan_ip, HORIZONTAL_ALIGNMENT_LEFT, rbw, 21, Color("#f1d38b"))
         draw_string(ui_font, Vector2(rx, panel_y + 130), "Tell friends to enter this IP.", HORIZONTAL_ALIGNMENT_LEFT, rbw, 10, Color("#a8b7ac"))
-        _draw_ui_button("lobby_copy", Rect2(rx, panel_y + 146, rbw, 43), "COPY HOST IP", "", Color("#d4b979"), false)
-        _draw_ui_button("lobby_start", Rect2(rx, panel_y + 198, rbw, 54), "START SURVIVAL", "BEGIN THE ZOMBIE WAVE", Color("#91bd79"), true)
-        _draw_ui_button("lobby_save", Rect2(rx, panel_y + 261, rbw, 42), "SAVE WORLD", "", Color("#78a9d3"), false)
+        _draw_ui_button("lobby_copy", Rect2(rx, panel_y + 146, rbw, 43), "COPY HOST IP", "", Color("#c18a55"), false)
+        _draw_ui_button("lobby_start", Rect2(rx, panel_y + 198, rbw, 54), "START SURVIVAL", "BEGIN THE ZOMBIE WAVE", Color("#cc4c50"), true)
+        _draw_ui_button("lobby_save", Rect2(rx, panel_y + 261, rbw, 42), "SAVE WORLD", "", Color("#c18a55"), false)
     else:
         draw_string(ui_font, Vector2(rx, panel_y + 84), "CONNECTED", HORIZONTAL_ALIGNMENT_LEFT, rbw, 17, Color("#91bd79"))
         draw_string(ui_font, Vector2(rx, panel_y + 111), "Host: %s" % host_ip, HORIZONTAL_ALIGNMENT_LEFT, rbw, 11, Color("#c6d3c8"))
         draw_string(ui_font, Vector2(rx, panel_y + 145), "Waiting for the host to\nstart the survival world...", HORIZONTAL_ALIGNMENT_LEFT, rbw, 12, Color("#a8b7ac"))
-    _draw_ui_button("lobby_leave", Rect2(rx, panel_y + panel_h - 55, rbw, 38), "LEAVE LOBBY", "", Color("#b47770"), false)
+    _draw_ui_button("lobby_leave", Rect2(rx, panel_y + panel_h - 55, rbw, 38), "LEAVE LOBBY", "", Color("#b94a50"), false)
     draw_string(ui_font, Vector2(36, h - 12), ui_status, HORIZONTAL_ALIGNMENT_LEFT, w - 72, 10, Color("#e0d7bf"))
 
 func _draw_game_world() -> void:
@@ -858,25 +892,33 @@ func _draw_game_world() -> void:
     if background_texture != null:
         draw_texture_rect(background_texture, Rect2(0, 0, w, h), false, Color.WHITE)
     else:
-        draw_rect(Rect2(0, 0, w, h), Color("#26342d"))
+        draw_rect(Rect2(0, 0, w, h), Color("#1b2930"))
 
-    # The skyline above the lane is decorative; all entities stay in the lower arena.
+    # Night-grade the scene but keep sprite and projectile highlights readable.
+    draw_rect(Rect2(0, 0, w, h), Color(0.012, 0.024, 0.038, 0.19))
+    draw_rect(Rect2(0, h * 0.42, w, h * 0.12), Color(0.08, 0.018, 0.023, 0.10))
+
     var lane_top := _arena_top()
     var lane_bottom := _arena_bottom()
-    draw_rect(Rect2(0, lane_top, w, lane_bottom - lane_top), Color(0.015, 0.025, 0.025, 0.20))
-    draw_rect(Rect2(0, lane_top, w, 3), Color(0.67, 0.73, 0.56, 0.58))
-    draw_rect(Rect2(0, lane_bottom - 3, w, 3), Color(0.07, 0.09, 0.08, 0.62))
+    draw_rect(Rect2(0, lane_top, w, lane_bottom - lane_top), Color(0.012, 0.018, 0.023, 0.18))
+    draw_rect(Rect2(0, lane_top, w, 2), Color(0.78, 0.43, 0.30, 0.56))
+    draw_rect(Rect2(0, lane_bottom - 2, w, 2), Color(0.025, 0.03, 0.03, 0.72))
     for x in range(22, int(w), 82):
-        draw_rect(Rect2(x, lane_top + (lane_bottom - lane_top) * 0.53, 35, 4), Color(0.78, 0.70, 0.40, 0.74))
+        draw_rect(Rect2(x, lane_top + (lane_bottom - lane_top) * 0.51, 35, 3), Color(0.78, 0.67, 0.43, 0.70))
 
-    # Low cover is placed close to lane edges and does not hide characters.
-    var cover_y := lane_bottom - 25.0
-    draw_rect(Rect2(w * 0.11, cover_y, 43, 15), Color("#3a4540"))
-    draw_rect(Rect2(w * 0.11, cover_y, 43, 3), Color("#68766a"))
-    draw_rect(Rect2(w * 0.78, lane_top + 18.0, 47, 16), Color("#3b4540"))
-    draw_rect(Rect2(w * 0.78, lane_top + 18.0, 47, 3), Color("#667469"))
+    # Grounded, low cover props at the lane edges; diagonal paint reads as hazard striping.
+    var cover_y := lane_bottom - 22.0
+    for cover_x in [w * 0.105, w * 0.79]:
+        var cover_w := 45.0
+        draw_rect(Rect2(cover_x, cover_y + 3.0, cover_w, 13), Color(0.015, 0.02, 0.02, 0.52))
+        draw_rect(Rect2(cover_x, cover_y, cover_w, 13), Color("#424a46"))
+        draw_rect(Rect2(cover_x, cover_y, cover_w, 3), Color("#899087"))
+        for stripe in range(3):
+            var sx := cover_x + 7.0 + stripe * 14.0
+            draw_line(Vector2(sx, cover_y + 4.0), Vector2(sx + 5.0, cover_y + 11.0), Color("#b59b62"), 2.0, true)
+        draw_rect(Rect2(cover_x, cover_y, cover_w, 13), Color("#171f20"), false, 1.0)
 
-    # Y-sorting makes a character lower on screen draw in front of characters behind.
+    # Y-sort survivor and enemies so overlaps look grounded and the art stays legible.
     var render_entries: Array[Dictionary] = []
     for id_variant in players.keys():
         var pid := int(id_variant)
@@ -891,17 +933,25 @@ func _draw_game_world() -> void:
             var id := int(entry.id)
             var p: Dictionary = players[id]
             pos = Vector2(float(p.get("x", w * 0.5)), float(p.get("y", h * 0.68)))
-            draw_circle(pos + Vector2(0, 27), 8.0, Color(0.01, 0.02, 0.01, 0.25))
+            draw_circle(pos + Vector2(0, 27), 10.0, Color(0.005, 0.01, 0.012, 0.34))
+            var team_color := _player_color(id)
+            draw_arc(pos + Vector2(0, 28), 13.0, 0, TAU, 28, Color(team_color.r, team_color.g, team_color.b, 0.48), 1.5)
             _draw_atlas_character(pos, _player_sprite_index(id), false, 1.0, float(p.get("face_x", 1.0)) < 0.0)
-            draw_string(ui_font, pos + Vector2(-18, -41), _player_label(id), HORIZONTAL_ALIGNMENT_CENTER, 36, 10, Color("#f4f0dc"))
+            var label := _player_label(id)
+            var label_pos := pos + Vector2(-22, -43)
+            draw_rect(Rect2(label_pos.x - 1, label_pos.y - 12, 44, 16), Color(0.01, 0.015, 0.02, 0.74))
+            draw_string(ui_font, label_pos, label, HORIZONTAL_ALIGNMENT_CENTER, 42, 10, _player_color(id))
             var player_hp := clampf(float(p.get("hp", 0.0)) / 100.0, 0.0, 1.0)
-            var player_bar := Rect2(pos + Vector2(-15, 31), Vector2(30, 4))
-            draw_rect(player_bar, Color("#402725"))
-            draw_rect(Rect2(player_bar.position, Vector2(30.0 * player_hp, 4)), Color("#68db78") if player_hp > 0.35 else Color("#e45c4c"))
+            var player_bar := Rect2(pos + Vector2(-17, 32), Vector2(34, 5))
+            draw_rect(Rect2(player_bar.position - Vector2(1, 1), player_bar.size + Vector2(2, 2)), Color("#141819"))
+            draw_rect(player_bar, Color("#472628"))
+            var player_hp_color := Color("#b94346") if player_hp <= 0.30 else (Color("#d39a50") if player_hp <= 0.58 else Color("#86b76b"))
+            draw_rect(Rect2(player_bar.position, Vector2(player_bar.size.x * player_hp, player_bar.size.y)), player_hp_color)
         else:
             var z: Dictionary = zombies[int(entry.index)]
             pos = Vector2(float(z.get("x", 0.0)), float(z.get("y", h * 0.68)))
-            draw_circle(pos + Vector2(0, 27), 8.0 if int(z.get("kind", 0)) != 2 else 10.0, Color(0.01, 0.02, 0.01, 0.25))
+            var heavy := int(z.get("kind", 0)) == 2
+            draw_circle(pos + Vector2(0, 28), 11.0 if heavy else 8.5, Color(0.005, 0.008, 0.01, 0.34))
             _draw_atlas_character(pos, clampi(int(z.get("kind", 0)), 0, 3), true, 1.0, float(z.get("face_x", -1.0)) < 0.0)
             _draw_zombie_health(z, pos)
     _draw_combat_effects()
@@ -911,87 +961,132 @@ func _draw_game_hud() -> void:
     var w := screen_size.x
     var h := screen_size.y
     var local_p: Dictionary = players.get(local_player_id, {})
-    draw_rect(Rect2(14, 12, minf(w - 110.0, 385.0), 62), Color(0.02, 0.04, 0.03, 0.90))
-    draw_rect(Rect2(14, 12, 4, 62), Color("#91bd79"))
-    draw_string(ui_font, Vector2(29, 34), "PIXEL ZOMBIE  /  SURVIVAL", HORIZONTAL_ALIGNMENT_LEFT, 350, 15, Color("#f0eedf"))
-    var mode_label := "OFFLINE" if is_offline else ("HOST" if is_host else ("LAN CLIENT" if _is_connected_client() else "OFFLINE"))
-    draw_string(ui_font, Vector2(29, 56), "%s  ·  %d SURVIVORS  ·  %d ALIVE" % [mode_label, players.size(), zombies.size()], HORIZONTAL_ALIGNMENT_LEFT, 350, 10, Color("#b4c7b6"))
 
-    var wave_x := w * 0.5 - 72.0
-    draw_rect(Rect2(wave_x, 12, 144, 53), Color(0.02, 0.04, 0.03, 0.90))
-    draw_rect(Rect2(wave_x, 12, 144, 3), Color("#d6b86f"))
-    draw_string(ui_font, Vector2(wave_x + 12, 33), "WAVE %02d" % wave_number, HORIZONTAL_ALIGNMENT_LEFT, 122, 16, Color("#f1d58d"))
-    draw_string(ui_font, Vector2(wave_x + 12, 48), "ELIMINATED  %02d / %02d" % [wave_kills, wave_total], HORIZONTAL_ALIGNMENT_LEFT, 122, 9, Color("#c4d4c8"))
-    draw_rect(Rect2(wave_x + 12, 53, 120, 5), Color("#3b4640"))
-    draw_rect(Rect2(wave_x + 12, 53, 120.0 * clampf(float(wave_kills) / float(maxi(1, wave_total)), 0.0, 1.0), 5), Color("#d0b664"))
+    # Three aligned information groups; each has a clear dark backing and red micro-accent.
+    var left_rect := Rect2(14, 12, minf(355.0, w * 0.39), 61.0)
+    draw_rect(Rect2(left_rect.position + Vector2(3, 4), left_rect.size), Color(0.0, 0.0, 0.0, 0.42))
+    draw_rect(left_rect, Color(0.015, 0.025, 0.03, 0.94))
+    draw_rect(Rect2(left_rect.position, Vector2(4, left_rect.size.y)), Color("#c84a4e"))
+    draw_rect(Rect2(left_rect.position.x + 4, left_rect.position.y, left_rect.size.x - 4, 2), Color("#7f3438"))
+    draw_string(ui_font, Vector2(29, 34), "PIXEL ZOMBIE  /  OUTBREAK", HORIZONTAL_ALIGNMENT_LEFT, left_rect.size.x - 26, 14, Color("#f0e9df"))
+    var mode_label := "SOLO" if is_offline else ("HOST" if is_host else ("LAN CLIENT" if _is_connected_client() else "OFFLINE"))
+    draw_string(ui_font, Vector2(29, 55), "%s  •  SQUAD %d/4  •  ZOMBIES %d" % [mode_label, players.size(), zombies.size()], HORIZONTAL_ALIGNMENT_LEFT, left_rect.size.x - 26, 9, Color("#b7c1bd"))
+
+    var wave_w := 166.0
+    var wave_x := w * 0.5 - wave_w * 0.5
+    wave_x = clampf(wave_x, left_rect.position.x + left_rect.size.x + 10.0, w - 224.0)
+    draw_rect(Rect2(wave_x + 3, 15, wave_w, 55), Color(0.0, 0.0, 0.0, 0.34))
+    draw_rect(Rect2(wave_x, 12, wave_w, 54), Color(0.015, 0.025, 0.03, 0.95))
+    draw_rect(Rect2(wave_x, 12, wave_w, 3), Color("#cf4b50"))
+    draw_string(ui_font, Vector2(wave_x + 12, 33), "WAVE %02d" % wave_number, HORIZONTAL_ALIGNMENT_LEFT, wave_w - 24, 16, Color("#f0d08d"))
+    draw_string(ui_font, Vector2(wave_x + 12, 48), "ELIMINATED  %02d / %02d" % [wave_kills, wave_total], HORIZONTAL_ALIGNMENT_LEFT, wave_w - 24, 9, Color("#c9d0c7"))
+    var progress_rect := Rect2(wave_x + 12, 55, wave_w - 24, 4)
+    draw_rect(progress_rect, Color("#343a39"))
+    draw_rect(Rect2(progress_rect.position, Vector2(progress_rect.size.x * clampf(float(wave_kills) / float(maxi(1, wave_total)), 0.0, 1.0), progress_rect.size.y)), Color("#bf4449"))
     if wave_break_timer > 0.0:
-        draw_rect(Rect2(w * 0.5 - 130, 78, 260, 30), Color(0.02, 0.04, 0.03, 0.86))
-        draw_string(ui_font, Vector2(w * 0.5 - 120, 98), "WAVE CLEAR  ·  NEXT IN %d" % ceili(wave_break_timer), HORIZONTAL_ALIGNMENT_CENTER, 240, 14, Color("#d3e6bf"))
+        var break_rect := Rect2(w * 0.5 - 125, 78, 250, 28)
+        draw_rect(break_rect, Color(0.015, 0.02, 0.022, 0.91))
+        draw_rect(Rect2(break_rect.position, Vector2(3, break_rect.size.y)), Color("#cf4b50"))
+        draw_string(ui_font, Vector2(break_rect.position.x + 10, 97), "WAVE CLEAR  •  NEXT IN %d" % ceili(wave_break_timer), HORIZONTAL_ALIGNMENT_CENTER, break_rect.size.x - 18, 12, Color("#f1d89c"))
 
-    var hp := int(local_p.get("hp", 100))
+    var hp := clampi(int(local_p.get("hp", 100)), 0, 100)
     var medkits := int(local_p.get("medkits", 2))
-    draw_rect(Rect2(w - 226, 14, 151, 43), Color(0.02, 0.04, 0.03, 0.86))
-    draw_string(ui_font, Vector2(w - 214, 31), "HP %d%%" % hp, HORIZONTAL_ALIGNMENT_LEFT, 130, 12, Color("#f0eedf"))
-    draw_rect(Rect2(w - 214, 37, 124, 7), Color("#452f2d"))
-    draw_rect(Rect2(w - 214, 37, 124.0 * clampf(float(hp) / 100.0, 0.0, 1.0), 7), Color("#68db78"))
-    draw_string(ui_font, Vector2(w - 214, 51), "MEDKIT %d" % medkits, HORIZONTAL_ALIGNMENT_LEFT, 132, 9, Color("#b4c7b6"))
-    joystick_origin = Vector2(94.0, h - 88.0)
-    draw_circle(joystick_origin, 51, Color(0.05, 0.09, 0.08, 0.70))
-    draw_arc(joystick_origin, 51, 0, TAU, 32, Color("#8aa28f"), 2.0)
-    draw_circle(joystick_origin + joystick_vector * 27.0, 19, Color("#d0dfce"))
-    draw_string(ui_font, Vector2(joystick_origin.x - 23, joystick_origin.y + 73), "MOVE", HORIZONTAL_ALIGNMENT_CENTER, 46, 9, Color("#b7c5b9"))
-    var fire_pos := Vector2(w - 82.0, h - 88.0)
-    var heal_pos := Vector2(w - 176.0, h - 56.0)
-    _draw_action_button("game_fire", fire_pos, 40, "FIRE", Color("#a9544c"))
-    _draw_action_button("game_heal", heal_pos, 27, "HEAL", Color("#527d58"))
-    _draw_ui_button("game_pause", Rect2(w - 64, 70, 48, 42), "Ⅱ", "", Color("#c7b16f"), false)
+    var health_rect := Rect2(w - 211.0, 12, 176.0, 52.0)
+    draw_rect(Rect2(health_rect.position + Vector2(3, 4), health_rect.size), Color(0.0, 0.0, 0.0, 0.40))
+    draw_rect(health_rect, Color(0.015, 0.025, 0.03, 0.94))
+    draw_rect(Rect2(health_rect.position.x, health_rect.position.y, health_rect.size.x, 2), Color("#6f3439"))
+    var hp_color := Color("#bd4147") if hp <= 30 else (Color("#d2a052") if hp <= 58 else Color("#8bc26d"))
+    draw_string(ui_font, Vector2(w - 198, 31), "VITALS  %d%%" % hp, HORIZONTAL_ALIGNMENT_LEFT, 151, 12, Color("#f0e9df"))
+    var hp_rect := Rect2(w - 198, 37, 148.0, 6.0)
+    draw_rect(hp_rect, Color("#45292b"))
+    draw_rect(Rect2(hp_rect.position, Vector2(hp_rect.size.x * float(hp) / 100.0, hp_rect.size.y)), hp_color)
+    draw_string(ui_font, Vector2(w - 198, 55), "MEDKIT  %d" % medkits, HORIZONTAL_ALIGNMENT_LEFT, 150, 9, Color("#c2c7bd"))
+
+    var control_scale := _control_scale()
+    var joystick_radius := _joystick_radius()
+    joystick_origin = Vector2(maxf(joystick_radius + 24.0, w * 0.092), h - 91.0 * control_scale)
+    draw_circle(joystick_origin + Vector2(2, 4), joystick_radius + 2, Color(0.0, 0.0, 0.0, 0.46))
+    draw_circle(joystick_origin, joystick_radius, Color(0.012, 0.025, 0.027, 0.78))
+    draw_arc(joystick_origin, joystick_radius, 0, TAU, 36, Color("#9ba8a0"), 2.0)
+    draw_arc(joystick_origin, joystick_radius - 7.0, 0, TAU, 36, Color(0.63, 0.22, 0.25, 0.42), 1.0)
+    # Small directional marks make the analog affordance obvious even on dark maps.
+    draw_colored_polygon(PackedVector2Array([joystick_origin + Vector2(0, -joystick_radius + 10), joystick_origin + Vector2(-5, -joystick_radius + 18), joystick_origin + Vector2(5, -joystick_radius + 18)]), Color("#c3c8bc"))
+    draw_circle(joystick_origin + joystick_vector * (joystick_radius * 0.53), 17.0 * control_scale, Color(0.78, 0.83, 0.77, 0.96))
+    draw_arc(joystick_origin + joystick_vector * (joystick_radius * 0.53), 17.0 * control_scale, 0, TAU, 28, Color("#26312e"), 1.5)
+    draw_string(ui_font, Vector2(joystick_origin.x - 26, joystick_origin.y + joystick_radius + 18), "MOVE", HORIZONTAL_ALIGNMENT_CENTER, 52, 9, Color("#d1d5cb"))
+
+    var fire_pos := Vector2(w - 77.0 * control_scale, h - 89.0 * control_scale)
+    var heal_pos := Vector2(w - 171.0 * control_scale, h - 61.0 * control_scale)
+    _draw_action_button("game_fire", fire_pos, 41.0 * control_scale, "FIRE", Color("#b83f45"))
+    _draw_action_button("game_heal", heal_pos, 31.0 * control_scale, "HEAL", Color("#647d57"))
+    _draw_ui_button("game_pause", Rect2(w - 65.0, 72.0, 49.0, 41.0), "Ⅱ", "", Color("#c19a68"), false)
 
 func _draw_pause_menu() -> void:
     var w := screen_size.x
     var h := screen_size.y
-    draw_rect(Rect2(0, 0, w, h), Color(0.01, 0.02, 0.03, 0.68))
-    var panel := Rect2(w * 0.5 - 190, h * 0.5 - 190, 380, 380)
-    _draw_panel(panel, "PAUSED", "TAKE A BREATHER, SURVIVOR")
-    var x := panel.position.x + 28
-    var bw := panel.size.x - 56
-    _draw_ui_button("pause_resume", Rect2(x, panel.position.y + 92, bw, 56), "RESUME GAME", "BACK TO THE CITY", Color("#91bd79"), true)
-    _draw_ui_button("pause_save", Rect2(x, panel.position.y + 161, bw, 50), "SAVE WORLD", "HOST ONLY", Color("#78a9d3"), false)
-    _draw_ui_button("pause_home", Rect2(x, panel.position.y + 224, bw, 50), "QUIT TO HOME", "SAVE AND LEAVE SESSION", Color("#b47770"), false)
-    draw_string(ui_font, Vector2(x, panel.position.y + 323), ui_status, HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#b4c7b6"))
+    draw_rect(Rect2(0, 0, w, h), Color(0.005, 0.008, 0.014, 0.76))
+    draw_rect(Rect2(0, 0, w, 4), Color("#c64b50"))
+    var panel_w := minf(400.0, w * 0.68)
+    var panel_h := minf(370.0, h - 36.0)
+    var panel := Rect2((w - panel_w) * 0.5, (h - panel_h) * 0.5, panel_w, panel_h)
+    _draw_panel(panel, "PAUSED  /  SAFEHOUSE", "CATCH YOUR BREATH. THE HORDE WILL RETURN.")
+    var x := panel.position.x + 24.0
+    var bw := panel.size.x - 48.0
+    _draw_ui_button("pause_resume", Rect2(x, panel.position.y + 88.0, bw, 55.0), "RESUME SURVIVAL", "BACK TO THE DEFENSE LANE", Color("#cc4b50"), true)
+    _draw_ui_button("pause_save", Rect2(x, panel.position.y + 156.0, bw, 49.0), "SAVE WORLD", "HOST ONLY", Color("#c18a55"), false)
+    _draw_ui_button("pause_home", Rect2(x, panel.position.y + 218.0, bw, 49.0), "ABANDON SESSION", "RETURN TO SAFEHOUSE", Color("#b94a50"), false)
+    draw_string(ui_font, Vector2(x, panel.position.y + panel.size.y - 20.0), ui_status, HORIZONTAL_ALIGNMENT_LEFT, bw, 9, Color("#b9c0b8"))
 
 func _draw_panel(rect: Rect2, heading: String, subtitle: String) -> void:
-    draw_rect(Rect2(rect.position + Vector2(6, 7), rect.size), Color(0.0, 0.0, 0.0, 0.40))
-    draw_rect(rect, Color(0.025, 0.055, 0.055, 0.94))
-    draw_rect(Rect2(rect.position, Vector2(rect.size.x, 4)), Color("#91bd79"))
-    draw_rect(Rect2(rect.position + Vector2(1, 1), rect.size - Vector2(2, 2)), Color("#43594d"), false, 1.0)
-    draw_string(ui_font, rect.position + Vector2(20, 31), heading, HORIZONTAL_ALIGNMENT_LEFT, rect.size.x - 40, 16, Color("#f0eedf"))
+    draw_rect(Rect2(rect.position + Vector2(6, 7), rect.size), Color(0.0, 0.0, 0.0, 0.46))
+    draw_rect(rect, Color("#11191c"))
+    draw_rect(Rect2(rect.position, Vector2(rect.size.x, 4)), Color("#b7454a"))
+    draw_rect(Rect2(rect.position.x + 4, rect.position.y + 4, rect.size.x - 8, rect.size.y - 8), Color("#202a2b"), false, 1.0)
+    draw_rect(Rect2(rect.position.x + 18, rect.position.y + 15, 4, 26), Color("#c34a4f"))
+    draw_string(ui_font, rect.position + Vector2(32, 31), heading, HORIZONTAL_ALIGNMENT_LEFT, rect.size.x - 58, 15, Color("#f0e9df"))
     if not subtitle.is_empty():
-        draw_string(ui_font, rect.position + Vector2(20, 51), subtitle, HORIZONTAL_ALIGNMENT_LEFT, rect.size.x - 40, 9, Color("#92a89a"))
-    draw_rect(Rect2(rect.position.x + 20, rect.position.y + 62, rect.size.x - 40, 1), Color("#43594d"))
+        draw_string(ui_font, rect.position + Vector2(32, 51), subtitle, HORIZONTAL_ALIGNMENT_LEFT, rect.size.x - 58, 9, Color("#c09b8e"))
+    draw_rect(Rect2(rect.position.x + 20, rect.position.y + 62, rect.size.x - 40, 1), Color("#41484a"))
+    draw_rect(Rect2(rect.position.x + rect.size.x - 24, rect.position.y + 20, 5, 5), Color("#c34a4f"))
 
 func _draw_ui_button(id: String, rect: Rect2, title: String, subtitle: String, accent: Color, primary: bool) -> void:
     button_rects[id] = rect
-    draw_rect(Rect2(rect.position + Vector2(3, 4), rect.size), Color(0.0, 0.0, 0.0, 0.28))
-    var base := Color(0.10, 0.15, 0.13, 0.98) if primary else Color(0.055, 0.09, 0.09, 0.96)
+    draw_rect(Rect2(rect.position + Vector2(3, 4), rect.size), Color(0.0, 0.0, 0.0, 0.38))
+    var base := Color("#3a191d") if primary else Color("#182225")
     draw_rect(rect, base)
     draw_rect(Rect2(rect.position, Vector2(4, rect.size.y)), accent)
-    draw_rect(Rect2(rect.position, rect.size), Color("#4d6154"), false, 1.0)
+    draw_rect(Rect2(rect.position.x + 4, rect.position.y, rect.size.x - 4, 2), Color(accent.r, accent.g, accent.b, 0.45))
+    draw_rect(Rect2(rect.position, rect.size), Color("#754044") if primary else Color("#3e4c4e"), false, 1.0)
+    # Small indicator on the right is a visual cue, not an extra hit target.
+    var indicator_x := rect.position.x + rect.size.x - 18.0
+    draw_rect(Rect2(indicator_x, rect.position.y + rect.size.y * 0.5 - 3.0, 6.0, 6.0), accent)
     var title_y := rect.position.y + (rect.size.y * 0.5 + 4.0 if subtitle.is_empty() else rect.size.y * 0.5 - 2.0)
-    draw_string(ui_font, Vector2(rect.position.x + 16, title_y), title, HORIZONTAL_ALIGNMENT_LEFT, rect.size.x - 30, 14 if primary else 12, Color("#f0eedf"))
+    draw_string(ui_font, Vector2(rect.position.x + 16, title_y), title, HORIZONTAL_ALIGNMENT_LEFT, rect.size.x - 38, 13 if primary else 12, Color("#f2ece3"))
     if not subtitle.is_empty():
-        draw_string(ui_font, Vector2(rect.position.x + 16, title_y + 17), subtitle, HORIZONTAL_ALIGNMENT_LEFT, rect.size.x - 30, 9, Color("#a8b7ac"))
-    draw_rect(Rect2(rect.position.x + rect.size.x - 18, rect.position.y + rect.size.y * 0.5 - 3, 6, 6), accent)
+        draw_string(ui_font, Vector2(rect.position.x + 16, title_y + 17), subtitle, HORIZONTAL_ALIGNMENT_LEFT, rect.size.x - 38, 9, Color("#c0c3bb"))
 
 func _draw_action_button(id: String, pos: Vector2, radius: float, label: String, color: Color) -> void:
     var rect := Rect2(pos - Vector2(radius, radius), Vector2(radius * 2.0, radius * 2.0))
     button_rects[id] = rect
     var is_pressed := id == "game_fire" and fire_held
+    draw_circle(pos + Vector2(2, 4), radius + 2.0, Color(0.0, 0.0, 0.0, 0.48))
+    draw_circle(pos, radius + 2.0, Color("#101719"))
     if is_pressed:
-        draw_circle(pos, radius + 7.0, Color(1.0, 0.48, 0.22, 0.20))
-    draw_circle(pos + Vector2(2, 3), radius, Color(0.0, 0.0, 0.0, 0.35))
-    draw_circle(pos, radius, color.lightened(0.22) if is_pressed else color)
-    draw_arc(pos, radius, 0, TAU, 28, Color(1.0, 0.83, 0.59, 0.98) if is_pressed else Color(0.91, 0.94, 0.85, 0.86), 2.5 if is_pressed else 2.0)
-    draw_string(ui_font, pos + Vector2(-radius + 3, 4), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 6, 11, Color.WHITE)
+        draw_circle(pos, radius + 8.0, Color(0.92, 0.18, 0.19, 0.20))
+    draw_circle(pos, radius, color.lightened(0.17) if is_pressed else color)
+    draw_arc(pos, radius, 0, TAU, 40, Color("#ead8c9") if is_pressed else Color("#bbb8a7"), 2.0)
+    draw_arc(pos, radius - 5.0, 0, TAU, 40, Color(0.18, 0.04, 0.05, 0.70), 1.0)
+    if id == "game_fire":
+        # Three cartridge marks make the primary action read as a shooter control.
+        for i in range(3):
+            var casing := Rect2(pos.x - 12.0 + float(i) * 8.0, pos.y - 13.0, 4.0, 11.0)
+            draw_rect(casing, Color("#f4d29a"))
+            draw_rect(Rect2(casing.position.x, casing.position.y, casing.size.x, 3.0), Color("#fff0cb"))
+        draw_string(ui_font, pos + Vector2(-radius + 2.0, 22.0), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 4.0, 11, Color.WHITE)
+    else:
+        draw_rect(Rect2(pos.x - 2.0, pos.y - 10.0, 4.0, 20.0), Color("#e9e8dc"))
+        draw_rect(Rect2(pos.x - 10.0, pos.y - 2.0, 20.0, 4.0), Color("#e9e8dc"))
+        draw_string(ui_font, pos + Vector2(-radius + 2.0, radius * 0.62), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 4.0, 9, Color.WHITE)
 
 func _draw_title_text(pos: Vector2, label: String, size: int, color: Color) -> void:
     draw_string(ui_font, pos + Vector2(3, 4), label, HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(0.0, 0.0, 0.0, 0.75))
@@ -1032,13 +1127,13 @@ func _draw_zombie_health(zombie: Dictionary, pos: Vector2) -> void:
     var default_max_hp := float(ZOMBIE_MAX_HP[clampi(int(zombie.get("kind", 0)), 0, 3)])
     var max_hp := maxf(1.0, float(zombie.get("max_hp", default_max_hp)))
     var hp := clampf(float(zombie.get("hp", max_hp)) / max_hp, 0.0, 1.0)
-    var bar_width := 34.0 if int(zombie.get("kind", 0)) != 2 else 42.0
-    var bar_rect := Rect2(pos.x - bar_width * 0.5, pos.y - 43.0, bar_width, 6.0)
-    draw_rect(Rect2(bar_rect.position + Vector2(1, 1), bar_rect.size), Color("#111612"))
-    draw_rect(bar_rect, Color("#4b2726"))
-    var health_color := Color("#70d66a") if hp > 0.55 else (Color("#e5b84e") if hp > 0.25 else Color("#e05249"))
+    var bar_width := 38.0 if int(zombie.get("kind", 0)) != 2 else 44.0
+    var bar_rect := Rect2(pos.x - bar_width * 0.5, pos.y - 44.0, bar_width, 6.0)
+    draw_rect(Rect2(bar_rect.position - Vector2(2, 2), bar_rect.size + Vector2(4, 4)), Color(0.01, 0.012, 0.014, 0.86))
+    draw_rect(bar_rect, Color("#4c2025"))
+    var health_color := Color("#d0aa61") if hp > 0.55 else (Color("#d46a4f") if hp > 0.25 else Color("#dc414a"))
     draw_rect(Rect2(bar_rect.position + Vector2(1, 1), Vector2(maxf(0.0, (bar_width - 2.0) * hp), 4.0)), health_color)
-    draw_rect(bar_rect, Color("#d2d1b8"), false, 1.0)
+    draw_rect(bar_rect, Color("#c7b6a7"), false, 1.0)
 
 func _draw_combat_effects() -> void:
     for effect in combat_effects:
@@ -1147,7 +1242,7 @@ func _input(event: InputEvent) -> void:
             _touch_end(event.index)
     elif event is InputEventScreenDrag:
         if joystick_active and event.index == joystick_touch_id:
-            joystick_vector = ((event.position - joystick_origin) / 48.0).limit_length(1.0)
+            joystick_vector = ((event.position - joystick_origin) / _joystick_radius()).limit_length(1.0)
     elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
         if event.pressed:
             _touch_start(-2, event.position)
@@ -1155,7 +1250,7 @@ func _input(event: InputEvent) -> void:
             _touch_end(-2)
     elif event is InputEventMouseMotion:
         if joystick_active and joystick_touch_id == -2:
-            joystick_vector = ((event.position - joystick_origin) / 48.0).limit_length(1.0)
+            joystick_vector = ((event.position - joystick_origin) / _joystick_radius()).limit_length(1.0)
 
 func _touch_start(index: int, pos: Vector2) -> void:
     if _handle_press(pos, index):
@@ -1163,7 +1258,7 @@ func _touch_start(index: int, pos: Vector2) -> void:
     if screen_mode == "game" and pos.x < screen_size.x * 0.40 and pos.y > screen_size.y * 0.57 and not joystick_active:
         joystick_active = true
         joystick_touch_id = index
-        joystick_vector = ((pos - joystick_origin) / 48.0).limit_length(1.0)
+        joystick_vector = ((pos - joystick_origin) / _joystick_radius()).limit_length(1.0)
 
 func _touch_end(index: int) -> void:
     if index == fire_touch_id:

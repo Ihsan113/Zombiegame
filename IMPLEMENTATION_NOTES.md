@@ -19,3 +19,13 @@ The blank dark screen was traced to the v0.3.6 GitHub Actions logs. Godot report
 The GitHub Actions workflow now validates required files, checks static `res://` resource paths and landscape settings, scans Godot editor-import output for script parse/load errors, and launches `Main.tscn` headlessly before APK export. This prevents a build from being marked successful solely because an APK file was exported despite a failed script load.
 
 The script fix and resource references were checked statically. This workspace does not contain a local Godot executable and cannot download one, so a fresh Godot export and physical Android test must still run after pushing this ZIP.
+
+
+## v0.3.8 UI implementation notes
+- All menus and HUD are drawn by `scripts/game.gd`; no external UI scene dependency was added.
+- The home page uses a darkened existing `arena_bg.jpg`/SVG fallback with responsive spacing and a consistent safehouse terminal.
+- The HUD is split into squad/session, wave progress, vitality and bottom control groups.
+- Player health uses green/amber/red thresholds; zombie bars use a dark backplate and amber/coral/crimson fill by remaining health.
+- FIRE remains a press-and-hold control, including release-to-stop cleanup on pause/session reset.
+- The in-game lane starts at 56.5% and ends at 92% of viewport height, aligning more closely to the illustrated road.
+- Static source/resource checks can be inspected locally; the actual Godot parser, render and Android run must still pass in GitHub Actions/on a physical device.
