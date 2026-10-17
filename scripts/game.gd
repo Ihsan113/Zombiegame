@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.3.4
+# Pixel Zombie LAN — wave defense prototype v0.3.6
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -765,7 +765,7 @@ func _draw_home() -> void:
     _draw_ui_button("home_lan", Rect2(bx, card_y + 92, bw, 66), "MULTIPLAYER LAN", "HOST OR JOIN UP TO 4 PLAYERS", Color("#91bd79"), true)
     _draw_ui_button("home_solo", Rect2(bx, card_y + 171, bw, 60), "SOLO SURVIVAL", "PLAY OFFLINE ON THIS DEVICE", Color("#78a9d3"), false)
     _draw_ui_button("home_controls", Rect2(bx, card_y + 244, bw, 52), "HOW TO PLAY", "MOVE · FIRE · HEAL · SAVE", Color("#d4b979"), false)
-    draw_string(ui_font, Vector2(bx, card_y + card_h - 20), "BUILD 0.3.4  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#8f9d91"))
+    draw_string(ui_font, Vector2(bx, card_y + card_h - 20), "BUILD 0.3.6  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#8f9d91"))
 
 func _draw_help() -> void:
     _draw_apocalypse_backdrop(true)

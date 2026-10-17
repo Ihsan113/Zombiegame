@@ -1,9 +1,10 @@
-# Implementation notes — v0.3.5
+# Implementation notes — v0.3.6
 
 - Main entry point: `Main.tscn` → `scripts/game.gd`.
-- Landscape is set before launch in `project.godot` (`window/handheld/orientation=1`) and Android export preset (`screen/orientation=1`). Runtime `DisplayServer.screen_set_orientation` was removed to avoid a startup rotation race/stale viewport.
-- `_draw()` paints an opaque background safety layer first. `_draw_apocalypse_backdrop()` uses `assets/arena_bg.jpg` and falls back to a procedural colored backdrop if loading fails.
-- `assets/arena_bg.jpg` is 1200×540. `assets/sprite_atlas.png` is a transparent 320×192 atlas: four 64×80 survivor cells, four 64×80 zombie cells, and 32×32 combat effects.
+- **Landscape must use enum value 0**: `project.godot` contains `window/handheld/orientation=0` and `export_presets.cfg` contains `screen/orientation=0`. Value 1 is portrait and was the root cause of the previous build reverting to vertical orientation.
+- Runtime `DisplayServer.screen_set_orientation` is intentionally not used.
+- `_draw()` paints an opaque background underlay before the home/world UI. The background loads from `assets/arena_bg.jpg`; if missing, the draw routines render a solid procedural fallback.
+- `assets/arena_bg.jpg` is 1200×540. `assets/sprite_atlas.png` is a 320×192 transparent atlas with four 64×80 survivor cells, four 64×80 zombie cells, and 32×32 combat-effect cells.
 - FIRE supports touch-and-hold repeat firing at 0.30-second intervals and release-to-stop behavior.
-- Local multiplayer uses ENet/UDP port 24567. Host-authoritative game state is intended for up to four local Wi-Fi phones; physical hotspot multiplayer is not covered by CI.
-- Workflow exports a debug APK. CI success validates import/export but cannot establish that the app renders correctly on every phone; test the output package on the target device.
+- LAN uses ENet/UDP port 24567. Four-device hotspot connectivity still requires physical testing.
+- GitHub Actions validates orientation, imports project resources, exports a debug APK and uploads a source ZIP. CI success does not replace testing on the target phone.

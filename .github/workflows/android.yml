@@ -71,6 +71,14 @@ jobs:
           export/android/java_sdk_path = "$JAVA_HOME"
           SETTINGS
 
+      - name: Verify landscape configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fx 'window/handheld/orientation=0' project.godot
+          grep -Fx 'screen/orientation=0' export_presets.cfg
+          ! grep -Eq 'screen_set_orientation|window/handheld/orientation=1|screen/orientation=1' scripts/game.gd project.godot export_presets.cfg
+
       - name: Import and validate project scripts
         shell: bash
         run: |
@@ -88,7 +96,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.3.5-APK
+          name: PixelZombieLAN-v0.3.6-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -97,15 +105,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.3.5-source.zip \
+          zip -r build/PixelZombieLAN-v0.3.6-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.3.5-source.zip
+          test -s build/PixelZombieLAN-v0.3.6-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.3.5-source
-          path: build/PixelZombieLAN-v0.3.5-source.zip
+          name: PixelZombieLAN-v0.3.6-source
+          path: build/PixelZombieLAN-v0.3.6-source.zip
           if-no-files-found: error
           retention-days: 14
