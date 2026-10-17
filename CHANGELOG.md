@@ -25,3 +25,8 @@
 - Added HP color thresholds, more legible zombie HP bars and tactile combat buttons.
 - Refined the lane shading/cover visuals, moved its bounds to match the background road, and preserved hold-to-fire.
 - Android version code/name: 11 / 0.3.8.
+
+
+## 0.3.9 — parser fix
+- Fixed Godot 4.7.2 `Cannot infer the type of "sx"` by explicitly typing the hazard cover positions and stripe coordinates.
+- Android version code/name: 12 / 0.3.9.

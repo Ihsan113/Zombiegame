@@ -29,3 +29,8 @@ The script fix and resource references were checked statically. This workspace d
 - FIRE remains a press-and-hold control, including release-to-stop cleanup on pause/session reset.
 - The in-game lane starts at 56.5% and ends at 92% of viewport height, aligning more closely to the illustrated road.
 - Static source/resource checks can be inspected locally; the actual Godot parser, render and Android run must still pass in GitHub Actions/on a physical device.
+
+
+## v0.3.9 compile fix
+- In `_draw_game_world()`, the loop uses a typed `Array[float]`; each cover X value and `sx` are explicitly converted/declared as `float`, avoiding the Godot 4.7.2 Variant inference parse error.
+- The provided CI workflow validates scripts and starts the project headlessly before exporting an APK.

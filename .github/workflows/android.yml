@@ -141,7 +141,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.3.8-APK
+          name: PixelZombieLAN-v0.3.9-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -150,15 +150,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.3.8-source.zip \
+          zip -r build/PixelZombieLAN-v0.3.9-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.3.8-source.zip
+          test -s build/PixelZombieLAN-v0.3.9-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.3.8-source
-          path: build/PixelZombieLAN-v0.3.8-source.zip
+          name: PixelZombieLAN-v0.3.9-source
+          path: build/PixelZombieLAN-v0.3.9-source.zip
           if-no-files-found: error
           retention-days: 14

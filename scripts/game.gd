@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.3.8
+# Pixel Zombie LAN — wave defense prototype v0.3.9
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -792,7 +792,7 @@ func _draw_home() -> void:
     draw_rect(Rect2(signal_rect.position, Vector2(3, signal_rect.size.y)), Color("#9e4146"))
     draw_circle(Vector2(signal_rect.position.x + 17, signal_rect.position.y + 21), 4.0, Color("#dc685b"))
     draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "LOCAL SIGNAL ONLY  /  UDP %d" % PORT, HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
-    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.3.8  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
+    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.3.9  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
 
 func _draw_help() -> void:
     _draw_apocalypse_backdrop(true)
@@ -908,13 +908,16 @@ func _draw_game_world() -> void:
 
     # Grounded, low cover props at the lane edges; diagonal paint reads as hazard striping.
     var cover_y := lane_bottom - 22.0
-    for cover_x in [w * 0.105, w * 0.79]:
-        var cover_w := 45.0
+    # Explicit float annotations avoid Variant inference errors in Godot 4.7.
+    var cover_positions: Array[float] = [w * 0.105, w * 0.79]
+    for cover_x_value in cover_positions:
+        var cover_x: float = float(cover_x_value)
+        var cover_w: float = 45.0
         draw_rect(Rect2(cover_x, cover_y + 3.0, cover_w, 13), Color(0.015, 0.02, 0.02, 0.52))
         draw_rect(Rect2(cover_x, cover_y, cover_w, 13), Color("#424a46"))
         draw_rect(Rect2(cover_x, cover_y, cover_w, 3), Color("#899087"))
         for stripe in range(3):
-            var sx := cover_x + 7.0 + stripe * 14.0
+            var sx: float = cover_x + 7.0 + float(stripe) * 14.0
             draw_line(Vector2(sx, cover_y + 4.0), Vector2(sx + 5.0, cover_y + 11.0), Color("#b59b62"), 2.0, true)
         draw_rect(Rect2(cover_x, cover_y, cover_w, 13), Color("#171f20"), false, 1.0)
 
