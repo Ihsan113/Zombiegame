@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.0
+# Pixel Zombie LAN — wave defense prototype v0.4.1
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -10,16 +10,17 @@ const ZOMBIE_SPEED := 28.0
 const ZOMBIE_ATTACK_RANGE := 45.0
 const ZOMBIE_MAX_HP := [3.0, 4.0, 7.0, 3.5]
 const WAVE_ZOMBIE_COUNT := 25
+const WAVE_BASE_DURATION := 90.0
 const SHOT_RANGE_MAX := 560.0
 const SHOT_LANE_TOLERANCE := 25.0
 const FIRE_REPEAT_INTERVAL := 0.30
-const ARENA_TOP_RATIO := 0.515
-const ARENA_BOTTOM_RATIO := 0.92
+const ARENA_TOP_RATIO := 0.565
+const ARENA_BOTTOM_RATIO := 0.865
 const SNAPSHOT_INTERVAL := 0.10 # 10 world snapshots/second
 const INPUT_INTERVAL := 0.05    # 20 input updates/second
 const SAVE_PATH := "user://world_save.json"
 
-var screen_mode := "home" # home, help, lobby, game, pause
+var screen_mode := "home" # home, help, lobby, game, pause, game_over
 var is_offline := false
 var button_rects: Dictionary = {}
 var sprite_atlas: Texture2D
@@ -31,6 +32,9 @@ var wave_spawned := 0
 var wave_kills := 0
 var wave_spawn_timer := 0.9
 var wave_break_timer := 0.0
+var wave_time_remaining := WAVE_BASE_DURATION
+var wave_timed_out := false
+var game_over := false
 
 var peer: ENetMultiplayerPeer
 var players: Dictionary = {}
@@ -61,6 +65,8 @@ var ui_font: Font
 var screen_size := Vector2(960, 540)
 var last_save_time := 0.0
 var animation_clock := 0.0
+var sfx_players: Dictionary = {}
+var sfx_last_played: Dictionary = {}
 
 func _ready() -> void:
     randomize()
@@ -69,6 +75,7 @@ func _ready() -> void:
     screen_mode = "home"
     world_seed = randi()
     ui_font = ThemeDB.fallback_font
+    _setup_sfx()
     if ui_font == null:
         push_warning("Pixel Zombie LAN: theme fallback font was not available at startup.")
     # Prefer detailed raster assets. Draw functions retain a visible fallback if a texture is missing.
@@ -101,9 +108,6 @@ func _process(delta: float) -> void:
             if snapshot_timer >= SNAPSHOT_INTERVAL:
                 snapshot_timer = 0.0
                 _broadcast_world()
-            if world_time - last_save_time >= 30.0:
-                _save_world(false)
-                last_save_time = world_time
         elif _is_connected_client():
             client_input_timer += delta
             if client_input_timer >= INPUT_INTERVAL:
@@ -113,6 +117,75 @@ func _process(delta: float) -> void:
 
         _process_action_requests(delta)
     queue_redraw()
+
+func _setup_sfx() -> void:
+    # Literal resource paths are intentional: Godot's exporter and CI can verify every sound.
+    var clips := [
+        {"id": "shot", "path": "res://assets/audio/shot.wav"},
+        {"id": "hit", "path": "res://assets/audio/hit.wav"},
+        {"id": "attack", "path": "res://assets/audio/attack.wav"},
+        {"id": "death", "path": "res://assets/audio/death.wav"},
+        {"id": "heal", "path": "res://assets/audio/heal.wav"},
+        {"id": "wave_clear", "path": "res://assets/audio/wave_clear.wav"},
+        {"id": "wave_start", "path": "res://assets/audio/wave_start.wav"},
+        {"id": "game_over", "path": "res://assets/audio/game_over.wav"}
+    ]
+    for clip_data in clips:
+        var clip: String = str(clip_data.get("id", ""))
+        var stream := load(str(clip_data.get("path", ""))) as AudioStream
+        if stream == null:
+            push_warning("Pixel Zombie LAN: optional sound '%s' could not be loaded." % clip)
+            continue
+        var player := AudioStreamPlayer.new()
+        player.name = "SFX_" + clip
+        player.stream = stream
+        player.volume_db = _sfx_volume_db(clip)
+        add_child(player)
+        sfx_players[clip] = player
+
+func _sfx_volume_db(clip: String) -> float:
+    match clip:
+        "shot":
+            return -11.0
+        "hit":
+            return -7.0
+        "attack":
+            return -8.0
+        "death":
+            return -6.0
+        "heal":
+            return -8.0
+        "wave_clear":
+            return -7.0
+        "wave_start":
+            return -9.0
+        "game_over":
+            return -5.0
+        _:
+            return -8.0
+
+func _play_sfx(clip: String) -> void:
+    if not sfx_players.has(clip):
+        return
+    var player: AudioStreamPlayer = sfx_players[clip]
+    if player == null or player.stream == null:
+        return
+    var now := Time.get_ticks_msec()
+    var min_gap := 55 if clip == "shot" else (75 if clip == "hit" else (170 if clip == "attack" else 0))
+    if min_gap > 0 and now - int(sfx_last_played.get(clip, 0)) < min_gap:
+        return
+    sfx_last_played[clip] = now
+    player.stop()
+    player.play()
+
+func _emit_sfx(clip: String) -> void:
+    _play_sfx(clip)
+    if is_host and not is_offline and multiplayer.multiplayer_peer != null:
+        rpc("receive_sfx_event", clip)
+
+@rpc("authority", "call_remote", "unreliable")
+func receive_sfx_event(clip: String) -> void:
+    _play_sfx(clip)
 
 func _is_connected_client() -> bool:
     return multiplayer.multiplayer_peer != null and not is_host and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED
@@ -170,7 +243,7 @@ func _host_simulate(delta: float) -> void:
         var alive := float(p.get("hp", 0.0)) > 0.0
         if alive:
             p["x"] = clampf(float(p.get("x", screen_size.x * 0.5)) + movement.x * PLAYER_SPEED * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
-            p["y"] = clampf(float(p.get("y", screen_size.y * 0.68)) + movement.y * PLAYER_SPEED * delta, _arena_top() + 30.0, _arena_bottom() - 30.0)
+            p["y"] = clampf(float(p.get("y", screen_size.y * 0.68)) + movement.y * PLAYER_SPEED * delta, _arena_top() + 40.0, _arena_bottom() - 40.0)
             # Side-view shooter: keep left/right facing for perfectly horizontal shots.
             if absf(movement.x) > 0.14:
                 p["face_x"] = -1.0 if movement.x < 0.0 else 1.0
@@ -187,7 +260,8 @@ func _host_simulate(delta: float) -> void:
         else:
             combat_effects[effect_index] = active_effect
 
-    # One wave contains 25 zombies. A short intermission starts only after all are defeated.
+    # Every wave has its own 90s (then progressively shorter) clock. Overtime keeps the wave alive
+    # and visibly raises pressure instead of silently skipping enemies when the clock expires.
     if wave_break_timer > 0.0:
         wave_break_timer = maxf(0.0, wave_break_timer - delta)
         if wave_break_timer <= 0.0:
@@ -196,8 +270,17 @@ func _host_simulate(delta: float) -> void:
             wave_spawned = 0
             wave_kills = 0
             wave_spawn_timer = 1.0
+            wave_time_remaining = _wave_duration_for(wave_number)
+            wave_timed_out = false
             ui_status = "Wave %d incoming — hold the middle!" % wave_number
+            _emit_sfx("wave_start")
     else:
+        if not wave_timed_out:
+            wave_time_remaining = maxf(0.0, wave_time_remaining - delta)
+            if wave_time_remaining <= 0.0:
+                wave_timed_out = true
+                ui_status = "Wave %d overtime — clear the remaining horde!" % wave_number
+                _emit_sfx("wave_start")
         wave_spawn_timer = maxf(0.0, wave_spawn_timer - delta)
         var alive_limit := mini(14, 6 + wave_number)
         if wave_spawned < wave_total and wave_spawn_timer <= 0.0 and zombies.size() < alive_limit:
@@ -240,8 +323,10 @@ func _host_simulate(delta: float) -> void:
                 attack_timer = 0.0
                 var zombie_kind := clampi(int(z.get("kind", 0)), 0, ZOMBIE_MAX_HP.size() - 1)
                 var speed_scale := 0.68 if zombie_kind == 2 else (1.25 if zombie_kind == 3 else 1.0)
+                if wave_timed_out:
+                    speed_scale *= 1.18
                 z["x"] = clampf(float(z.get("x", zombie_pos.x)) + direction.x * ZOMBIE_SPEED * speed_scale * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
-                z["y"] = clampf(float(z.get("y", zombie_pos.y)) + direction.y * ZOMBIE_SPEED * speed_scale * delta, _arena_top() + 31.0, _arena_bottom() - 31.0)
+                z["y"] = clampf(float(z.get("y", zombie_pos.y)) + direction.y * ZOMBIE_SPEED * speed_scale * delta, _arena_top() + 40.0, _arena_bottom() - 40.0)
             else:
                 z["walking"] = false
                 z["attacking"] = attack_timer > 0.0
@@ -257,14 +342,44 @@ func _host_simulate(delta: float) -> void:
                     z["attacking"] = true
                     # A short red claw arc makes contact readable without a large screen effect.
                     _add_combat_effect(5, zombie_pos + Vector2(float(z.get("face_x", 1.0)) * 14.0, -3.0), target_pos + Vector2(0.0, -7.0), 0.20)
+                    _emit_sfx("attack")
 
         z["attack_timer"] = attack_timer
         z["attack_cooldown"] = attack_cooldown
         zombies[zi] = z
 
+    if _all_players_eliminated():
+        if not game_over:
+            game_over = true
+            screen_mode = "game_over"
+            fire_held = false
+            fire_requested = false
+            joystick_active = false
+            joystick_vector = Vector2.ZERO
+            ui_status = "SQUAD ELIMINATED — restart or return to safehouse"
+            _emit_sfx("game_over")
+            if not is_offline and multiplayer.multiplayer_peer != null:
+                rpc("receive_game_over_snapshot", players, zombies, world_time, combat_effects, wave_number, wave_spawned, wave_kills, wave_total, wave_break_timer, wave_time_remaining, wave_timed_out)
+            _broadcast_world()
+        return
+
     if wave_break_timer <= 0.0 and wave_spawned >= wave_total and zombies.is_empty():
         wave_break_timer = 4.0
+        wave_time_remaining = 0.0
+        wave_timed_out = false
         ui_status = "WAVE %d CLEAR — next wave in 4 seconds" % wave_number
+        _emit_sfx("wave_clear")
+
+func _wave_duration_for(number: int) -> float:
+    return maxf(55.0, WAVE_BASE_DURATION - float(maxi(0, number - 1)) * 3.0)
+
+func _all_players_eliminated() -> bool:
+    if players.is_empty():
+        return false
+    for id_variant in players.keys():
+        if float(players[id_variant].get("hp", 0.0)) > 0.0:
+            return false
+    return true
 
 func _spawn_wave_zombie() -> void:
     var kind_roll := randi_range(0, 99)
@@ -277,7 +392,7 @@ func _spawn_wave_zombie() -> void:
         zombie_kind = 1 # Worker
     var zombie_hp := float(ZOMBIE_MAX_HP[zombie_kind])
     var spawn_left := randf() < 0.5
-    var spawn_y := randf_range(_arena_top() + 35.0, _arena_bottom() - 35.0)
+    var spawn_y := randf_range(_arena_top() + 50.0, _arena_bottom() - 50.0)
     var spawn_x := 34.0 if spawn_left else screen_size.x - 34.0
     zombies.append({
         "id": randi(),
@@ -303,7 +418,7 @@ func _spawn_local_player() -> void:
         input_vectors[id] = Vector2.ZERO
 
 func _make_player(id: int) -> Dictionary:
-    var spawn := Vector2(screen_size.x * 0.5, screen_size.y * 0.68) + Vector2(randf_range(-55.0, 55.0), randf_range(-18.0, 18.0))
+    var spawn := Vector2(screen_size.x * 0.5, screen_size.y * 0.70) + Vector2(randf_range(-55.0, 55.0), randf_range(-18.0, 18.0))
     return {
         "x": spawn.x,
         "y": spawn.y,
@@ -343,9 +458,11 @@ func _on_peer_connected(id: int) -> void:
         return
     players[id] = _make_player(id)
     input_vectors[id] = Vector2.ZERO
-    rpc_id(id, "receive_initial_world", players, zombies, world_seed, world_time, combat_effects, wave_number, wave_spawned, wave_kills, wave_total, wave_spawn_timer, wave_break_timer)
+    rpc_id(id, "receive_initial_world", players, zombies, world_seed, world_time, combat_effects, wave_number, wave_spawned, wave_kills, wave_total, wave_spawn_timer, wave_break_timer, wave_time_remaining, wave_timed_out, game_over)
     if screen_mode == "game":
         rpc_id(id, "begin_game_remote")
+    elif screen_mode == "game_over":
+        rpc_id(id, "begin_game_over_remote")
     _broadcast_world()
     ui_status = "Player joined · %d/%d" % [players.size(), MAX_PLAYERS]
 
@@ -369,7 +486,8 @@ func submit_input(movement: Vector2) -> void:
     input_vectors[sender_id] = movement.limit_length(1.0)
 
 @rpc("authority", "call_remote", "unreliable_ordered")
-func receive_world(world_players: Dictionary, world_zombies: Array, time_value: float, incoming_effects: Array, incoming_wave: int, incoming_spawned: int, incoming_kills: int, incoming_total: int, incoming_break_timer: float) -> void:
+func receive_world(world_players: Dictionary, world_zombies: Array, time_value: float, incoming_effects: Array, incoming_wave: int, incoming_spawned: int, incoming_kills: int, incoming_total: int, incoming_break_timer: float, incoming_wave_time_remaining: float, incoming_wave_timed_out: bool, incoming_game_over: bool) -> void:
+    var was_game_over := game_over
     target_players = world_players.duplicate(true)
     zombies.clear()
     for z in world_zombies:
@@ -383,13 +501,23 @@ func receive_world(world_players: Dictionary, world_zombies: Array, time_value: 
     wave_kills = maxi(0, incoming_kills)
     wave_total = maxi(1, incoming_total)
     wave_break_timer = maxf(0.0, incoming_break_timer)
+    wave_time_remaining = maxf(0.0, incoming_wave_time_remaining)
+    wave_timed_out = incoming_wave_timed_out
+    game_over = incoming_game_over
+    if game_over:
+        screen_mode = "game_over"
+        fire_held = false
+        fire_requested = false
+        joystick_vector = Vector2.ZERO
+    elif was_game_over and screen_mode == "game_over":
+        screen_mode = "game"
     for id_variant in target_players.keys():
         var id := int(id_variant)
         if not players.has(id):
             players[id] = target_players[id].duplicate(true)
 
 @rpc("authority", "call_remote", "reliable")
-func receive_initial_world(world_players: Dictionary, world_zombies: Array, seed_value: int, time_value: float, incoming_effects: Array, incoming_wave: int, incoming_spawned: int, incoming_kills: int, incoming_total: int, incoming_spawn_timer: float, incoming_break_timer: float) -> void:
+func receive_initial_world(world_players: Dictionary, world_zombies: Array, seed_value: int, time_value: float, incoming_effects: Array, incoming_wave: int, incoming_spawned: int, incoming_kills: int, incoming_total: int, incoming_spawn_timer: float, incoming_break_timer: float, incoming_wave_time_remaining: float, incoming_wave_timed_out: bool, incoming_game_over: bool) -> void:
     players = world_players.duplicate(true)
     target_players = world_players.duplicate(true)
     zombies.clear()
@@ -406,12 +534,56 @@ func receive_initial_world(world_players: Dictionary, world_zombies: Array, seed
     wave_total = maxi(1, incoming_total)
     wave_spawn_timer = maxf(0.0, incoming_spawn_timer)
     wave_break_timer = maxf(0.0, incoming_break_timer)
+    wave_time_remaining = maxf(0.0, incoming_wave_time_remaining)
+    wave_timed_out = incoming_wave_timed_out
+    game_over = incoming_game_over
+    if game_over:
+        screen_mode = "game_over"
     ui_status = "Connected — survive together!"
 
 @rpc("authority", "call_remote", "reliable")
 func begin_game_remote() -> void:
+    game_over = false
     screen_mode = "game"
     ui_status = "Survive together!"
+
+@rpc("authority", "call_remote", "reliable")
+func receive_game_over_snapshot(world_players: Dictionary, world_zombies: Array, time_value: float, incoming_effects: Array, incoming_wave: int, incoming_spawned: int, incoming_kills: int, incoming_total: int, incoming_break_timer: float, incoming_wave_time_remaining: float, incoming_wave_timed_out: bool) -> void:
+    players = world_players.duplicate(true)
+    target_players = world_players.duplicate(true)
+    zombies.clear()
+    for z in world_zombies:
+        zombies.append(z.duplicate(true))
+    combat_effects.clear()
+    for effect in incoming_effects:
+        combat_effects.append(effect.duplicate(true))
+    world_time = time_value
+    wave_number = maxi(1, incoming_wave)
+    wave_spawned = maxi(0, incoming_spawned)
+    wave_kills = maxi(0, incoming_kills)
+    wave_total = maxi(1, incoming_total)
+    wave_break_timer = maxf(0.0, incoming_break_timer)
+    wave_time_remaining = maxf(0.0, incoming_wave_time_remaining)
+    wave_timed_out = incoming_wave_timed_out
+    game_over = true
+    screen_mode = "game_over"
+    fire_held = false
+    fire_requested = false
+    fire_repeat_timer = 0.0
+    joystick_active = false
+    joystick_vector = Vector2.ZERO
+    ui_status = "SQUAD ELIMINATED"
+
+@rpc("authority", "call_remote", "reliable")
+func begin_game_over_remote() -> void:
+    game_over = true
+    screen_mode = "game_over"
+    fire_held = false
+    fire_requested = false
+    fire_repeat_timer = 0.0
+    joystick_active = false
+    joystick_vector = Vector2.ZERO
+    ui_status = "SQUAD ELIMINATED"
 
 func _begin_game() -> void:
     if not is_host:
@@ -423,7 +595,10 @@ func _begin_game() -> void:
     if not is_offline and multiplayer.multiplayer_peer != null:
         rpc("begin_game_remote")
 
-func _start_offline() -> void:
+func _start_offline(load_saved: bool = false) -> void:
+    if load_saved and not FileAccess.file_exists(SAVE_PATH):
+        ui_status = "No saved run found — use NEW SOLO RUN first"
+        return
     if multiplayer.multiplayer_peer != null:
         multiplayer.multiplayer_peer.close()
         multiplayer.multiplayer_peer = null
@@ -436,14 +611,23 @@ func _start_offline() -> void:
     target_players.clear()
     zombies.clear()
     combat_effects.clear()
+    fire_cooldowns.clear()
+    heal_cooldowns.clear()
     wave_number = 1
     wave_total = WAVE_ZOMBIE_COUNT
     wave_spawned = 0
     wave_kills = 0
     wave_spawn_timer = 0.9
     wave_break_timer = 0.0
+    wave_time_remaining = _wave_duration_for(1)
+    wave_timed_out = false
+    game_over = false
+    world_time = 0.0
+    world_seed = randi()
     seed(world_seed)
-    _load_world()
+    if load_saved:
+        if FileAccess.file_exists(SAVE_PATH):
+            _load_world()
     players[1] = _make_player(1)
     input_vectors[1] = Vector2.ZERO
     screen_mode = "game"
@@ -476,7 +660,7 @@ func _interpolate_client_state(delta: float) -> void:
 func _broadcast_world() -> void:
     if not is_host or multiplayer.multiplayer_peer == null:
         return
-    rpc("receive_world", players, zombies, world_time, combat_effects, wave_number, wave_spawned, wave_kills, wave_total, wave_break_timer)
+    rpc("receive_world", players, zombies, world_time, combat_effects, wave_number, wave_spawned, wave_kills, wave_total, wave_break_timer, wave_time_remaining, wave_timed_out, game_over)
 
 @rpc("any_peer", "call_remote", "reliable")
 func request_fire() -> void:
@@ -500,7 +684,7 @@ func _add_combat_effect(kind: int, start_pos: Vector2, end_pos: Vector2, lifetim
         combat_effects.pop_front()
 
 func _host_fire(id: int) -> void:
-    if not players.has(id):
+    if game_over or not players.has(id):
         return
     var now := Time.get_ticks_msec()
     if now - int(fire_cooldowns.get(id, 0)) < 280:
@@ -511,6 +695,7 @@ func _host_fire(id: int) -> void:
         return
     p["shoot_timer"] = 0.19
     players[id] = p
+    _emit_sfx("shot")
 
     # Straight horizontal shot: aim is fixed by the last left/right movement, never auto-aimed at a zombie.
     var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.5)))
@@ -541,8 +726,10 @@ func _host_fire(id: int) -> void:
         zombie["hit_timer"] = 0.16
         zombie["walking"] = false
         zombie["hp"] = float(zombie.get("hp", 1.0)) - 1.0
+        _emit_sfx("hit")
         if float(zombie["hp"]) <= 0.0:
             _add_combat_effect(4, impact_pos, impact_pos, 0.30)
+            _emit_sfx("death")
             wave_kills = mini(wave_total, wave_kills + 1)
             zombies.remove_at(closest_index)
         else:
@@ -558,7 +745,7 @@ func request_heal() -> void:
         _host_heal(sender_id)
 
 func _host_heal(id: int) -> void:
-    if not players.has(id):
+    if game_over or not players.has(id):
         return
     var now := Time.get_ticks_msec()
     if now - int(heal_cooldowns.get(id, 0)) < 500:
@@ -571,13 +758,70 @@ func _host_heal(id: int) -> void:
     p["hp"] = minf(100.0, float(p.get("hp", 0.0)) + 35.0)
     p["medkits"] = int(p.get("medkits", 0)) - 1
     players[id] = p
+    _emit_sfx("heal")
+    _broadcast_world()
+
+@rpc("any_peer", "call_remote", "reliable")
+func request_restart() -> void:
+    if not is_host or not game_over:
+        return
+    var sender_id := multiplayer.get_remote_sender_id()
+    if players.has(sender_id):
+        _restart_run()
+
+func _restart_run() -> void:
+    if not is_host:
+        ui_status = "Only the host can restart this run."
+        return
+    zombies.clear()
+    combat_effects.clear()
+    input_vectors.clear()
+    fire_cooldowns.clear()
+    heal_cooldowns.clear()
+    world_time = 0.0
+    world_seed = randi()
+    seed(world_seed)
+    wave_number = 1
+    wave_total = WAVE_ZOMBIE_COUNT
+    wave_spawned = 0
+    wave_kills = 0
+    wave_spawn_timer = 1.1
+    wave_break_timer = 0.0
+    wave_time_remaining = _wave_duration_for(1)
+    wave_timed_out = false
+    game_over = false
+    for id_variant in players.keys():
+        var id := int(id_variant)
+        var p: Dictionary = players[id]
+        var spawn := Vector2(screen_size.x * 0.5, screen_size.y * 0.70) + Vector2(randf_range(-42.0, 42.0), randf_range(-12.0, 12.0))
+        p["x"] = clampf(spawn.x, 35.0, maxf(36.0, screen_size.x - 35.0))
+        p["y"] = clampf(spawn.y, _arena_top() + 40.0, _arena_bottom() - 40.0)
+        p["hp"] = 100.0
+        p["medkits"] = 2
+        p["walking"] = false
+        p["shoot_timer"] = 0.0
+        p["hurt_timer"] = 0.0
+        p["face_x"] = 1.0
+        players[id] = p
+        input_vectors[id] = Vector2.ZERO
+    screen_mode = "game"
+    ui_status = "Fresh run — Wave 01. The squad is back on its feet."
+    fire_held = false
+    fire_requested = false
+    fire_touch_id = -1
+    fire_repeat_timer = 0.0
+    joystick_active = false
+    joystick_vector = Vector2.ZERO
+    snapshot_timer = 0.0
+    if not is_offline and multiplayer.multiplayer_peer != null:
+        rpc("begin_game_remote")
     _broadcast_world()
 
 func _save_world(announce: bool = true) -> void:
     if not is_host:
         return
     var data := {
-        "version": 2,
+        "version": 3,
         "seed": world_seed,
         "time": world_time,
         "wave_number": wave_number,
@@ -586,6 +830,8 @@ func _save_world(announce: bool = true) -> void:
         "wave_kills": wave_kills,
         "wave_spawn_timer": wave_spawn_timer,
         "wave_break_timer": wave_break_timer,
+        "wave_time_remaining": wave_time_remaining,
+        "wave_timed_out": wave_timed_out,
         "zombies": zombies
     }
     var file := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
@@ -618,6 +864,9 @@ func _load_world() -> void:
     wave_kills = clampi(int(parsed.get("wave_kills", 0)), 0, wave_total)
     wave_spawn_timer = maxf(0.0, float(parsed.get("wave_spawn_timer", 0.9)))
     wave_break_timer = maxf(0.0, float(parsed.get("wave_break_timer", 0.0)))
+    wave_time_remaining = maxf(0.0, float(parsed.get("wave_time_remaining", _wave_duration_for(wave_number))))
+    wave_timed_out = bool(parsed.get("wave_timed_out", false))
+    game_over = false
     zombies.clear()
     var saved_zombies = parsed.get("zombies", [])
     if typeof(saved_zombies) == TYPE_ARRAY:
@@ -629,7 +878,7 @@ func _load_world() -> void:
                     "id": int(z.get("id", randi())),
                     "kind": kind,
                     "x": clampf(float(z.get("x", screen_size.x * 0.5)), 30.0, maxf(31.0, screen_size.x - 30.0)),
-                    "y": clampf(float(z.get("y", screen_size.y * 0.68)), _arena_top() + 31.0, _arena_bottom() - 31.0),
+                    "y": clampf(float(z.get("y", screen_size.y * 0.70)), _arena_top() + 40.0, _arena_bottom() - 40.0),
                     "face_x": -1.0 if float(z.get("face_x", -1.0)) < 0.0 else 1.0,
                     "hp": clampf(float(z.get("hp", max_hp)), 0.1, max_hp),
                     "max_hp": max_hp,
@@ -662,16 +911,22 @@ func _start_host() -> void:
     players.clear()
     input_vectors.clear()
     target_players.clear()
+    zombies.clear()
     combat_effects.clear()
+    fire_cooldowns.clear()
+    heal_cooldowns.clear()
     wave_number = 1
     wave_total = WAVE_ZOMBIE_COUNT
     wave_spawned = 0
     wave_kills = 0
     wave_spawn_timer = 0.9
     wave_break_timer = 0.0
-    _load_world()
-    if not FileAccess.file_exists(SAVE_PATH):
-        seed(world_seed)
+    wave_time_remaining = _wave_duration_for(1)
+    wave_timed_out = false
+    game_over = false
+    world_time = 0.0
+    world_seed = randi()
+    seed(world_seed)
     players[1] = _make_player(1)
     input_vectors[1] = Vector2.ZERO
     snapshot_timer = 0.0
@@ -754,11 +1009,28 @@ func _reset_network_state() -> void:
     target_players.clear()
     zombies.clear()
     combat_effects.clear()
+    fire_cooldowns.clear()
+    heal_cooldowns.clear()
+    wave_number = 1
+    wave_total = WAVE_ZOMBIE_COUNT
+    wave_spawned = 0
+    wave_kills = 0
+    wave_spawn_timer = 0.9
+    wave_break_timer = 0.0
+    wave_time_remaining = _wave_duration_for(1)
+    wave_timed_out = false
+    game_over = false
+    world_time = 0.0
+    snapshot_timer = 0.0
+    client_input_timer = 0.0
+    heal_requested = false
+    joystick_vector = Vector2.ZERO
+    joystick_active = false
+    joystick_touch_id = -1
     local_player_id = 1
 
 func _leave_world() -> void:
-    if is_host:
-        _save_world(false)
+    # Leaving is not an implicit save. New games start empty; Continue Saved Run is explicit.
     _reset_network_state()
     screen_mode = "lobby"
     ui_status = "Disconnected"
@@ -779,6 +1051,9 @@ func _draw() -> void:
     elif screen_mode == "pause":
         _draw_game_world()
         _draw_pause_menu()
+    elif screen_mode == "game_over":
+        _draw_game_world()
+        _draw_game_over_menu()
     else:
         _draw_game_world()
 
@@ -838,16 +1113,19 @@ func _draw_home() -> void:
     _draw_panel(Rect2(card_x, card_y, card_w, card_h), "SAFEHOUSE TERMINAL", "PROTOCOL 04  /  STAY ALIVE")
     var bx := card_x + 20.0
     var bw := card_w - 40.0
-    _draw_ui_button("home_lan", Rect2(bx, card_y + 83.0, bw, 66.0), "MULTIPLAYER LAN", "HOST OR JOIN UP TO FOUR SURVIVORS", Color("#d64e51"), true)
-    _draw_ui_button("home_solo", Rect2(bx, card_y + 163.0, bw, 60.0), "SOLO SURVIVAL", "DEFEND THIS SAFEHOUSE OFFLINE", Color("#c18a55"), false)
-    _draw_ui_button("home_controls", Rect2(bx, card_y + 236.0, bw, 54.0), "FIELD MANUAL", "MOVE  /  FIRE  /  HEAL  /  SAVE", Color("#9cae91"), false)
+    _draw_ui_button("home_lan", Rect2(bx, card_y + 78.0, bw, 54.0), "MULTIPLAYER LAN", "HOST OR JOIN UP TO FOUR SURVIVORS", Color("#d64e51"), true)
+    _draw_ui_button("home_solo", Rect2(bx, card_y + 140.0, bw, 52.0), "NEW SOLO RUN", "START WITH A CLEAN ARENA", Color("#c18a55"), false)
+    var save_available := FileAccess.file_exists(SAVE_PATH)
+    var continue_subtitle := "RESUME THE MANUALLY SAVED RUN" if save_available else "NO SAVED RUN — START SOLO FIRST"
+    _draw_ui_button("home_continue", Rect2(bx, card_y + 200.0, bw, 50.0), "CONTINUE SAVED", continue_subtitle, Color("#8ca17f"), false)
+    _draw_ui_button("home_controls", Rect2(bx, card_y + 258.0, bw, 46.0), "FIELD MANUAL", "MOVE  /  FIRE  /  HEAL  /  SAVE", Color("#9cae91"), false)
 
-    var signal_rect := Rect2(bx, card_y + 316.0, bw, 42.0)
+    var signal_rect := Rect2(bx, card_y + 312.0, bw, 35.0)
     draw_rect(signal_rect, Color(0.12, 0.045, 0.05, 0.88))
     draw_rect(Rect2(signal_rect.position, Vector2(3, signal_rect.size.y)), Color("#9e4146"))
     draw_circle(Vector2(signal_rect.position.x + 17, signal_rect.position.y + 21), 4.0, Color("#dc685b"))
     draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "LOCAL SIGNAL ONLY  /  UDP %d" % PORT, HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
-    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.0  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
+    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.1  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
 
 func _draw_help() -> void:
     _draw_apocalypse_backdrop(true)
@@ -1047,12 +1325,17 @@ func _draw_game_hud() -> void:
     var wave_w := 166.0
     var wave_x := w * 0.5 - wave_w * 0.5
     wave_x = clampf(wave_x, left_rect.position.x + left_rect.size.x + 10.0, w - 224.0)
-    draw_rect(Rect2(wave_x + 3, 15, wave_w, 55), Color(0.0, 0.0, 0.0, 0.34))
-    draw_rect(Rect2(wave_x, 12, wave_w, 54), Color(0.015, 0.025, 0.03, 0.95))
+    draw_rect(Rect2(wave_x + 3, 15, wave_w, 62), Color(0.0, 0.0, 0.0, 0.34))
+    draw_rect(Rect2(wave_x, 12, wave_w, 61), Color(0.015, 0.025, 0.03, 0.95))
     draw_rect(Rect2(wave_x, 12, wave_w, 3), Color("#cf4b50"))
-    draw_string(ui_font, Vector2(wave_x + 12, 33), "WAVE %02d" % wave_number, HORIZONTAL_ALIGNMENT_LEFT, wave_w - 24, 16, Color("#f0d08d"))
-    draw_string(ui_font, Vector2(wave_x + 12, 48), "ELIMINATED  %02d / %02d" % [wave_kills, wave_total], HORIZONTAL_ALIGNMENT_LEFT, wave_w - 24, 9, Color("#c9d0c7"))
-    var progress_rect := Rect2(wave_x + 12, 55, wave_w - 24, 4)
+    draw_string(ui_font, Vector2(wave_x + 12, 31), "WAVE %02d" % wave_number, HORIZONTAL_ALIGNMENT_LEFT, wave_w - 24, 15, Color("#f0d08d"))
+    draw_string(ui_font, Vector2(wave_x + 12, 43), "ELIMINATED  %02d / %02d" % [wave_kills, wave_total], HORIZONTAL_ALIGNMENT_LEFT, wave_w - 24, 8, Color("#c9d0c7"))
+    var wave_seconds := ceili(wave_time_remaining)
+    var wave_minutes := int(wave_seconds / 60)
+    var wave_clock_text := "OVERTIME" if wave_timed_out else ("WAVE CLEAR" if wave_break_timer > 0.0 else "TIME  %02d:%02d" % [wave_minutes, wave_seconds % 60])
+    var clock_color := Color("#e66b61") if wave_timed_out else Color("#c5cbbd")
+    draw_string(ui_font, Vector2(wave_x + 12, 55), wave_clock_text, HORIZONTAL_ALIGNMENT_LEFT, wave_w - 24, 9, clock_color)
+    var progress_rect := Rect2(wave_x + 12, 64, wave_w - 24, 4)
     draw_rect(progress_rect, Color("#343a39"))
     draw_rect(Rect2(progress_rect.position, Vector2(progress_rect.size.x * clampf(float(wave_kills) / float(maxi(1, wave_total)), 0.0, 1.0), progress_rect.size.y)), Color("#bf4449"))
     if wave_break_timer > 0.0:
@@ -1108,6 +1391,24 @@ func _draw_pause_menu() -> void:
     _draw_ui_button("pause_save", Rect2(x, panel.position.y + 156.0, bw, 49.0), "SAVE WORLD", "HOST ONLY", Color("#c18a55"), false)
     _draw_ui_button("pause_home", Rect2(x, panel.position.y + 218.0, bw, 49.0), "ABANDON SESSION", "RETURN TO SAFEHOUSE", Color("#b94a50"), false)
     draw_string(ui_font, Vector2(x, panel.position.y + panel.size.y - 20.0), ui_status, HORIZONTAL_ALIGNMENT_LEFT, bw, 9, Color("#b9c0b8"))
+
+func _draw_game_over_menu() -> void:
+    var w := screen_size.x
+    var h := screen_size.y
+    draw_rect(Rect2(Vector2.ZERO, screen_size), Color(0.015, 0.005, 0.012, 0.76))
+    draw_rect(Rect2(0, 0, w, 5), Color("#d84b52"))
+    var panel_w := minf(440.0, w * 0.72)
+    var panel_h := minf(286.0, h - 34.0)
+    var panel := Rect2((w - panel_w) * 0.5, (h - panel_h) * 0.5, panel_w, panel_h)
+    _draw_panel(panel, "SQUAD ELIMINATED", "THE HORDE OVERRAN YOUR DEFENSE LINE.")
+    draw_string(ui_font, Vector2(panel.position.x + 25, panel.position.y + 91), "WAVE %02d  •  ELIMINATED %02d / %02d" % [wave_number, wave_kills, wave_total], HORIZONTAL_ALIGNMENT_LEFT, panel_w - 50, 12, Color("#e0c89c"))
+    draw_string(ui_font, Vector2(panel.position.x + 25, panel.position.y + 113), "ZOMBIES STILL ACTIVE: %d" % zombies.size(), HORIZONTAL_ALIGNMENT_LEFT, panel_w - 50, 10, Color("#bac3bd"))
+    var button_x := panel.position.x + 24.0
+    var button_w := panel_w - 48.0
+    _draw_ui_button("gameover_restart", Rect2(button_x, panel.position.y + 138.0, button_w, 48.0), "RESTART RUN", "RESET WAVE, HEALTH AND ZOMBIES", Color("#c84a4e"), true)
+    _draw_ui_button("gameover_home", Rect2(button_x, panel.position.y + 197.0, button_w, 43.0), "RETURN TO SAFEHOUSE", "LEAVE THIS SESSION", Color("#9aa78d"), false)
+    if not is_host:
+        draw_string(ui_font, Vector2(button_x, panel.position.y + panel.size.y - 8.0), "RESTART REQUEST GOES TO HOST", HORIZONTAL_ALIGNMENT_CENTER, button_w, 8, Color("#c3a08f"))
 
 func _draw_panel(rect: Rect2, heading: String, subtitle: String) -> void:
     draw_rect(Rect2(rect.position + Vector2(6, 7), rect.size), Color(0.0, 0.0, 0.0, 0.46))
@@ -1313,7 +1614,9 @@ func _handle_ui_button(id: String) -> void:
             screen_mode = "lobby"
             ui_status = "Create a world or join a friend on the same hotspot."
         "home_solo":
-            _start_offline()
+            _start_offline(false)
+        "home_continue":
+            _start_offline(true)
         "home_controls":
             screen_mode = "help"
         "help_back":
@@ -1356,6 +1659,17 @@ func _handle_ui_button(id: String) -> void:
             else:
                 ui_status = "Only the host can save the world."
         "pause_home":
+            _leave_world()
+            screen_mode = "home"
+        "gameover_restart":
+            if is_host:
+                _restart_run()
+            elif _is_connected_client():
+                rpc_id(1, "request_restart")
+                ui_status = "Restart requested — waiting for the host"
+            else:
+                ui_status = "Start a new run from the safehouse"
+        "gameover_home":
             _leave_world()
             screen_mode = "home"
 
