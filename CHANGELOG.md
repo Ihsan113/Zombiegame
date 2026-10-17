@@ -30,3 +30,12 @@
 ## 0.3.9 — parser fix
 - Fixed Godot 4.7.2 `Cannot infer the type of "sx"` by explicitly typing the hazard cover positions and stripe coordinates.
 - Android version code/name: 12 / 0.3.9.
+
+
+## 0.4.0 — seamless arena and living characters
+- Moved the playable area start from 56.5% to 51.5%, aligned to the original background’s curb/asphalt edge.
+- Removed artificial full-width arena separators and duplicate yellow lane dashes so the background artwork supplies the transition/road markings naturally.
+- Added procedural survivor/zombie idle breathing and walk bob/sway, small footstep dust, muzzle-fire recoil, hit flashes/shake, and zombie lunge/recoil.
+- Reworked zombie melee from continuous touch damage into readable timed strikes with a short claw swipe; tuned standard/runner/heavy hit cadence while keeping comparable damage rates.
+- Preserved host-authoritative combat and replicated animation timers; added safe defaults for saved zombie state.
+- Added CI checks for animation implementation markers; Android version code/name 13 / 0.4.0.

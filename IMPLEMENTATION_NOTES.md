@@ -34,3 +34,11 @@ The script fix and resource references were checked statically. This workspace d
 ## v0.3.9 compile fix
 - In `_draw_game_world()`, the loop uses a typed `Array[float]`; each cover X value and `sx` are explicitly converted/declared as `float`, avoiding the Godot 4.7.2 Variant inference parse error.
 - The provided CI workflow validates scripts and starts the project headlessly before exporting an APK.
+
+
+## v0.4.0 arena and procedural animation
+- The background image’s own curb marks the transition. `ARENA_TOP_RATIO=0.515` keeps spawn/movement inside the asphalt section without a second full-width rendered divider. The renderer no longer draws duplicate lane-centre dashes, since the JPG already contains those markings.
+- `animation_clock` advances locally every frame. `_character_visual_position()` adds light idle breathing and walk bob; `_draw_atlas_character()` adds tiny body sway/squash, lunge/recoil, hit shake and a short red impact tint.
+- Walking survivors/zombies get small procedural dust puffs. The host publishes `walking`, `shoot_timer`, `hurt_timer`, `attack_timer`, `attack_cooldown`, `hit_timer`, and attack state in world snapshots so LAN peers show matching action states.
+- Zombie contact now uses `ZOMBIE_ATTACK_RANGE` and a cooldown-based melee hit with an animated claw swipe, rather than continuously draining player HP each frame. Standard, runner and heavy types use different damage/cadence values.
+- This is a lightweight procedural animation over the existing sprite atlas, not a new multi-frame skeletal sprite sheet. Godot parser/startup smoke tests and physical Android/hotspot play still need to pass after push.

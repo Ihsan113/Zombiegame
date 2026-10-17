@@ -1,18 +1,19 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.3.9
+# Pixel Zombie LAN — wave defense prototype v0.4.0
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
 const MAX_PLAYERS := 4
 const PLAYER_SPEED := 150.0
 const ZOMBIE_SPEED := 28.0
+const ZOMBIE_ATTACK_RANGE := 45.0
 const ZOMBIE_MAX_HP := [3.0, 4.0, 7.0, 3.5]
 const WAVE_ZOMBIE_COUNT := 25
 const SHOT_RANGE_MAX := 560.0
 const SHOT_LANE_TOLERANCE := 25.0
 const FIRE_REPEAT_INTERVAL := 0.30
-const ARENA_TOP_RATIO := 0.565
+const ARENA_TOP_RATIO := 0.515
 const ARENA_BOTTOM_RATIO := 0.92
 const SNAPSHOT_INTERVAL := 0.10 # 10 world snapshots/second
 const INPUT_INTERVAL := 0.05    # 20 input updates/second
@@ -59,6 +60,7 @@ var ui_status := "Offline — tap HOST or JOIN"
 var ui_font: Font
 var screen_size := Vector2(960, 540)
 var last_save_time := 0.0
+var animation_clock := 0.0
 
 func _ready() -> void:
     randomize()
@@ -89,6 +91,7 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
     screen_size = get_viewport_rect().size
+    animation_clock += delta
 
     if screen_mode == "game":
         if is_host:
@@ -164,12 +167,16 @@ func _host_simulate(delta: float) -> void:
         var id := int(id_variant)
         var p: Dictionary = players[id]
         var movement: Vector2 = input_vectors.get(id, Vector2.ZERO).limit_length(1.0)
-        if float(p.get("hp", 0.0)) > 0.0:
+        var alive := float(p.get("hp", 0.0)) > 0.0
+        if alive:
             p["x"] = clampf(float(p.get("x", screen_size.x * 0.5)) + movement.x * PLAYER_SPEED * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
             p["y"] = clampf(float(p.get("y", screen_size.y * 0.68)) + movement.y * PLAYER_SPEED * delta, _arena_top() + 30.0, _arena_bottom() - 30.0)
-            # Side-view shooter: keep a left/right facing so shots travel on a straight horizontal lane.
+            # Side-view shooter: keep left/right facing for perfectly horizontal shots.
             if absf(movement.x) > 0.14:
                 p["face_x"] = -1.0 if movement.x < 0.0 else 1.0
+        p["walking"] = alive and movement.length() > 0.12
+        p["shoot_timer"] = maxf(0.0, float(p.get("shoot_timer", 0.0)) - delta)
+        p["hurt_timer"] = maxf(0.0, float(p.get("hurt_timer", 0.0)) - delta)
         players[id] = p
 
     for effect_index in range(combat_effects.size() - 1, -1, -1):
@@ -204,6 +211,12 @@ func _host_simulate(delta: float) -> void:
         var zombie_pos := Vector2(float(z.get("x", 480.0)), float(z.get("y", 270.0)))
         var target_id := -1
         var nearest_distance := INF
+        var attack_timer := maxf(0.0, float(z.get("attack_timer", 0.0)) - delta)
+        var attack_cooldown := maxf(0.0, float(z.get("attack_cooldown", 0.0)) - delta)
+        z["hit_timer"] = maxf(0.0, float(z.get("hit_timer", 0.0)) - delta)
+        z["attacking"] = false
+        z["walking"] = false
+
         for id_variant in players.keys():
             var id := int(id_variant)
             var p: Dictionary = players[id]
@@ -213,19 +226,40 @@ func _host_simulate(delta: float) -> void:
             if distance < nearest_distance:
                 nearest_distance = distance
                 target_id = id
+
         if target_id != -1:
             var target: Dictionary = players[target_id]
-            if nearest_distance > 18.0:
-                var direction := (Vector2(float(target.x), float(target.y)) - zombie_pos).normalized()
+            var target_pos := Vector2(float(target.get("x", 0.0)), float(target.get("y", 0.0)))
+            var delta_to_target := target_pos - zombie_pos
+            var direction := delta_to_target.normalized()
+            if absf(direction.x) > 0.08:
+                z["face_x"] = -1.0 if direction.x < 0.0 else 1.0
+
+            if nearest_distance > ZOMBIE_ATTACK_RANGE:
+                z["walking"] = true
+                attack_timer = 0.0
                 var zombie_kind := clampi(int(z.get("kind", 0)), 0, ZOMBIE_MAX_HP.size() - 1)
                 var speed_scale := 0.68 if zombie_kind == 2 else (1.25 if zombie_kind == 3 else 1.0)
-                if absf(direction.x) > 0.08:
-                    z["face_x"] = -1.0 if direction.x < 0.0 else 1.0
-                z["x"] = clampf(float(z.x) + direction.x * ZOMBIE_SPEED * speed_scale * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
-                z["y"] = clampf(float(z.y) + direction.y * ZOMBIE_SPEED * speed_scale * delta, _arena_top() + 31.0, _arena_bottom() - 31.0)
+                z["x"] = clampf(float(z.get("x", zombie_pos.x)) + direction.x * ZOMBIE_SPEED * speed_scale * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
+                z["y"] = clampf(float(z.get("y", zombie_pos.y)) + direction.y * ZOMBIE_SPEED * speed_scale * delta, _arena_top() + 31.0, _arena_bottom() - 31.0)
             else:
-                target["hp"] = maxf(0.0, float(target.get("hp", 0.0)) - 8.0 * delta)
-                players[target_id] = target
+                z["walking"] = false
+                z["attacking"] = attack_timer > 0.0
+                if attack_cooldown <= 0.0:
+                    var zombie_kind := clampi(int(z.get("kind", 0)), 0, ZOMBIE_MAX_HP.size() - 1)
+                    var damage := 8.0 if zombie_kind == 2 else (4.5 if zombie_kind == 3 else 6.0)
+                    var cooldown := 0.92 if zombie_kind == 2 else (0.56 if zombie_kind == 3 else 0.74)
+                    target["hp"] = maxf(0.0, float(target.get("hp", 0.0)) - damage)
+                    target["hurt_timer"] = 0.34
+                    players[target_id] = target
+                    attack_cooldown = cooldown
+                    attack_timer = 0.38
+                    z["attacking"] = true
+                    # A short red claw arc makes contact readable without a large screen effect.
+                    _add_combat_effect(5, zombie_pos + Vector2(float(z.get("face_x", 1.0)) * 14.0, -3.0), target_pos + Vector2(0.0, -7.0), 0.20)
+
+        z["attack_timer"] = attack_timer
+        z["attack_cooldown"] = attack_cooldown
         zombies[zi] = z
 
     if wave_break_timer <= 0.0 and wave_spawned >= wave_total and zombies.is_empty():
@@ -252,7 +286,12 @@ func _spawn_wave_zombie() -> void:
         "y": spawn_y,
         "face_x": 1.0 if spawn_left else -1.0,
         "hp": zombie_hp,
-        "max_hp": zombie_hp
+        "max_hp": zombie_hp,
+        "walking": false,
+        "attacking": false,
+        "attack_timer": 0.0,
+        "attack_cooldown": randf_range(0.12, 0.50),
+        "hit_timer": 0.0
     })
 
 func _spawn_local_player() -> void:
@@ -271,7 +310,10 @@ func _make_player(id: int) -> Dictionary:
         "hp": 100.0,
         "medkits": 2,
         "face_x": 1.0,
-        "name": "P%d" % id
+        "name": "P%d" % id,
+        "walking": false,
+        "shoot_timer": 0.0,
+        "hurt_timer": 0.0
     }
 
 func _player_color(id: int) -> Color:
@@ -423,6 +465,9 @@ func _interpolate_client_state(delta: float) -> void:
         current["hp"] = target.get("hp", 100.0)
         current["medkits"] = target.get("medkits", 2)
         current["face_x"] = target.get("face_x", 1.0)
+        current["walking"] = target.get("walking", false)
+        current["shoot_timer"] = target.get("shoot_timer", 0.0)
+        current["hurt_timer"] = target.get("hurt_timer", 0.0)
         players[id] = current
     for id_variant in players.keys().duplicate():
         if not target_players.has(id_variant):
@@ -464,6 +509,8 @@ func _host_fire(id: int) -> void:
     var p: Dictionary = players[id]
     if float(p.get("hp", 0.0)) <= 0.0:
         return
+    p["shoot_timer"] = 0.19
+    players[id] = p
 
     # Straight horizontal shot: aim is fixed by the last left/right movement, never auto-aimed at a zombie.
     var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.5)))
@@ -491,6 +538,8 @@ func _host_fire(id: int) -> void:
         var impact_pos := Vector2(float(zombie.get("x", tracer_end.x)), player_pos.y - 5.0)
         _add_combat_effect(2, impact_pos, impact_pos, 0.18)
         _add_combat_effect(3, Vector2(float(zombie.get("x", tracer_end.x)), float(zombie.get("y", tracer_end.y))), impact_pos, 0.26)
+        zombie["hit_timer"] = 0.16
+        zombie["walking"] = false
         zombie["hp"] = float(zombie.get("hp", 1.0)) - 1.0
         if float(zombie["hp"]) <= 0.0:
             _add_combat_effect(4, impact_pos, impact_pos, 0.30)
@@ -581,8 +630,14 @@ func _load_world() -> void:
                     "kind": kind,
                     "x": clampf(float(z.get("x", screen_size.x * 0.5)), 30.0, maxf(31.0, screen_size.x - 30.0)),
                     "y": clampf(float(z.get("y", screen_size.y * 0.68)), _arena_top() + 31.0, _arena_bottom() - 31.0),
+                    "face_x": -1.0 if float(z.get("face_x", -1.0)) < 0.0 else 1.0,
                     "hp": clampf(float(z.get("hp", max_hp)), 0.1, max_hp),
-                    "max_hp": max_hp
+                    "max_hp": max_hp,
+                    "walking": false,
+                    "attacking": false,
+                    "attack_timer": 0.0,
+                    "attack_cooldown": randf_range(0.12, 0.50),
+                    "hit_timer": 0.0
                 })
     players.clear()
     input_vectors.clear()
@@ -792,7 +847,7 @@ func _draw_home() -> void:
     draw_rect(Rect2(signal_rect.position, Vector2(3, signal_rect.size.y)), Color("#9e4146"))
     draw_circle(Vector2(signal_rect.position.x + 17, signal_rect.position.y + 21), 4.0, Color("#dc685b"))
     draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "LOCAL SIGNAL ONLY  /  UDP %d" % PORT, HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
-    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.3.9  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
+    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.0  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
 
 func _draw_help() -> void:
     _draw_apocalypse_backdrop(true)
@@ -894,26 +949,20 @@ func _draw_game_world() -> void:
     else:
         draw_rect(Rect2(0, 0, w, h), Color("#1b2930"))
 
-    # Night-grade the scene but keep sprite and projectile highlights readable.
-    draw_rect(Rect2(0, 0, w, h), Color(0.012, 0.024, 0.038, 0.19))
-    draw_rect(Rect2(0, h * 0.42, w, h * 0.12), Color(0.08, 0.018, 0.023, 0.10))
+    # One subtle full-scene grade keeps the cinematic background unified.
+    draw_rect(Rect2(0, 0, w, h), Color(0.012, 0.024, 0.038, 0.16))
 
-    var lane_top := _arena_top()
+    # Use the image's own sidewalk-to-asphalt transition as the arena edge.
+    # Do not draw any full-width top/bottom separator overlays; they made a fake extra curb.
     var lane_bottom := _arena_bottom()
-    draw_rect(Rect2(0, lane_top, w, lane_bottom - lane_top), Color(0.012, 0.018, 0.023, 0.18))
-    draw_rect(Rect2(0, lane_top, w, 2), Color(0.78, 0.43, 0.30, 0.56))
-    draw_rect(Rect2(0, lane_bottom - 2, w, 2), Color(0.025, 0.03, 0.03, 0.72))
-    for x in range(22, int(w), 82):
-        draw_rect(Rect2(x, lane_top + (lane_bottom - lane_top) * 0.51, 35, 3), Color(0.78, 0.67, 0.43, 0.70))
 
-    # Grounded, low cover props at the lane edges; diagonal paint reads as hazard striping.
+    # Cover props are low and remain near the bottom edge, clear of character silhouettes.
     var cover_y := lane_bottom - 22.0
-    # Explicit float annotations avoid Variant inference errors in Godot 4.7.
     var cover_positions: Array[float] = [w * 0.105, w * 0.79]
     for cover_x_value in cover_positions:
         var cover_x: float = float(cover_x_value)
         var cover_w: float = 45.0
-        draw_rect(Rect2(cover_x, cover_y + 3.0, cover_w, 13), Color(0.015, 0.02, 0.02, 0.52))
+        draw_rect(Rect2(cover_x, cover_y + 3.0, cover_w, 13), Color(0.015, 0.02, 0.02, 0.42))
         draw_rect(Rect2(cover_x, cover_y, cover_w, 13), Color("#424a46"))
         draw_rect(Rect2(cover_x, cover_y, cover_w, 3), Color("#899087"))
         for stripe in range(3):
@@ -921,7 +970,8 @@ func _draw_game_world() -> void:
             draw_line(Vector2(sx, cover_y + 4.0), Vector2(sx + 5.0, cover_y + 11.0), Color("#b59b62"), 2.0, true)
         draw_rect(Rect2(cover_x, cover_y, cover_w, 13), Color("#171f20"), false, 1.0)
 
-    # Y-sort survivor and enemies so overlaps look grounded and the art stays legible.
+    # Y-sort survivor and enemies so overlaps remain grounded. Animation is visual-only;
+    # host-authoritative positions, hit points and shots are unchanged by the render layer.
     var render_entries: Array[Dictionary] = []
     for id_variant in players.keys():
         var pid := int(id_variant)
@@ -936,16 +986,23 @@ func _draw_game_world() -> void:
             var id := int(entry.id)
             var p: Dictionary = players[id]
             pos = Vector2(float(p.get("x", w * 0.5)), float(p.get("y", h * 0.68)))
+            var moving := bool(p.get("walking", false))
+            var shooting := float(p.get("shoot_timer", 0.0)) > 0.02
+            var hurt := float(p.get("hurt_timer", 0.0)) > 0.02
+            var phase := float(id) * 1.37
+            var visual_pos := _character_visual_position(pos, false, float(p.get("face_x", 1.0)) < 0.0, moving, false, shooting, phase, hurt)
             draw_circle(pos + Vector2(0, 27), 10.0, Color(0.005, 0.01, 0.012, 0.34))
             var team_color := _player_color(id)
             draw_arc(pos + Vector2(0, 28), 13.0, 0, TAU, 28, Color(team_color.r, team_color.g, team_color.b, 0.48), 1.5)
-            _draw_atlas_character(pos, _player_sprite_index(id), false, 1.0, float(p.get("face_x", 1.0)) < 0.0)
+            if moving:
+                _draw_footstep_dust(pos, phase, false)
+            _draw_atlas_character(pos, _player_sprite_index(id), false, 1.0, float(p.get("face_x", 1.0)) < 0.0, moving, false, hurt, shooting, phase)
             var label := _player_label(id)
-            var label_pos := pos + Vector2(-22, -43)
+            var label_pos := visual_pos + Vector2(-22, -43)
             draw_rect(Rect2(label_pos.x - 1, label_pos.y - 12, 44, 16), Color(0.01, 0.015, 0.02, 0.74))
             draw_string(ui_font, label_pos, label, HORIZONTAL_ALIGNMENT_CENTER, 42, 10, _player_color(id))
             var player_hp := clampf(float(p.get("hp", 0.0)) / 100.0, 0.0, 1.0)
-            var player_bar := Rect2(pos + Vector2(-17, 32), Vector2(34, 5))
+            var player_bar := Rect2(visual_pos + Vector2(-17, 32), Vector2(34, 5))
             draw_rect(Rect2(player_bar.position - Vector2(1, 1), player_bar.size + Vector2(2, 2)), Color("#141819"))
             draw_rect(player_bar, Color("#472628"))
             var player_hp_color := Color("#b94346") if player_hp <= 0.30 else (Color("#d39a50") if player_hp <= 0.58 else Color("#86b76b"))
@@ -953,10 +1010,22 @@ func _draw_game_world() -> void:
         else:
             var z: Dictionary = zombies[int(entry.index)]
             pos = Vector2(float(z.get("x", 0.0)), float(z.get("y", h * 0.68)))
-            var heavy := int(z.get("kind", 0)) == 2
+            var zombie_kind := clampi(int(z.get("kind", 0)), 0, 3)
+            var heavy := zombie_kind == 2
+            var moving := bool(z.get("walking", false))
+            var attack_timer_value := float(z.get("attack_timer", 0.0))
+            var attacking := bool(z.get("attacking", false)) and attack_timer_value > 0.02
+            var hurt := float(z.get("hit_timer", 0.0)) > 0.02
+            var facing_left := float(z.get("face_x", -1.0)) < 0.0
+            var phase := float(int(z.get("id", int(entry.index))) % 47) * 0.29 + float(zombie_kind) * 0.8
+            var visual_pos := _character_visual_position(pos, true, facing_left, moving, attacking, false, phase, hurt)
             draw_circle(pos + Vector2(0, 28), 11.0 if heavy else 8.5, Color(0.005, 0.008, 0.01, 0.34))
-            _draw_atlas_character(pos, clampi(int(z.get("kind", 0)), 0, 3), true, 1.0, float(z.get("face_x", -1.0)) < 0.0)
-            _draw_zombie_health(z, pos)
+            if moving:
+                _draw_footstep_dust(pos, phase, true)
+            _draw_atlas_character(pos, zombie_kind, true, 1.0, facing_left, moving, attacking, hurt, false, phase)
+            if attacking:
+                _draw_zombie_attack_swipe(visual_pos, facing_left, attack_timer_value)
+            _draw_zombie_health(z, visual_pos)
     _draw_combat_effects()
     _draw_game_hud()
 
@@ -1098,9 +1167,23 @@ func _draw_title_text(pos: Vector2, label: String, size: int, color: Color) -> v
 func _player_sprite_index(id: int) -> int:
     return posmod(id - 1, 4)
 
-func _draw_atlas_character(pos: Vector2, kind: int, zombie: bool, scale_value: float = 1.0, facing_left: bool = false) -> void:
+func _character_visual_position(pos: Vector2, zombie: bool, facing_left: bool, moving: bool, attacking: bool, shooting: bool, phase: float, hurt: bool = false) -> Vector2:
+    var cadence := animation_clock * (11.5 if moving else 2.35) + phase
+    var bob_amount := 2.25 if moving else 0.55
+    var bob := sin(cadence) * bob_amount
+    var facing_sign := -1.0 if facing_left else 1.0
+    var lunge := 0.0
+    if zombie and attacking:
+        lunge = 3.0 + 3.6 * sin(animation_clock * 21.0 + phase)
+    elif shooting:
+        lunge = -2.0
+    var hurt_shake := -facing_sign * 1.8 * sin(animation_clock * 54.0) if hurt else 0.0
+    return pos + Vector2(facing_sign * lunge + hurt_shake, bob)
+
+func _draw_atlas_character(pos: Vector2, kind: int, zombie: bool, scale_value: float = 1.0, facing_left: bool = false, moving: bool = false, attacking: bool = false, hurt: bool = false, shooting: bool = false, phase: float = 0.0) -> void:
     if sprite_atlas == null:
-        draw_rect(Rect2(pos + Vector2(-8, -9), Vector2(16, 18)), _player_color(kind + 1))
+        var fallback_pos := _character_visual_position(pos, zombie, facing_left, moving, attacking, shooting, phase, hurt)
+        draw_rect(Rect2(fallback_pos + Vector2(-8, -9), Vector2(16, 18)), Color("#ac4b4d") if hurt else _player_color(kind + 1))
         return
     # PNG atlas: 64x80 cells (320x192). SVG fallback: 80x80 cells (320x240).
     var svg_layout := sprite_atlas.get_height() >= 240
@@ -1110,13 +1193,53 @@ func _draw_atlas_character(pos: Vector2, kind: int, zombie: bool, scale_value: f
     var size := Vector2(58.0, 70.0) * scale_value
     if zombie and kind == 2:
         size = Vector2(64.0, 70.0) * scale_value
+
+    var cadence := animation_clock * (11.5 if moving else 2.35) + phase
+    var facing_sign := -1.0 if facing_left else 1.0
+    var visual_pos := _character_visual_position(pos, zombie, facing_left, moving, attacking, shooting, phase, hurt)
+    var rotation := sin(cadence) * (0.035 if moving else 0.009)
+    var scale_x := 1.0 + sin(cadence) * (0.012 if moving else 0.003)
+    var scale_y := 1.0 - sin(cadence) * (0.018 if moving else 0.004)
+    if zombie and attacking:
+        # Quick shoulder-first lunge and recoil, noticeably stronger than the walking sway.
+        rotation = -facing_sign * 0.075 + sin(animation_clock * 21.0 + phase) * 0.025
+        scale_x += 0.035 * sin(animation_clock * 21.0 + phase)
+        scale_y -= 0.018 * sin(animation_clock * 21.0 + phase)
+    elif shooting:
+        rotation -= facing_sign * 0.035
+        scale_y += 0.014
+    var tint := Color.WHITE
+    if hurt and int(animation_clock * 32.0) % 2 == 0:
+        tint = Color(1.0, 0.57, 0.54, 1.0)
+
+    var flip_x := -scale_x if facing_left else scale_x
+    draw_set_transform(visual_pos, rotation, Vector2(flip_x, scale_y))
+    var dest := Rect2(-size.x * 0.5, -size.y * 0.5, size.x, size.y)
     var source_rect := Rect2(source_x, source_y, cell_width, 80)
-    if facing_left:
-        draw_set_transform(pos, 0.0, Vector2(-1.0, 1.0))
-        draw_texture_rect_region(sprite_atlas, Rect2(-size.x * 0.5, -size.y * 0.5, size.x, size.y), source_rect, Color.WHITE, false, true)
-        draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
-    else:
-        draw_texture_rect_region(sprite_atlas, Rect2(pos - size * 0.5, size), source_rect, Color.WHITE, false, true)
+    draw_texture_rect_region(sprite_atlas, dest, source_rect, tint, false, true)
+    draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+func _draw_footstep_dust(pos: Vector2, phase: float, zombie: bool) -> void:
+    var cadence := animation_clock * 11.5 + phase
+    var step := sin(cadence)
+    var fade := 0.10 + 0.14 * absf(cos(cadence))
+    var color := Color(0.48, 0.58, 0.44, fade) if zombie else Color(0.67, 0.63, 0.53, fade * 0.72)
+    draw_circle(pos + Vector2(-8.0 + step * 5.0, 27.0), 2.0 + absf(step), color)
+    draw_circle(pos + Vector2(7.0 - step * 4.0, 29.0), 1.5 + absf(step) * 0.65, Color(color.r, color.g, color.b, fade * 0.72))
+
+func _draw_zombie_attack_swipe(pos: Vector2, facing_left: bool, attack_timer: float) -> void:
+    var phase := clampf(1.0 - attack_timer / 0.38, 0.0, 1.0)
+    var envelope := sin(phase * PI)
+    if envelope <= 0.03:
+        return
+    var dir := -1.0 if facing_left else 1.0
+    var base := pos + Vector2(dir * 18.0, -5.0)
+    for slash_index in range(3):
+        var vertical := float(slash_index - 1) * 5.0
+        var start := base + Vector2(dir * -2.0, vertical - 5.0)
+        var finish := base + Vector2(dir * (8.0 + float(slash_index) * 2.0), vertical + 5.0)
+        draw_line(start, finish, Color(0.58, 0.10, 0.14, envelope * 0.72), 2.4, true)
+        draw_line(start + Vector2(0.0, -1.0), finish + Vector2(0.0, -1.0), Color(0.95, 0.44, 0.36, envelope * 0.55), 1.0, true)
 
 func _draw_survivor(pos: Vector2, color: Color, scale_value: float) -> void:
     var sprite_index := 0
@@ -1140,7 +1263,7 @@ func _draw_zombie_health(zombie: Dictionary, pos: Vector2) -> void:
 
 func _draw_combat_effects() -> void:
     for effect in combat_effects:
-        var kind := clampi(int(effect.get("kind", 0)), 0, 4)
+        var kind := clampi(int(effect.get("kind", 0)), 0, 5)
         var start_pos := Vector2(float(effect.get("x", 0.0)), float(effect.get("y", 0.0)))
         var end_pos := Vector2(float(effect.get("x2", start_pos.x)), float(effect.get("y2", start_pos.y)))
         var life := maxf(0.01, float(effect.get("life", 0.18)))
@@ -1160,6 +1283,16 @@ func _draw_combat_effects() -> void:
             else:
                 draw_circle(bullet_pos, 2.2, Color(1.0, 0.87, 0.45, alpha))
             draw_line(bullet_pos - bullet_dir * 5.0, bullet_pos - bullet_dir * 2.0, Color(1.0, 0.52, 0.17, alpha * 0.8), 1.5, true)
+        elif kind == 5:
+            # Host-synchronized claw slash: short, three-pronged streak instead of a huge flash.
+            var slash_dir := -1.0 if end_pos.x < start_pos.x else 1.0
+            var slash_len := 8.0 + 15.0 * progress
+            for slash_index in range(3):
+                var offset_y := float(slash_index - 1) * 5.0
+                var slash_start := start_pos + Vector2(slash_dir * float(slash_index) * 2.0, offset_y - 4.0)
+                var slash_end := end_pos + Vector2(-slash_dir * slash_len, offset_y + 4.0)
+                draw_line(slash_start, slash_end, Color(0.72, 0.12, 0.15, alpha * 0.82), 2.2, true)
+                draw_line(slash_start + Vector2(0, -1), slash_end + Vector2(0, -1), Color(0.98, 0.47, 0.39, alpha * 0.62), 1.0, true)
         elif sprite_atlas != null:
             var source_x := kind * 32
             var effect_size := Vector2(24, 24) if kind == 0 or kind == 2 or kind == 3 else Vector2(27, 27)
