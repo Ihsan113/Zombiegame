@@ -90,3 +90,10 @@ Other changes:
 - Added client-local survivor death animation: fade/collapse, then skull/rib/spine/limb remains that slowly fade. This adds no network state and does not touch host-authoritative HP.
 - Landed airdrops now last 22 seconds, display remaining time and a final-six-second flashing warning, then dissolve with a synchronized dust puff if not collected.
 - Preserved v0.4.11 ENet settings, input/snapshot rates, binary record sizes and RPC signatures. Android version code/name: 25 / 0.4.12.
+
+
+## 0.4.13 — aligned barricades and textured grenade blast
+- Replaced the 132 px barricade-distance rule with rendered-footprint overlap checks. Barricades can form tight rows while their sprite bounds still cannot overlap.
+- Added snap-to-neighbour for wall previews dragged near an existing barricade end. Candidate placements keep the same lane depth and still pass distance/range/overlap validation.
+- Added `assets/grenade_explosion_asset.png` (with editable SVG source alongside it), a transparent explosion sprite used by the grenade renderer with animated scale and opacity. Existing deterministic shockwave, ember, debris, and smoke layers remain.
+- Preserved multiplayer snapshot field sizes and ENet settings. Android version code/name: 26 / 0.4.13.

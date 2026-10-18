@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.12
+# Pixel Zombie LAN — wave defense prototype v0.4.13
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -38,6 +38,8 @@ const WALL_PLACE_RANGE_RATIO := 0.145
 # relative to the wall position (far-left, far-right, near-left, near-right); shadows are anchored to them.
 const BARRICADE_RECT_OFFSET := Vector2(-29.9, -39.3)
 const BARRICADE_RECT_SIZE := Vector2(60.0, 88.0)
+const BARRICADE_JOIN_GAP := 4.0 # Only a small visual gap is needed; older 132 px spacing left barricades disconnected.
+const BARRICADE_VERTICAL_SPACING := 88.0 # Prevent actual sprite overlap when walls are staggered vertically.
 const BARRICADE_FEET: Array[Vector2] = [Vector2(-23.1, 15.3), Vector2(-1.5, 8.2), Vector2(1.5, 43.8), Vector2(23.1, 36.7)]
 const BARRICADE_FOOT_RX: Array[float] = [9.0, 8.0, 10.0, 9.0]
 const BARRICADE_SHADOW_OFFSET := Vector2(-21.0, 6.0) # sun sits low behind the skyline, shadows fall toward the camera
@@ -113,6 +115,7 @@ var button_rects: Dictionary = {}
 var sprite_atlas: Texture2D
 var background_texture: Texture2D
 var grenade_texture: Texture2D
+var grenade_explosion_texture: Texture2D
 var barricade_texture: Texture2D
 var airdrop_crate_texture: Texture2D
 var parachute_texture: Texture2D
@@ -238,6 +241,10 @@ func _ready() -> void:
     if background_texture == null:
         background_texture = load("res://assets/arena_bg.svg") as Texture2D
     grenade_texture = load("res://assets/grenade_detail.svg") as Texture2D
+    # Runtime uses the pre-rendered transparent PNG for predictable Android import; the SVG stays as editable source.
+    grenade_explosion_texture = load("res://assets/grenade_explosion_asset.png") as Texture2D
+    if grenade_explosion_texture == null:
+        grenade_explosion_texture = load("res://assets/grenade_explosion_asset.svg") as Texture2D
     barricade_texture = load("res://assets/barricade_detail.png") as Texture2D
     if barricade_texture == null:
         barricade_texture = load("res://assets/barricade_detail.svg") as Texture2D
@@ -1990,9 +1997,41 @@ func _wall_placement_is_valid(id: int, wall_pos: Vector2) -> bool:
         return false
     for existing in barricades:
         var existing_pos := Vector2(float(existing.get("x", 0.0)), float(existing.get("y", 0.0)))
-        if existing_pos.distance_to(wall_pos) < 132.0:
+        var separation_x: float = absf(existing_pos.x - wall_pos.x)
+        var separation_y: float = absf(existing_pos.y - wall_pos.y)
+        # Test the actual rendered footprint instead of a 132 px radius. At the same depth,
+        # barricades may sit only 4 px apart, while staggered rows must not overlap vertically.
+        if separation_x < BARRICADE_RECT_SIZE.x + BARRICADE_JOIN_GAP and separation_y < BARRICADE_VERTICAL_SPACING:
             return false
     return true
+
+func _snap_wall_preview_to_neighbour(desired: Vector2, player_pos: Vector2) -> Vector2:
+    # When dragging near either end of an existing barricade, snap to its next slot and
+    # inherit the exact lane depth. This makes long, continuous barricade lines easy to build.
+    var best_position := desired
+    var best_error := 46.0
+    var snap_spacing: float = BARRICADE_RECT_SIZE.x + BARRICADE_JOIN_GAP
+    var max_distance: float = screen_size.x * WALL_PLACE_RANGE_RATIO
+    for existing in barricades:
+        var existing_pos := Vector2(float(existing.get("x", 0.0)), float(existing.get("y", 0.0)))
+        var delta_to_desired := desired - existing_pos
+        if absf(delta_to_desired.y) > 44.0:
+            continue
+        if absf(delta_to_desired.x) < 38.0 or absf(delta_to_desired.x) > 112.0:
+            continue
+        var side := -1.0 if delta_to_desired.x < 0.0 else 1.0
+        var candidate := Vector2(existing_pos.x + side * snap_spacing, existing_pos.y)
+        candidate.x = clampf(candidate.x, 44.0, maxf(45.0, screen_size.x - 44.0))
+        candidate.y = clampf(candidate.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+        var snap_error: float = desired.distance_to(candidate)
+        if snap_error >= best_error:
+            continue
+        var player_distance: float = player_pos.distance_to(candidate)
+        if player_distance < WALL_MIN_PLAYER_DISTANCE or player_distance > max_distance:
+            continue
+        best_position = candidate
+        best_error = snap_error
+    return best_position
 
 func _set_wall_preview_from_pointer(pointer_pos: Vector2) -> void:
     if not players.has(local_player_id):
@@ -2007,10 +2046,11 @@ func _set_wall_preview_from_pointer(pointer_pos: Vector2) -> void:
     var max_distance: float = screen_size.x * WALL_PLACE_RANGE_RATIO
     if offset.length() > max_distance:
         desired = player_pos + offset.normalized() * max_distance
-    wall_preview_position = Vector2(
+    var clamped_desired := Vector2(
         clampf(desired.x, 44.0, maxf(45.0, screen_size.x - 44.0)),
         clampf(desired.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
     )
+    wall_preview_position = _snap_wall_preview_to_neighbour(clamped_desired, player_pos)
 
 func _begin_grenade_aim(touch_id: int = -1) -> void:
     var p: Dictionary = players.get(local_player_id, {})
@@ -2722,7 +2762,7 @@ func _draw_home() -> void:
     draw_rect(Rect2(signal_rect.position, Vector2(3, signal_rect.size.y)), Color("#9e4146"))
     draw_circle(Vector2(signal_rect.position.x + 17, signal_rect.position.y + 21), 4.0, Color("#dc685b"))
     draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "LOCAL SIGNAL ONLY  /  UDP %d" % PORT, HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
-    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.12  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
+    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.13  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
 
 func _draw_help() -> void:
     _draw_apocalypse_backdrop(true)
@@ -3591,16 +3631,26 @@ func _draw_combat_effects() -> void:
             draw_arc(Vector2.ZERO, blast_radius * 0.68, 0.0, TAU, 52, Color(1.0, 0.77, 0.40, ring_alpha * 0.62), 1.8 * ring_alpha + 0.3)
             draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
-            # Initial flash: pale core surrounded by an orange incandescent envelope.
-            if flash > 0.01:
-                draw_circle(start_pos + Vector2(0.0, -4.0), 18.0 + 34.0 * flash, Color(1.0, 0.88, 0.65, flash * 0.82))
-                draw_circle(start_pos + Vector2(0.0, -5.0), 12.0 + 24.0 * flash, Color(1.0, 0.46, 0.12, flash * 0.90))
-                draw_circle(start_pos + Vector2(-1.0, -6.0), 6.0 + 15.0 * flash, Color(1.0, 0.96, 0.78, flash * 0.92))
-            if fire_fade > 0.01:
-                var fire_radius: float = 29.0 * pow(fire_fade, 1.25) + 1.0
-                draw_circle(start_pos + Vector2(0.0, -3.0), fire_radius, Color(0.77, 0.12, 0.045, fire_fade * 0.78))
-                draw_circle(start_pos + Vector2(-2.0, -6.0), fire_radius * 0.68, Color(1.0, 0.42, 0.09, fire_fade * 0.88))
-                draw_circle(start_pos + Vector2(-3.0, -8.0), fire_radius * 0.32, Color(1.0, 0.82, 0.37, fire_fade * 0.90))
+            # Use a dedicated transparent blast asset for textured flame/smoke detail.
+            # Scale swells quickly, then the artwork fades while the independently animated
+            # sparks, debris, shock ring and residual smoke continue through the effect lifetime.
+            if grenade_explosion_texture != null:
+                var asset_growth := 0.74 + 0.50 * clampf(progress / 0.23, 0.0, 1.0)
+                var asset_fade := clampf(1.0 - progress / 1.28, 0.0, 1.0)
+                var asset_size := Vector2(232.0, 190.0) * asset_growth
+                var asset_rect := Rect2(start_pos + Vector2(-asset_size.x * 0.5, -asset_size.y * 0.82), asset_size)
+                draw_texture_rect(grenade_explosion_texture, asset_rect, false, Color(1.0, 1.0, 1.0, asset_fade * 0.92))
+            else:
+                # Procedural emergency fallback if the optional texture cannot be imported.
+                if flash > 0.01:
+                    draw_circle(start_pos + Vector2(0.0, -4.0), 18.0 + 34.0 * flash, Color(1.0, 0.88, 0.65, flash * 0.82))
+                    draw_circle(start_pos + Vector2(0.0, -5.0), 12.0 + 24.0 * flash, Color(1.0, 0.46, 0.12, flash * 0.90))
+                    draw_circle(start_pos + Vector2(-1.0, -6.0), 6.0 + 15.0 * flash, Color(1.0, 0.96, 0.78, flash * 0.92))
+                if fire_fade > 0.01:
+                    var fire_radius: float = 29.0 * pow(fire_fade, 1.25) + 1.0
+                    draw_circle(start_pos + Vector2(0.0, -3.0), fire_radius, Color(0.77, 0.12, 0.045, fire_fade * 0.78))
+                    draw_circle(start_pos + Vector2(-2.0, -6.0), fire_radius * 0.68, Color(1.0, 0.42, 0.09, fire_fade * 0.88))
+                    draw_circle(start_pos + Vector2(-3.0, -8.0), fire_radius * 0.32, Color(1.0, 0.82, 0.37, fire_fade * 0.90))
 
             # Hot fragments shoot outward first, then fall back toward the street.
             var ember_progress := clampf(progress / 0.78, 0.0, 1.0)

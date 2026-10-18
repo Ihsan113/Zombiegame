@@ -1,4 +1,4 @@
-# Pixel Zombie LAN — v0.4.12
+# Pixel Zombie LAN — v0.4.13
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
 
@@ -64,3 +64,10 @@ v0.4.10 was parsed and run in Godot 4.7.2 (netcode checked at v0.4.9, barricade 
 - Host and client now create their ENet peer first, then call `peer.host.compress(ENetConnection.COMPRESS_FASTLZ)` before assigning it to `multiplayer.multiplayer_peer`.
 - The CI validator rejects the invalid legacy enum/property spelling and checks that both sides use the same compression mode.
 - Android version code/name: 20 / 0.4.7.
+
+
+## v0.4.13 — tighter barricade placement and asset-based grenade blast
+- Replaced the old 132 px barricade spacing with sprite-footprint overlap checks. Walls can be placed side-by-side with a 4 px visual gap while overlapping placements remain invalid.
+- Added automatic neighbour snapping when the wall preview is dragged close to an existing wall end; the preview inherits the neighbour's lane depth for straighter defensive lines.
+- Added `assets/grenade_explosion_asset.png` (rendered from the editable transparent SVG source), a layered blast asset animated with growth and fade, blended with the existing shock ring, sparks, fragments, and lingering smoke.
+- Preserves the v0.4.11 compact snapshot protocol and ENet networking configuration. Android version code/name: 26 / 0.4.13.

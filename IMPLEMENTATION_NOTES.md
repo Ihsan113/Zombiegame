@@ -1,4 +1,4 @@
-# Implementation notes — v0.4.12
+# Implementation notes — v0.4.13
 
 - Target: Godot 4, landscape Android; 4-player host-authoritative ENet/UDP LAN on port 24567.
 - `assets/barricade_detail.png` is the transparent A-frame road barrier; SVG is its fallback. Both render at 120×72, preserving the asset's 720×433 aspect ratio. With the game entity position at the same center convention as a survivor, the barrier's feet and a wider contact shadow reach the ground line. Wall placement preview shares the same dimensions. Minimum spacing is 132 px and zombie attack distance is tuned to engage at the outside edge.
@@ -49,3 +49,10 @@
 - Player death fade/bone remains are presentation-only and maintained in `player_death_visuals` locally. They do not enter `_encode_snapshot()`, save state, or any RPC. A respawn/restart clears the cosmetic state.
 - A landed airdrop's existing `despawn_timer` now starts at 22 seconds. The host remains the only device that removes the loot; clients show the countdown and render effect type 8 after receiving the authoritative snapshot.
 - No ENet tuning, input cadence, snapshot cadence, player/zombie/wall/drop/grenade/effect record sizes or RPC signatures were changed in this release.
+
+
+## v0.4.13 placement/render notes
+- Barricade spacing checks the rendered 60×88 px sprite footprint, uses 4 px horizontal join gap and 88 px vertical clearance. At the same lane depth, neighbours can sit 64 px apart rather than requiring 132 px.
+- `_snap_wall_preview_to_neighbour()` snaps near-end drag gestures to the nearest slot beside a placed barricade when the target remains within player range and valid arena bounds.
+- `assets/grenade_explosion_asset.svg` is a transparent 512×420 vector sprite with fire core, irregular flames, smoke lobes, ground dust and debris. The runtime scales/fades the asset while preserving the shock ring, sparks, falling fragments and smoke simulation.
+- No snapshot fields, RPC signatures, network intervals, or ENet compression settings were changed in this update.
