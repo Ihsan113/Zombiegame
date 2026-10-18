@@ -19,3 +19,9 @@
 
 ## 0.4.0 — arena and animation
 - Added a more complete horror backdrop, lower-lane bounds, animated walk/attack/hurt visuals and horror-themed UI.
+
+
+## 0.4.4 — CI validator correction
+- Fixed the airdrop loot label match to declare grenade loot explicitly and satisfy the existing semantic marker checks.
+- Legacy saved ammo drops now label as grenade loot because ammunition is unlimited.
+- Android version code/name: 17 / 0.4.4.

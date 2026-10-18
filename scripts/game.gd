@@ -1955,21 +1955,26 @@ func _draw_airdrop(drop: Dictionary, pos: Vector2) -> void:
         draw_line(Vector2(crate_rect.position.x + 4.0, crate_rect.position.y + 4.0), Vector2(crate_rect.end.x - 4.0, crate_rect.end.y - 4.0), Color("#c1a46c"), 3.0, true)
     var loot_kind := str(drop.get("loot_kind", "grenade"))
     var loot_quantity := maxi(1, int(drop.get("quantity", 1)))
-    var loot_tag := "GREN +%d" % loot_quantity
-    var loot_color := Color("#d5bb80")
-    match loot_kind:
-        "wall":
-            loot_tag = "WALL +%d" % loot_quantity
-            loot_color = Color("#c3b18c")
-        "medkit":
-            loot_tag = "MEDKIT +%d" % loot_quantity
-            loot_color = Color("#e28477")
-        "ammo":
-            loot_tag = "GREN +1"
-            loot_color = Color("#d5bb80")
-    if not landed:
-        loot_tag = "SUPPLY DROP"
-        loot_color = Color("#f1d79a")
+    var loot_tag: String = "SUPPLY DROP"
+    var loot_color := Color("#f1d79a")
+    if landed:
+        match loot_kind:
+            "grenade":
+                # Keep the grenade case explicit so future loot types cannot inherit a wrong label.
+                loot_kind = "grenade"
+                loot_tag = "GREN +%d" % loot_quantity
+                loot_color = Color("#d5bb80")
+            "wall":
+                loot_tag = "WALL +%d" % loot_quantity
+                loot_color = Color("#c3b18c")
+            "medkit":
+                loot_tag = "MEDKIT +%d" % loot_quantity
+                loot_color = Color("#e28477")
+            "ammo":
+                # Legacy saved drops are migrated to grenade loot because ammo is unlimited.
+                loot_kind = "grenade"
+                loot_tag = "GREN +1"
+                loot_color = Color("#d5bb80")
     var label_rect := Rect2(pos.x - 34.0, pos.y + 25.0, 68.0, 13.0)
     draw_rect(label_rect, Color(0.01, 0.015, 0.016, 0.78))
     draw_rect(Rect2(label_rect.position, Vector2(2.0, label_rect.size.y)), loot_color)

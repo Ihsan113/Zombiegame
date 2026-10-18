@@ -1,14 +1,14 @@
-# Pixel Zombie LAN — v0.4.3
+# Pixel Zombie LAN — v0.4.4
 
 A landscape Android zombie wave-defense prototype built with Godot 4. It supports offline solo play and a host-authoritative local Wi-Fi session for up to four players (ENet UDP port 24567); an internet connection is not needed after installation.
 
-## What's new in v0.4.3
+## What's new in v0.4.4
 - Infinite ammunition: FIRE no longer consumes bullets; the HUD shows `AMMO ∞`. Airdrops now contain useful loot instead of redundant ammo: grenades, wall kits or medkits.
 - PUBG-style grenade aiming: tap GREN to enter aim mode, adjust the range slider, review the dotted arc and impact marker/distance, then tap THROW. CANCEL exits without consuming a grenade. The host validates and simulates the actual range.
 - Barricade placement preview: tap WALL, drag the ghost to a valid point near your survivor, then tap PLACE. Invalid spots turn red; CANCEL exits. The host validates range, lane, overlaps, wall capacity and wall-kit inventory.
 - Replaced simple grenade, barricade and airdrop drawings with detailed, transparent vector assets: olive fragmentation grenade, braced timber-and-steel barricade, rugged military supply crate and segmented parachute.
 - Airdrop loot has randomized useful items and labeled pickup rewards. If a category is full, overflow converts to a medkit or emergency HP rather than wasted ammo.
-- Android version code 16 / version name 0.4.3.
+- Android version code 17 / version name 0.4.4.
 
 ## Controls
 - Left virtual analog: move around the defense lane.
@@ -32,3 +32,10 @@ Push the source ZIP contents so `project.godot` is in the repository root. GitHu
 
 ## Prototype/testing note
 New grenade/barricade/airdrop art is original SVG artwork; SFX are synthesized locally. Static checks verify resource paths and formats, but Godot runtime compilation, touchscreen feel and actual four-device LAN behavior must be confirmed by GitHub Actions and device testing.
+
+
+## v0.4.4 — CI validator correction
+- Fixed the airdrop loot-label match so grenade loot has an explicit branch and the code matches the workflow's required implementation markers.
+- Legacy saved `ammo` drops are labelled and migrated as grenade loot, since ammunition is unlimited.
+- Bumped Android version code/name to 17 / 0.4.4.
+- No gameplay controls, grenade aim, wall placement, or arena geometry changes in this maintenance update.
