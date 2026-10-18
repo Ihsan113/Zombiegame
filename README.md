@@ -1,6 +1,11 @@
-# Pixel Zombie LAN — v0.4.10
+# Pixel Zombie LAN — v0.4.11
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
+
+## v0.4.11 updates — barricade faces the zombies
+- New barricade art: it now stands across the lane with the A-frame profile toward the viewer and its long hazard panel receding into the screen (the angle of the reference), instead of lying side-on. It was re-rendered from a 3D model using textures cut from the previous painted sprite, with a dark outline.
+- Gameplay geometry matches the new shape: zombies stop and attack ~50 px from the barricade, and it blocks a wider strip of the lane (46 px). The WALL button icon, HP bar, placement preview and shadows use the new footprint.
+- Visual/gameplay-geometry only, no network change: v0.4.9 and later can still play together (the host decides where zombies stop).
 
 ## v0.4.10 updates — barricade sits on the asphalt
 - The A-frame barricade looked like it floated: one flat ellipse + a straight line were drawn below the sprite, but its four feet touch the road at different depths (3/4 view). Shadows are now anchored to the real foot-pad positions (contact shadow per foot, soft cast shadow following the footprint toward the camera) and the sprite is tinted slightly into the dusk palette.

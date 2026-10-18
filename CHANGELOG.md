@@ -77,3 +77,9 @@ Other changes:
 - Barricade no longer looks like it floats over the asphalt: per-foot contact shadows and a footprint-shaped cast shadow replace the flat ellipse and ground line; slight dusk tint on the sprite.
 - Placement preview uses the same grounding plus a flattened ring on the road.
 - Visual only (no RPC/gameplay change). Android version code/name: 23 / 0.4.10.
+
+
+## 0.4.11 — barricade faces the zombies
+- Re-rendered barricade art: stands across the lane, A-frame profile toward the viewer, hazard panel receding into the screen (reference angle).
+- Wall geometry updated: `WALL_ATTACK_RANGE` 71 -> 50, `WALL_LANE_TOLERANCE` 34 -> 46, draw rect 60x88 with foot-anchored shadows, new HUD icon aspect, depth sort fixed (`wall.y + 2`), damage tint instead of fixed crack lines.
+- No RPC/network change. Android version code/name: 24 / 0.4.11.

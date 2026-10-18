@@ -1,4 +1,4 @@
-# Implementation notes — v0.4.10
+# Implementation notes — v0.4.11
 
 - Target: Godot 4, landscape Android; 4-player host-authoritative ENet/UDP LAN on port 24567.
 - `assets/barricade_detail.png` is the transparent A-frame road barrier; SVG is its fallback. Both render at 120×72, preserving the asset's 720×433 aspect ratio. With the game entity position at the same center convention as a survivor, the barrier's feet and a wider contact shadow reach the ground line. Wall placement preview shares the same dimensions. Minimum spacing is 132 px and zombie attack distance is tuned to engage at the outside edge.
@@ -35,3 +35,10 @@
 - `assets/barricade_detail.png` is a 3/4 view, so its four foot pads sit at different depths. `BARRICADE_FEET` / `BARRICADE_FOOT_RX` hold the pad bottoms in the 120x72 draw rect (measured from the PNG's alpha bottom profile); `_draw_barricade_grounding(pos, strength)` draws a 3-layer cast shadow (convex hull of the pads and the pads shifted by `BARRICADE_SHADOW_OFFSET`) plus a tight and a soft contact ellipse under every pad, before the sprite. Used by both placed walls (strength 1.0) and the placement preview (0.7).
 - If the barricade art is replaced, re-measure the four pad positions and update those constants.
 - Sprite tint `BARRICADE_TINT`; the old flat ellipse and straight ground line were removed.
+
+
+## v0.4.11 barricade orientation
+- `assets/barricade_detail.png` (232x340) was re-rendered from a procedural 3D sawhorse (boxes: two A-frames, lower brace, hazard-painted beam, metal end plates, foot pads) with Godot's orthographic camera (yaw: long axis 28 degrees off the depth axis, pitch 38 degrees), textures cut from the previous sprite, a dark outline and a LANCZOS downscale. The long axis recedes into the screen so the A-frame faces the zombies, who walk in from the sides.
+- Drawn into `BARRICADE_RECT_SIZE` (60x88) at `BARRICADE_RECT_OFFSET`; the centre of the four foot pads is 26 px below the wall position. `BARRICADE_FEET` are the pad bottoms relative to the wall position. If the art changes, re-measure them (projected from the model, or from the alpha bottom profile).
+- `WALL_ATTACK_RANGE` 71 -> 50 (zombies stop ~41 px away and attack within 50 px), `WALL_LANE_TOLERANCE` 34 -> 46 (the wall spans depth now). Depth-sort key is `wall.y + 2`.
+- HP bar sits above the sprite; damage tints the sprite instead of drawing cracks at fixed spots.

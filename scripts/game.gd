@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.10
+# Pixel Zombie LAN — wave defense prototype v0.4.11
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -24,19 +24,24 @@ const GRENADE_MAX_CARRY := 5
 const GRENADE_MIN_RANGE_RATIO := 0.065
 const GRENADE_MAX_RANGE_RATIO := 0.30
 const WALL_PLACE_RANGE_RATIO := 0.145
-# Barricade art is a 3/4 view, so its four foot pads touch the road at different depths. These are the
-# pad bottoms of assets/barricade_detail.png in the 120x72 draw rect, relative to the wall position
-# (back-left, back-right, front-right, front-left). Shadows are anchored to them so it sits on the asphalt.
-const BARRICADE_FEET: Array[Vector2] = [Vector2(-25.7, 15.1), Vector2(51.5, 26.0), Vector2(28.5, 34.2), Vector2(-50.2, 21.2)]
-const BARRICADE_FOOT_RX: Array[float] = [9.0, 8.0, 12.0, 10.5]
+# The barricade stands ACROSS the lane and faces the zombies (they walk in from the sides), so the art is
+# a 3/4 view with its long axis receding into the screen and the A-frame profile toward the viewer
+# (assets/barricade_detail.png, 232x340 px master, rendered from a 3D model). The sprite is drawn into a 60.0x88.0 rect whose top-left
+# is BARRICADE_RECT_OFFSET relative to the wall position; the centre of its four foot pads lies 26 px
+# below that position (survivor feet are ~27 px below theirs). BARRICADE_FEET are the pad bottoms
+# relative to the wall position (far-left, far-right, near-left, near-right); shadows are anchored to them.
+const BARRICADE_RECT_OFFSET := Vector2(-29.9, -39.3)
+const BARRICADE_RECT_SIZE := Vector2(60.0, 88.0)
+const BARRICADE_FEET: Array[Vector2] = [Vector2(-23.1, 15.3), Vector2(-1.5, 8.2), Vector2(1.5, 43.8), Vector2(23.1, 36.7)]
+const BARRICADE_FOOT_RX: Array[float] = [9.0, 8.0, 10.0, 9.0]
 const BARRICADE_SHADOW_OFFSET := Vector2(-21.0, 6.0) # sun sits low behind the skyline, shadows fall toward the camera
-const BARRICADE_TINT := Color(0.89, 0.87, 0.86, 1.0) # pulls the bright sprite into the dusk palette of the road
+const BARRICADE_TINT := Color(0.92, 0.89, 0.87, 1.0) # pulls the sprite into the dusk palette of the road
 const WALL_MIN_PLAYER_DISTANCE := 82.0
 const MEDKIT_MAX_CARRY := 5
 const WALL_KIT_MAX_CARRY := 5
 const MAX_BARRICADES := 8
-const WALL_ATTACK_RANGE := 71.0
-const WALL_LANE_TOLERANCE := 34.0
+const WALL_ATTACK_RANGE := 50.0
+const WALL_LANE_TOLERANCE := 46.0
 const SNAPSHOT_INTERVAL := 0.0166 # 60 compact snapshots/second at most (one UDP datagram each, ~11 KB/s total).
 const INPUT_INTERVAL := 0.0166   # 60 movement-command packets/second at most (also keeps Wi-Fi radios awake).
 const SNAP_MAGIC := 0xB7
@@ -2824,7 +2829,7 @@ func _draw_game_world() -> void:
     for zi in range(zombies.size()):
         render_entries.append({"y": float(zombies[zi].get("y", h * 0.68)), "type": "zombie", "index": zi})
     for wi in range(barricades.size()):
-        render_entries.append({"y": float(barricades[wi].get("y", h * 0.68)) + 36.0, "type": "barricade", "index": wi})
+        render_entries.append({"y": float(barricades[wi].get("y", h * 0.68)) + 2.0, "type": "barricade", "index": wi})
     for di in range(airdrops.size()):
         render_entries.append({"y": float(airdrops[di].get("y", h * 0.68)) + 8.0, "type": "airdrop", "index": di})
     for gi in range(active_grenades.size()):
@@ -2928,10 +2933,12 @@ func _draw_barricade(wall: Dictionary, pos: Vector2) -> void:
     var hp := clampf(float(wall.get("hp", max_hp)) / max_hp, 0.0, 1.0)
     # The position is the character-style center/ground lane coordinate. Keep the feet
     # aligned with the survivor foot line instead of leaving a gap below the sprite.
-    var wall_rect := Rect2(pos.x - 60.0, pos.y - 36.0, 120.0, 72.0)
+    var wall_rect := Rect2(pos + BARRICADE_RECT_OFFSET, BARRICADE_RECT_SIZE)
     _draw_barricade_grounding(pos, 1.0)
     if barricade_texture != null:
-        draw_texture_rect(barricade_texture, wall_rect, false, BARRICADE_TINT)
+        # Damage darkens and reddens the wood instead of drawing cracks at fixed (now wrong) spots.
+        var damage_tint := BARRICADE_TINT.lerp(Color(0.62, 0.46, 0.42, 1.0), 1.0 - hp)
+        draw_texture_rect(barricade_texture, wall_rect, false, damage_tint)
     else:
         # A-frame fallback with broad hazard beam, sloped legs and visible floor contact.
         draw_line(pos + Vector2(-49.0, -22.0), pos + Vector2(-39.0, 33.0), Color("#554739"), 10.0, true)
@@ -2942,12 +2949,7 @@ func _draw_barricade(wall: Dictionary, pos: Vector2) -> void:
             var stripe_x: float = pos.x - 50.0 + float(stripe_index) * 16.0
             draw_line(Vector2(stripe_x, pos.y - 27.0), Vector2(stripe_x + 10.0, pos.y - 7.0), Color("#cfac62"), 5.0, true)
         draw_rect(Rect2(pos.x - 56.0, pos.y - 29.0, 112.0, 24.0), Color("#1b2221"), false, 2.0)
-    # Damage cracks stay on the upper beam, while foot pads remain grounded.
-    if hp < 0.72:
-        draw_line(pos + Vector2(-28.0, -22.0), pos + Vector2(-16.0, -8.0), Color("#34241c"), 2.2, true)
-    if hp < 0.42:
-        draw_line(pos + Vector2(20.0, -22.0), pos + Vector2(8.0, -8.0), Color("#241b17"), 2.2, true)
-    var hp_bar := Rect2(pos.x - 27.0, pos.y - 49.0, 54.0, 4.5)
+    var hp_bar := Rect2(pos.x - 27.0, wall_rect.position.y - 9.0, 54.0, 4.5)
     draw_rect(Rect2(hp_bar.position - Vector2(1.0, 1.0), hp_bar.size + Vector2(2.0, 2.0)), Color(0.01, 0.015, 0.016, 0.88))
     draw_rect(hp_bar, Color("#302627"))
     draw_rect(Rect2(hp_bar.position, Vector2(hp_bar.size.x * hp, hp_bar.size.y)), Color("#8bb66b") if hp > 0.45 else Color("#d4514b"))
@@ -3081,7 +3083,7 @@ func _draw_grenade_aim_preview() -> void:
 
 func _draw_wall_placement_preview() -> void:
     var valid := _wall_placement_is_valid(local_player_id, wall_preview_position)
-    var preview_rect := Rect2(wall_preview_position.x - 60.0, wall_preview_position.y - 36.0, 120.0, 72.0)
+    var preview_rect := Rect2(wall_preview_position + BARRICADE_RECT_OFFSET, BARRICADE_RECT_SIZE)
     var ghost_color := Color(0.73, 1.0, 0.68, 0.73) if valid else Color(1.0, 0.34, 0.34, 0.70)
     _draw_barricade_grounding(wall_preview_position, 0.7)
     if barricade_texture != null:
@@ -3091,11 +3093,11 @@ func _draw_wall_placement_preview() -> void:
         draw_rect(preview_rect, Color.WHITE, false, 2.0)
     var placement_color := Color("#91d77e") if valid else Color("#ed6262")
     # Flattened ring lying on the road around the barricade footprint (matches the lane perspective).
-    draw_set_transform(wall_preview_position + Vector2(2.0, 25.0), 0.0, Vector2(1.0, 0.40))
-    draw_arc(Vector2.ZERO, 66.0, 0.0, TAU, 48, Color(placement_color.r, placement_color.g, placement_color.b, 0.85), 3.0)
+    draw_set_transform(wall_preview_position + Vector2(0.0, 26.0), 0.0, Vector2(1.0, 0.42))
+    draw_arc(Vector2.ZERO, 54.0, 0.0, TAU, 48, Color(placement_color.r, placement_color.g, placement_color.b, 0.85), 3.0)
     draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
     var preview_label := "RELEASE TO DEPLOY" if valid else "MOVE / BLOCKED"
-    var label_rect := Rect2(wall_preview_position.x - 66.0, wall_preview_position.y - 57.0, 132.0, 16.0)
+    var label_rect := Rect2(wall_preview_position.x - 66.0, preview_rect.position.y - 20.0, 132.0, 16.0)
     draw_rect(label_rect, Color(0.01, 0.015, 0.018, 0.88))
     draw_rect(Rect2(label_rect.position, Vector2(2.0, label_rect.size.y)), placement_color)
     draw_string(ui_font, Vector2(label_rect.position.x + 4.0, label_rect.position.y + 11.5), preview_label, HORIZONTAL_ALIGNMENT_CENTER, label_rect.size.x - 8.0, 8, placement_color)
@@ -3277,7 +3279,7 @@ func _draw_action_button(id: String, pos: Vector2, radius: float, label: String,
         draw_string(ui_font, pos + Vector2(-radius + 1.0, radius * 0.67), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 2.0, 8, Color.WHITE)
     else:
         if barricade_texture != null:
-            draw_texture_rect(barricade_texture, Rect2(pos.x - 16.0, pos.y - 11.0, 32.0, 19.0), false, Color.WHITE)
+            draw_texture_rect(barricade_texture, Rect2(pos.x - 10.2, pos.y - 19.0, 20.5, 30.0), false, Color.WHITE)
         else:
             for plank_index in range(3):
                 var plank_x: float = pos.x - 12.0 + float(plank_index) * 9.0

@@ -129,7 +129,7 @@ jobs:
               'func _player_draw_pos(id: int, p: Dictionary) -> Vector2:',
               'peer.host.compress(ENetConnection.COMPRESS_FASTLZ)',
               'func _predict_local_player(delta: float) -> void:',
-              'var wall_rect := Rect2(pos.x - 60.0, pos.y - 36.0, 120.0, 72.0)',
+              'var wall_rect := Rect2(pos + BARRICADE_RECT_OFFSET, BARRICADE_RECT_SIZE)',
               'var blast_radius: float = 14.0 + 126.0 * ring_progress',
               'draw_ellipse_shadow(grenade_ground_pos + Vector2(0.0, 5.0), 7.0, 2.6, 0.36)',
               'const MAX_BARRICADES := 8',
@@ -267,7 +267,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.10-APK
+          name: PixelZombieLAN-v0.4.11-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -276,15 +276,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.10-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.11-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.10-source.zip
+          test -s build/PixelZombieLAN-v0.4.11-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.10-source
-          path: build/PixelZombieLAN-v0.4.10-source.zip
+          name: PixelZombieLAN-v0.4.11-source
+          path: build/PixelZombieLAN-v0.4.11-source.zip
           if-no-files-found: error
           retention-days: 14
