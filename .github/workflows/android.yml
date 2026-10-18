@@ -95,8 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=26' not in preset or 'version/name="0.4.13"' not in preset:
-              raise SystemExit('Android export preset must report version code 26 / version 0.4.13')
+          if 'version/code=27' not in preset or 'version/name="0.4.15"' not in preset:
+              raise SystemExit('Android export preset must report version code 27 / version 0.4.15')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -104,6 +104,24 @@ jobs:
           missing_refs = sorted(ref for ref in refs if not (root / ref).exists())
           if missing_refs:
               raise SystemExit('Broken res:// references: ' + ', '.join(missing_refs))
+          # These generated VFX textures must be RGBA; opaque backgrounds produce visible pasted-on rectangles in-game.
+          import struct
+          def png_metadata(path):
+              data = path.read_bytes()
+              if len(data) < 33 or data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR':
+                  raise SystemExit('Malformed PNG asset: ' + str(path))
+              width, height = struct.unpack('>II', data[16:24])
+              color_type = data[25]
+              return width, height, color_type
+          for image_name in ['grenade_explosion_asset.png', 'airdrop_crate_generated.png', 'airdrop_parachute_generated.png', 'airdrop_landing_dust_generated.png']:
+              image_path = root / 'assets' / image_name
+              if not image_path.is_file():
+                  raise SystemExit('Missing generated VFX PNG: ' + str(image_path))
+              image_width, image_height, image_color_type = png_metadata(image_path)
+              if image_color_type != 6:
+                  raise SystemExit('Generated VFX PNG must use RGBA transparency (PNG color type 6): ' + str(image_path))
+              if image_width < 64 or image_height < 32 or image_width > 4096 or image_height > 4096:
+                  raise SystemExit('Unexpected generated VFX dimensions: ' + str(image_path))
           script = (root / 'scripts/game.gd').read_text()
           required_markers = [
               'const ARENA_TOP_RATIO := 0.520',
@@ -136,7 +154,7 @@ jobs:
               'peer.host.compress(ENetConnection.COMPRESS_FASTLZ)',
               'func _predict_local_player(delta: float) -> void:',
               'var wall_rect := Rect2(pos + BARRICADE_RECT_OFFSET, BARRICADE_RECT_SIZE)',
-              'var blast_radius: float = 12.0 + 154.0 * ring_progress',
+              'var blast_radius: float = 8.0 + 96.0 * ring_progress',
               'const GRENADE_EXPLOSION_EFFECT_DURATION := 1.65',
               'const AIRDROP_LAND_LIFETIME := 22.0',
               'const AIRDROP_DESPAWN_EFFECT_DURATION := 1.15',
@@ -147,7 +165,7 @@ jobs:
               'func _draw_bone_segment(start: Vector2, finish: Vector2, width: float, alpha: float) -> void:',
               '_add_combat_effect(8, expired_pos, expired_pos, AIRDROP_DESPAWN_EFFECT_DURATION)',
               'elif kind == 8:',
-              'var expiry_rect := Rect2(pos.x - 34.0, pos.y - 32.0, 68.0, 11.0)',
+              'var label_rect := Rect2(pos.x - 45.0, crate_rect.position.y - 16.0, 90.0, 12.0)',
               'draw_ellipse_shadow(grenade_ground_pos + Vector2(0.0, 5.0), 7.0, 2.6, 0.36)',
               'const MAX_BARRICADES := 8',
               'const GRENADE_BLAST_RADIUS := 112.0',
@@ -173,7 +191,7 @@ jobs:
               'grenade_texture = load("res://assets/grenade_detail.svg") as Texture2D',
               'grenade_explosion_texture = load("res://assets/grenade_explosion_asset.png") as Texture2D',
               'grenade_explosion_texture = load("res://assets/grenade_explosion_asset.svg") as Texture2D',
-              'draw_texture_rect(grenade_explosion_texture, asset_rect, false, Color(1.0, 1.0, 1.0, asset_fade * 0.92))',
+              'draw_texture_rect(grenade_explosion_texture, asset_rect, false, Color(0.97, 0.95, 0.90, asset_fade * 0.95))',
               'barricade_texture = load("res://assets/barricade_detail.png") as Texture2D',
               'barricade_texture = load("res://assets/barricade_detail.svg") as Texture2D',
               'airdrop_crate_texture = load("res://assets/airdrop_crate_detail.svg") as Texture2D',
@@ -191,7 +209,6 @@ jobs:
               'loot_tag = "GREN +%d"',
               'loot_kind = "medkit"',
               'loot_kind = "wall"',
-              'loot_kind = "grenade"',
               'barricades.remove_at(blocking_wall_index)',
               'if float(wall.get("hp", 0.0)) <= 0.0:',
           ]
@@ -295,7 +312,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.13-APK
+          name: PixelZombieLAN-v0.4.15-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -304,15 +321,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.13-source.zip \
-            project.godot Main.tscn export_presets.cfg scripts assets tests tools \
+          zip -r build/PixelZombieLAN-v0.4.15-source.zip \
+            project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.13-source.zip
+          test -s build/PixelZombieLAN-v0.4.15-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.13-source
-          path: build/PixelZombieLAN-v0.4.13-source.zip
+          name: PixelZombieLAN-v0.4.15-source
+          path: build/PixelZombieLAN-v0.4.15-source.zip
           if-no-files-found: error
           retention-days: 14

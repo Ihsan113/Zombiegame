@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.13
+# Pixel Zombie LAN — wave defense prototype v0.4.15
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -3177,64 +3177,76 @@ func draw_ellipse_shadow(center: Vector2, radius_x: float, radius_y: float, alph
 func _draw_airdrop(drop: Dictionary, pos: Vector2) -> void:
     var landed := bool(drop.get("landed", false))
     if not landed:
-        var canopy_pos := pos + Vector2(0.0, -47.0)
+        # Keep the canopy large enough to read at phone scale, with taut suspension lines.
+        var canopy_pos := pos + Vector2(0.0, -52.0)
         if parachute_texture != null:
-            draw_texture_rect(parachute_texture, Rect2(canopy_pos - Vector2(49.0, 29.0), Vector2(98.0, 58.0)), false, Color.WHITE)
+            var chute_ratio := float(parachute_texture.get_width()) / maxf(1.0, float(parachute_texture.get_height()))
+            var chute_size := Vector2(108.0, 108.0 / maxf(1.0, chute_ratio))
+            draw_texture_rect(parachute_texture, Rect2(canopy_pos - chute_size * 0.5, chute_size), false, Color(0.94, 0.93, 0.87, 1.0))
         else:
-            draw_colored_polygon(PackedVector2Array([canopy_pos + Vector2(-40, 7), canopy_pos + Vector2(-34, -9), canopy_pos + Vector2(-17, -22), canopy_pos + Vector2(0, -27), canopy_pos + Vector2(17, -22), canopy_pos + Vector2(34, -9), canopy_pos + Vector2(40, 7)]), Color("#b9ad8c"))
-            draw_arc(canopy_pos + Vector2(0, 7), 40.0, PI, TAU, 24, Color("#e0d0ab"), 2.0)
-        draw_line(canopy_pos + Vector2(-34, 2), pos + Vector2(-12, -4), Color("#c6b999", 0.88), 1.4, true)
-        draw_line(canopy_pos + Vector2(-18, 10), pos + Vector2(-7, -5), Color("#c6b999", 0.88), 1.2, true)
-        draw_line(canopy_pos + Vector2(18, 10), pos + Vector2(7, -5), Color("#c6b999", 0.88), 1.2, true)
-        draw_line(canopy_pos + Vector2(34, 2), pos + Vector2(12, -4), Color("#c6b999", 0.88), 1.4, true)
+            draw_colored_polygon(PackedVector2Array([canopy_pos + Vector2(-40, 7), canopy_pos + Vector2(-34, -9), canopy_pos + Vector2(-17, -22), canopy_pos + Vector2(0, -27), canopy_pos + Vector2(17, -22), canopy_pos + Vector2(34, -9), canopy_pos + Vector2(40, 7)]), Color("#9c9b82"))
+            draw_arc(canopy_pos + Vector2(0, 7), 40.0, PI, TAU, 24, Color("#c5bda0"), 2.0)
+        # Strings end at the sling above the crate rather than touching arbitrary points on its lid.
+        var sling_y := pos.y - 20.0
+        draw_line(canopy_pos + Vector2(-32.0, 5.0), Vector2(pos.x - 12.0, sling_y), Color(0.53, 0.50, 0.41, 0.92), 1.2, true)
+        draw_line(canopy_pos + Vector2(-16.0, 12.0), Vector2(pos.x - 5.0, sling_y), Color(0.70, 0.65, 0.52, 0.86), 1.0, true)
+        draw_line(canopy_pos + Vector2(16.0, 12.0), Vector2(pos.x + 5.0, sling_y), Color(0.70, 0.65, 0.52, 0.86), 1.0, true)
+        draw_line(canopy_pos + Vector2(32.0, 5.0), Vector2(pos.x + 12.0, sling_y), Color(0.53, 0.50, 0.41, 0.92), 1.2, true)
     else:
-        draw_ellipse_shadow(pos + Vector2(0.0, 16.0), 28.0, 8.0, 0.34)
-    var crate_rect := Rect2(pos.x - 23.0, pos.y - 17.0, 46.0, 36.0)
+        # Small soft contact shadow directly under the crate; no floating halo.
+        draw_ellipse_shadow(pos + Vector2(0.0, 18.0), 24.0, 5.5, 0.36)
+
+    # Preserve the source texture's aspect ratio and align its bottom edge to the road contact point.
+    var crate_width := 50.0
+    var crate_height := crate_width * (float(airdrop_crate_texture.get_height()) / maxf(1.0, float(airdrop_crate_texture.get_width()))) if airdrop_crate_texture != null else 44.0
+    var crate_ground_y := pos.y + 17.0
+    var crate_rect := Rect2(Vector2(pos.x - crate_width * 0.5, crate_ground_y - crate_height), Vector2(crate_width, crate_height))
     if airdrop_crate_texture != null:
-        draw_texture_rect(airdrop_crate_texture, crate_rect, false, Color.WHITE)
+        draw_texture_rect(airdrop_crate_texture, crate_rect, false, Color(0.94, 0.91, 0.84, 1.0))
     else:
-        draw_rect(crate_rect, Color("#4c5540"))
-        draw_rect(Rect2(crate_rect.position, Vector2(crate_rect.size.x, 4.0)), Color("#a99869"))
+        draw_rect(crate_rect, Color("#414238"))
+        draw_rect(Rect2(crate_rect.position, Vector2(crate_rect.size.x, 4.0)), Color("#837557"))
         draw_rect(crate_rect, Color("#242b25"), false, 2.0)
-        draw_line(Vector2(crate_rect.position.x + 4.0, crate_rect.position.y + 4.0), Vector2(crate_rect.end.x - 4.0, crate_rect.end.y - 4.0), Color("#c1a46c"), 3.0, true)
+        draw_line(Vector2(crate_rect.position.x + 4.0, crate_rect.position.y + 4.0), Vector2(crate_rect.end.x - 4.0, crate_rect.end.y - 4.0), Color("#99784d"), 2.0, true)
+
+    # Use a single compact tag for loot and expiry, instead of stacked panels above and below the crate.
     var loot_kind := str(drop.get("loot_kind", "grenade"))
     var loot_quantity := maxi(1, int(drop.get("quantity", 1)))
     var loot_tag: String = "SUPPLY DROP"
-    var loot_color := Color("#f1d79a")
+    var loot_color := Color("#d0c4a0")
     if landed:
         match loot_kind:
             "grenade":
-                # Keep the grenade case explicit so future loot types cannot inherit a wrong label.
-                loot_kind = "grenade"
                 loot_tag = "GREN +%d" % loot_quantity
-                loot_color = Color("#d5bb80")
+                loot_color = Color("#c6ae79")
             "wall":
                 loot_tag = "WALL +%d" % loot_quantity
-                loot_color = Color("#c3b18c")
+                loot_color = Color("#b9a98a")
             "medkit":
                 loot_tag = "MEDKIT +%d" % loot_quantity
-                loot_color = Color("#e28477")
+                loot_color = Color("#c97868")
             "ammo":
-                # Legacy saved drops are migrated to grenade loot because ammo is unlimited.
-                loot_kind = "grenade"
+                # Legacy saved drops migrate to grenade loot because ammunition is unlimited.
                 loot_tag = "GREN +1"
-                loot_color = Color("#d5bb80")
-    var label_rect := Rect2(pos.x - 34.0, pos.y + 25.0, 68.0, 13.0)
-    draw_rect(label_rect, Color(0.01, 0.015, 0.016, 0.78))
-    draw_rect(Rect2(label_rect.position, Vector2(2.0, label_rect.size.y)), loot_color)
-    draw_string(ui_font, Vector2(label_rect.position.x + 3.0, label_rect.position.y + 9.5), loot_tag, HORIZONTAL_ALIGNMENT_CENTER, label_rect.size.x - 6.0, 8, loot_color)
+                loot_color = Color("#c6ae79")
+
     if landed:
         var remaining := clampf(float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)), 0.0, AIRDROP_LAND_LIFETIME)
         var warning := remaining <= 6.0
-        var pulse: float = (0.42 + 0.58 * absf(sin(animation_clock * 8.5))) if warning else 1.0
-        var expiry_rect := Rect2(pos.x - 34.0, pos.y - 32.0, 68.0, 11.0)
-        var expiry_color := Color(0.95, 0.28, 0.22, pulse) if warning else Color(0.80, 0.75, 0.60, 0.88)
-        draw_rect(expiry_rect, Color(0.008, 0.012, 0.013, 0.88))
-        draw_rect(Rect2(expiry_rect.position, Vector2(expiry_rect.size.x * remaining / AIRDROP_LAND_LIFETIME, 2.0)), expiry_color)
-        var expiry_text: String = ("VANISH %02ds" % ceili(remaining)) if warning else ("EXPIRES %02ds" % ceili(remaining))
-        draw_string(ui_font, Vector2(expiry_rect.position.x + 2.0, expiry_rect.position.y + 9.0), expiry_text, HORIZONTAL_ALIGNMENT_CENTER, expiry_rect.size.x - 4.0, 7, expiry_color)
+        var pulse: float = (0.72 + 0.28 * absf(sin(animation_clock * 6.5))) if warning else 1.0
+        var label_text := "%s / %02ds" % [loot_tag, ceili(remaining)]
+        var label_rect := Rect2(pos.x - 45.0, crate_rect.position.y - 16.0, 90.0, 12.0)
+        var tag_color := Color(0.90, 0.30, 0.23, pulse) if warning else loot_color
+        draw_rect(label_rect, Color(0.012, 0.016, 0.017, 0.86))
+        draw_rect(Rect2(label_rect.position, Vector2(2.0, label_rect.size.y - 1.0)), tag_color)
+        draw_string(ui_font, Vector2(label_rect.position.x + 4.0, label_rect.position.y + 8.7), label_text, HORIZONTAL_ALIGNMENT_CENTER, label_rect.size.x - 8.0, 7, tag_color)
+        var progress_width := (label_rect.size.x - 2.0) * remaining / AIRDROP_LAND_LIFETIME
+        draw_rect(Rect2(label_rect.position.x + 2.0, label_rect.end.y - 1.5, label_rect.size.x - 4.0, 1.5), Color(0.18, 0.20, 0.18, 0.85))
+        if progress_width > 0.0:
+            draw_rect(Rect2(label_rect.position.x + 2.0, label_rect.end.y - 1.5, minf(label_rect.size.x - 4.0, progress_width), 1.5), tag_color)
         if warning:
-            draw_rect(crate_rect.grow(2.0), Color(0.95, 0.20, 0.16, 0.35 + 0.40 * pulse), false, 1.5)
+            # A gentle red tint is less intrusive than a box-shaped selection outline.
+            draw_rect(crate_rect, Color(0.95, 0.24, 0.16, 0.08 * pulse))
 
 func _grenade_range_pixels() -> float:
     return screen_size.x * clampf(grenade_aim_range_ratio, GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO)
@@ -3627,25 +3639,26 @@ func _draw_combat_effects() -> void:
             var flash := clampf(1.0 - progress / 0.11, 0.0, 1.0)
             var fire_fade := clampf(1.0 - progress / 0.36, 0.0, 1.0)
             var ring_progress := clampf(progress / 0.78, 0.0, 1.0)
-            var ring_alpha := clampf(1.0 - progress / 0.92, 0.0, 1.0)
-            var blast_radius: float = 12.0 + 154.0 * ring_progress
+            var ring_alpha := clampf(1.0 - progress / 0.84, 0.0, 1.0)
+            var blast_radius: float = 8.0 + 96.0 * ring_progress
 
             # Blast soot is grounded on the pavement, with an elliptical shock front.
-            draw_ellipse_shadow(start_pos + Vector2(0.0, 8.0), 18.0 + 78.0 * ring_progress, 5.0 + 13.0 * ring_progress, 0.27 * (1.0 - progress * 0.62))
-            draw_set_transform(start_pos + Vector2(0.0, 6.0), 0.0, Vector2(1.0, 0.43))
-            draw_arc(Vector2.ZERO, blast_radius, 0.0, TAU, 60, Color(1.0, 0.49, 0.22, ring_alpha * 0.80), 3.2 * ring_alpha + 0.4)
-            draw_arc(Vector2.ZERO, blast_radius * 0.68, 0.0, TAU, 52, Color(1.0, 0.77, 0.40, ring_alpha * 0.62), 1.8 * ring_alpha + 0.3)
+            draw_ellipse_shadow(start_pos + Vector2(0.0, 7.0), 14.0 + 49.0 * ring_progress, 3.4 + 6.4 * ring_progress, 0.22 * (1.0 - progress * 0.55))
+            draw_set_transform(start_pos + Vector2(0.0, 6.0), 0.0, Vector2(1.0, 0.28))
+            draw_arc(Vector2.ZERO, blast_radius, 0.0, TAU, 52, Color(0.86, 0.43, 0.25, ring_alpha * 0.48), 1.6 * ring_alpha + 0.25)
             draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
             # Use a dedicated transparent blast asset for textured flame/smoke detail.
             # Scale swells quickly, then the artwork fades while the independently animated
             # sparks, debris, shock ring and residual smoke continue through the effect lifetime.
             if grenade_explosion_texture != null:
-                var asset_growth := 0.74 + 0.50 * clampf(progress / 0.23, 0.0, 1.0)
-                var asset_fade := clampf(1.0 - progress / 1.28, 0.0, 1.0)
-                var asset_size := Vector2(232.0, 190.0) * asset_growth
-                var asset_rect := Rect2(start_pos + Vector2(-asset_size.x * 0.5, -asset_size.y * 0.82), asset_size)
-                draw_texture_rect(grenade_explosion_texture, asset_rect, false, Color(1.0, 1.0, 1.0, asset_fade * 0.92))
+                var asset_growth := 0.72 + 0.32 * clampf(progress / 0.20, 0.0, 1.0)
+                var asset_fade := clampf(1.0 - progress / 1.08, 0.0, 1.0)
+                var asset_ratio := float(grenade_explosion_texture.get_width()) / maxf(1.0, float(grenade_explosion_texture.get_height()))
+                var asset_width := 214.0 * asset_growth
+                var asset_size := Vector2(asset_width, asset_width / maxf(1.0, asset_ratio))
+                var asset_rect := Rect2(Vector2(start_pos.x - asset_size.x * 0.5, start_pos.y - asset_size.y + 10.0), asset_size)
+                draw_texture_rect(grenade_explosion_texture, asset_rect, false, Color(0.97, 0.95, 0.90, asset_fade * 0.95))
             else:
                 # Procedural emergency fallback if the optional texture cannot be imported.
                 if flash > 0.01:
@@ -3660,8 +3673,8 @@ func _draw_combat_effects() -> void:
 
             # Hot fragments shoot outward first, then fall back toward the street.
             var ember_progress := clampf(progress / 0.78, 0.0, 1.0)
-            for spark_index in range(18):
-                var spark_angle := TAU * float(spark_index) / 18.0 + float(blast_seed % 17) * 0.13
+            for spark_index in range(12):
+                var spark_angle := TAU * float(spark_index) / 12.0 + float(blast_seed % 17) * 0.13
                 var spark_dir := Vector2(cos(spark_angle), sin(spark_angle))
                 var spark_distance: float = (18.0 + float((spark_index * 7 + blast_seed) % 17) * 2.2) * ember_progress
                 var spark_height: float = sin(ember_progress * PI) * (9.0 + float(spark_index % 5) * 5.0)
@@ -3674,8 +3687,8 @@ func _draw_combat_effects() -> void:
             # Dark stone/metal chips follow separate shallow arcs; deterministic motion avoids jitter on clients.
             var debris_progress := clampf(progress / 0.98, 0.0, 1.0)
             var debris_alpha := clampf(1.0 - progress / 1.02, 0.0, 1.0)
-            for debris_index in range(16):
-                var debris_angle := TAU * float(debris_index) / 16.0 + float((blast_seed % 11)) * 0.19
+            for debris_index in range(9):
+                var debris_angle := TAU * float(debris_index) / 9.0 + float((blast_seed % 11)) * 0.19
                 var debris_dir := Vector2(cos(debris_angle), sin(debris_angle))
                 var debris_distance: float = (24.0 + float((debris_index * 11 + blast_seed) % 31) * 1.65) * debris_progress
                 var debris_arc: float = sin(debris_progress * PI) * (13.0 + float(debris_index % 4) * 5.0)
@@ -3689,12 +3702,12 @@ func _draw_combat_effects() -> void:
 
             # The plume comes after the fireball: heavy dark smoke at the core, warmer dust at the edges.
             var smoke_rise := clampf((progress - 0.07) / 0.93, 0.0, 1.0)
-            var smoke_alpha := clampf((progress - 0.06) / 0.20, 0.0, 1.0) * clampf(1.0 - maxf(0.0, progress - 0.28) / 0.78, 0.0, 1.0) * 0.58
-            for smoke_index in range(10):
-                var smoke_angle := TAU * float(smoke_index) / 10.0 + float(blast_seed % 13) * 0.17
+            var smoke_alpha := clampf((progress - 0.06) / 0.20, 0.0, 1.0) * clampf(1.0 - maxf(0.0, progress - 0.28) / 0.78, 0.0, 1.0) * 0.34
+            for smoke_index in range(8):
+                var smoke_angle := TAU * float(smoke_index) / 8.0 + float(blast_seed % 13) * 0.17
                 var smoke_spread: float = 4.0 + smoke_rise * (9.0 + float(smoke_index % 4) * 5.0)
                 var smoke_pos: Vector2 = start_pos + Vector2(cos(smoke_angle) * smoke_spread, -smoke_rise * (12.0 + float(smoke_index % 5) * 9.0) + sin(smoke_angle) * 4.0)
-                var smoke_radius: float = 4.0 + smoke_rise * (6.0 + float(smoke_index % 4) * 2.7)
+                var smoke_radius: float = 3.5 + smoke_rise * (5.0 + float(smoke_index % 4) * 2.2)
                 var smoke_color := Color(0.16, 0.15, 0.14, smoke_alpha * (0.74 + float(smoke_index % 3) * 0.09))
                 draw_circle(smoke_pos + Vector2(1.2, 1.8), smoke_radius + 1.5, Color(0.045, 0.045, 0.043, smoke_alpha * 0.76))
                 draw_circle(smoke_pos, smoke_radius, smoke_color)

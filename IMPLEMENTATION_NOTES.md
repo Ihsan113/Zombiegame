@@ -1,4 +1,4 @@
-# Implementation notes — v0.4.13
+# Implementation notes — v0.4.15
 
 - Target: Godot 4, landscape Android; 4-player host-authoritative ENet/UDP LAN on port 24567.
 - `assets/barricade_detail.png` is the transparent A-frame road barrier; SVG is its fallback. Both render at 120×72, preserving the asset's 720×433 aspect ratio. With the game entity position at the same center convention as a survivor, the barrier's feet and a wider contact shadow reach the ground line. Wall placement preview shares the same dimensions. Minimum spacing is 132 px and zombie attack distance is tuned to engage at the outside edge.
@@ -56,3 +56,13 @@
 - `_snap_wall_preview_to_neighbour()` snaps near-end drag gestures to the nearest slot beside a placed barricade when the target remains within player range and valid arena bounds.
 - `assets/grenade_explosion_asset.svg` is a transparent 512×420 vector sprite with fire core, irregular flames, smoke lobes, ground dust and debris. The runtime scales/fades the asset while preserving the shock ring, sparks, falling fragments and smoke simulation.
 - No snapshot fields, RPC signatures, network intervals, or ENet compression settings were changed in this update.
+
+
+## v0.4.15 asset/render notes
+- `assets/grenade_explosion_asset.png` is a generated RGBA asset trimmed around visible alpha content, resampled in premultiplied-alpha space, and saved with transparent edges. Runtime uses the PNG; the SVG fallback has been restyled to match it.
+- Explosion draw size is derived from texture aspect ratio and the bottom edge is anchored to the ground point. The elliptical shock ripple is smaller/thinner; procedural particles are reduced because the asset already contains fragments and smoke.
+- `assets/airdrop_crate_generated.png` is a generated RGBA asset with transparent background and a muted olive/rust palette. Runtime preserves its aspect ratio and pins the sprite base near the road contact point.
+- Landed airdrops show one label with loot type and time remaining; network timer/loot data and the compact snapshot record stay unchanged.
+- ENet constants, binary record sizes, RPC signatures, input rate and snapshot rate were not modified.
+
+- Large unused original source sheets live in `art_source/`; the Android preset excludes `art_source/*` so these master files are retained in the source ZIP without being packed into the APK.

@@ -1,64 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="420" viewBox="0 0 512 420">
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480">
 <defs>
-  <radialGradient id="heatGlow"><stop offset="0" stop-color="#fff9d9" stop-opacity="1"/><stop offset=".28" stop-color="#ffbf55" stop-opacity=".86"/><stop offset=".62" stop-color="#f15a19" stop-opacity=".34"/><stop offset="1" stop-color="#9b2813" stop-opacity="0"/></radialGradient>
-  <radialGradient id="fireCore" cx=".48" cy=".5" r=".59"><stop offset="0" stop-color="#fffbdc"/><stop offset=".15" stop-color="#fff0a2"/><stop offset=".38" stop-color="#ffb12e"/><stop offset=".65" stop-color="#ee4b14"/><stop offset=".86" stop-color="#9d2416"/><stop offset="1" stop-color="#4b1918" stop-opacity="0"/></radialGradient>
-  <linearGradient id="flameUp" x1="0" y1="1" x2="0" y2="0"><stop stop-color="#8a2819"/><stop offset=".28" stop-color="#f04c12"/><stop offset=".65" stop-color="#ffaf29"/><stop offset="1" stop-color="#ffeab0" stop-opacity=".24"/></linearGradient>
-  <linearGradient id="smoke" x1="0" y1="0" x2=".7" y2="1"><stop stop-color="#77716b"/><stop offset=".33" stop-color="#45413e"/><stop offset=".7" stop-color="#282929"/><stop offset="1" stop-color="#171d20"/></linearGradient>
-  <linearGradient id="smokeLight" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#aca095"/><stop offset=".35" stop-color="#69635d"/><stop offset=".78" stop-color="#3b3937"/><stop offset="1" stop-color="#222629"/></linearGradient>
-  <radialGradient id="dust"><stop stop-color="#c0a17b" stop-opacity=".82"/><stop offset=".52" stop-color="#80664e" stop-opacity=".55"/><stop offset="1" stop-color="#4a3d34" stop-opacity="0"/></radialGradient>
-  <linearGradient id="debris" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#d1b18a"/><stop offset=".32" stop-color="#645548"/><stop offset="1" stop-color="#1a2023"/></linearGradient>
+ <radialGradient id="core"><stop offset="0" stop-color="#fff5bd"/><stop offset=".27" stop-color="#ffd04f"/><stop offset=".57" stop-color="#fb6b20"/><stop offset=".84" stop-color="#a72c1b" stop-opacity=".82"/><stop offset="1" stop-color="#5b241e" stop-opacity="0"/></radialGradient>
+ <radialGradient id="dust"><stop offset="0" stop-color="#b7a08a" stop-opacity=".55"/><stop offset="1" stop-color="#6c6259" stop-opacity="0"/></radialGradient>
+ <radialGradient id="smoke"><stop offset="0" stop-color="#514b46"/><stop offset=".68" stop-color="#322f2c"/><stop offset="1" stop-color="#242523" stop-opacity=".05"/></radialGradient>
 </defs>
-<!-- Ground-hugging dust and soot base; transparent outside the blast silhouette. -->
-<ellipse cx="258" cy="372" rx="222" ry="37" fill="url(#dust)" opacity=".9"/>
-<ellipse cx="250" cy="383" rx="184" ry="17" fill="#11191d" opacity=".46"/>
-<path d="M32 366 Q66 348 97 360 L131 350 163 365 190 352 221 361 251 345 282 358 318 344 344 358 379 347 409 361 451 350 483 372 438 385 388 379 347 394 297 386 257 400 218 387 173 397 131 382 86 393 50 381Z" fill="url(#smoke)" opacity=".74"/>
-<!-- Broken, swelling smoke plume behind the flames. -->
-<g stroke="#262728" stroke-width="3" stroke-linejoin="round">
- <path d="M116 278 Q86 248 106 223 Q86 196 110 174 Q115 146 146 148 Q154 115 183 118 Q206 87 235 108 Q262 76 286 104 Q322 87 339 121 Q371 123 378 152 Q410 159 408 192 Q437 211 413 238 Q425 266 394 284 L365 315 150 319Z" fill="url(#smoke)"/>
- <path d="M154 245 Q124 226 139 202 Q119 177 146 161 Q166 143 188 163 Q200 133 224 146 Q243 122 263 148 Q289 127 309 152 Q336 145 344 169 Q374 177 367 202 Q386 222 364 243 L345 285 175 288Z" fill="url(#smokeLight)" stroke="#3a3735"/>
- <path d="M181 200 Q160 185 178 165 Q184 145 207 156 Q219 132 239 152 Q261 130 278 155 Q301 143 314 164 Q337 171 326 193 Q344 212 323 231 L203 246Z" fill="url(#smoke)" stroke="#4b4540"/>
- <path d="M221 168 Q204 152 221 139 Q238 119 256 141 Q270 126 286 144 Q305 158 289 178 L267 198 233 192Z" fill="#282b2c" stroke="#55504a"/>
+<!-- transparent edges; only the smoke, blast, airborne grit and low dust are painted -->
+<g opacity=".84" fill="url(#smoke)">
+ <ellipse cx="470" cy="160" rx="178" ry="135"/><ellipse cx="360" cy="232" rx="158" ry="106"/><ellipse cx="575" cy="238" rx="166" ry="110"/><ellipse cx="280" cy="286" rx="125" ry="66"/><ellipse cx="680" cy="292" rx="128" ry="69"/>
 </g>
-<!-- Soft amber illumination leaks through the smoke, with large, non-uniform fire tongues. -->
-<ellipse cx="255" cy="284" rx="174" ry="139" fill="url(#heatGlow)" opacity=".98"/>
-<g stroke-linejoin="round">
- <path d="M78 332 Q91 296 121 283 L105 250 139 270 151 229 176 261 187 212 210 246 221 203 242 246 264 205 279 249 309 219 310 263 347 236 336 276 379 260 367 291 415 306 385 331 410 350 367 358 339 379 293 365 257 390 221 363 184 382 154 359 111 372Z" fill="url(#flameUp)" stroke="#8f2d18" stroke-width="4"/>
- <path d="M122 340 Q139 303 164 294 L157 265 184 287 196 250 216 287 231 252 247 288 267 255 279 294 309 276 301 309 340 301 321 330 347 347 310 358 281 354 256 371 226 352 197 365 170 350 144 362Z" fill="#f8791c" stroke="#d84713" stroke-width="3"/>
- <path d="M170 346 Q179 320 202 312 L197 285 219 310 229 278 245 311 260 284 270 317 294 299 287 327 314 339 287 350 264 346 247 358 224 348 207 357 188 346Z" fill="#ffb83d" stroke="#ef681b" stroke-width="2.5"/>
- <path d="M207 341 Q215 324 231 323 L229 302 244 325 255 307 264 329 278 318 274 338 291 345 268 350 254 344 241 352 227 345Z" fill="#fff0a4"/>
-</g>
-<!-- Scattered secondary flames at the shoulders create a broad pressure-burst silhouette. -->
-<g fill="url(#flameUp)" stroke="#aa3417" stroke-width="3" stroke-linejoin="round">
- <path d="M103 301 L78 270 96 280 91 245 118 275 137 251 137 289 155 294 132 316Z"/>
- <path d="M350 300 L372 264 369 290 401 263 391 299 424 303 393 325 365 319Z"/>
- <path d="M176 270 L167 235 187 256 194 224 211 259Z"/><path d="M292 263 L314 229 315 260 337 244 330 278Z"/>
-</g>
-<ellipse cx="255" cy="311" rx="91" ry="72" fill="url(#fireCore)" opacity=".96"/>
-<ellipse cx="251" cy="326" rx="47" ry="35" fill="url(#heatGlow)"/>
-<!-- Dense smoke lobes at the base blend the blast into the street. -->
-<g stroke="#292a2a" stroke-width="2.5">
- <path d="M95 344 Q72 328 88 309 Q96 289 119 301 Q129 282 149 300 Q172 302 167 324 Q184 340 163 358 L119 371Z" fill="url(#smokeLight)"/>
- <path d="M331 342 Q317 324 336 307 Q353 286 371 305 Q391 291 404 314 Q428 324 412 345 L382 369 346 362Z" fill="url(#smoke)"/>
- <path d="M167 362 Q150 344 171 330 Q183 312 205 329 Q222 315 236 337 Q257 347 240 366 L204 382Z" fill="#494541"/>
- <path d="M264 365 Q251 346 271 332 Q285 316 303 333 Q323 322 335 343 Q353 355 334 372 L292 385Z" fill="#333535"/>
-</g>
-<!-- Sooty clumps with illuminated rims. -->
-<g fill="url(#smokeLight)">
- <circle cx="148" cy="188" r="31"/><circle cx="178" cy="158" r="25"/><circle cx="218" cy="129" r="28"/><circle cx="266" cy="127" r="30"/><circle cx="309" cy="154" r="26"/><circle cx="350" cy="188" r="31"/>
- <circle cx="127" cy="229" r="25"/><circle cx="158" cy="246" r="22"/><circle cx="365" cy="236" r="26"/><circle cx="340" cy="261" r="21"/>
-</g>
-<g fill="#262a2b" opacity=".72"><circle cx="160" cy="184" r="17"/><circle cx="211" cy="153" r="18"/><circle cx="267" cy="150" r="21"/><circle cx="319" cy="184" r="18"/><circle cx="355" cy="220" r="15"/><circle cx="140" cy="225" r="13"/></g>
-<!-- angular masonry fragments, charred splinters and incandescent embers -->
-<g stroke="#1c2224" stroke-width="2" stroke-linejoin="round">
- <path d="M56 266l13 -13 17 6 -4 17 -18 3Z" fill="url(#debris)"/><path d="M105 208l11 -15 13 6 -4 17 -15 4Z" fill="#4a4137"/>
- <path d="M142 279l12 -13 16 6 -3 16 -18 2Z" fill="#79644e"/><path d="M184 230l10 -12 14 6 -2 15 -17 3Z" fill="url(#debris)"/>
- <path d="M206 181l7 -11 12 3 5 13 -15 6Z" fill="#82715b"/><path d="M277 212l14 -12 13 8 -4 14 -15 4Z" fill="url(#debris)"/>
- <path d="M336 227l11 -16 14 7 -2 18 -16 3Z" fill="#7e6a51"/><path d="M384 271l14 -12 15 9 -6 14 -18 2Z" fill="#5a4d40"/>
- <path d="M237 260l7 -17 9 2 4 13 -11 7Z" fill="#e6a14b"/><path d="M293 283l7 -13 10 5 -1 11 -10 4Z" fill="#ffc45a"/>
- <path d="M168 319l5 -10 9 3 -1 9 -8 3Z" fill="#ffdf85"/><path d="M353 318l5 -11 10 3 -2 9 -8 3Z" fill="#ffad35"/>
-</g>
-<!-- Fine ember specks; the alpha canvas outside the blast remains transparent. -->
-<g fill="#ffc45d"><circle cx="65" cy="210" r="2.8"/><circle cx="98" cy="164" r="2.2"/><circle cx="131" cy="121" r="2.4"/><circle cx="182" cy="95" r="2.1"/><circle cx="229" cy="87" r="2.6"/><circle cx="306" cy="91" r="2.2"/><circle cx="364" cy="123" r="2.3"/><circle cx="409" cy="177" r="2.8"/><circle cx="443" cy="237" r="2.2"/><circle cx="427" cy="299" r="2.4"/><circle cx="385" cy="335" r="2.6"/><circle cx="125" cy="342" r="2.0"/><circle cx="70" cy="305" r="2.1"/><circle cx="295" cy="235" r="2.1"/><circle cx="221" cy="300" r="2.0"/></g>
-<g fill="#f26a22"><circle cx="88" cy="234" r="2.2"/><circle cx="157" cy="115" r="2.3"/><circle cx="333" cy="107" r="2.1"/><circle cx="397" cy="211" r="2.5"/><circle cx="403" cy="319" r="2.0"/><circle cx="113" cy="329" r="2.1"/><circle cx="180" cy="283" r="1.8"/><circle cx="323" cy="300" r="2.2"/></g>
+<ellipse cx="480" cy="332" rx="360" ry="106" fill="url(#dust)"/>
+<ellipse cx="480" cy="322" rx="178" ry="110" fill="url(#core)"/>
+<g fill="#352e28" stroke="#171a1a" stroke-width="4"><path d="M205 280l16-27 24 11 12 29-25 14Z"/><path d="M707 260l20-34 21 15 14 28-27 14Z"/><path d="M335 235l12-22 19 8 6 19-17 11Z"/><path d="M594 212l15-26 18 7 9 23-22 12Z"/></g>
+<g fill="#ffb32f"><path d="M480 236l-16 55 28-23 25 44-11-72 30-22-39 9-9-36Z"/><path d="M365 307l-45-23 31 44-24 29 44-16 18 26 3-44Z"/><path d="M591 297l44-22-30 39 22 27-43-16-20 22 5-42Z"/></g>
+<g fill="#f8d37b" opacity=".9"><circle cx="262" cy="220" r="5"/><circle cx="316" cy="177" r="4"/><circle cx="662" cy="198" r="4"/><circle cx="726" cy="319" r="5"/><circle cx="202" cy="340" r="3"/><circle cx="761" cy="252" r="3"/><circle cx="395" cy="180" r="4"/><circle cx="553" cy="154" r="4"/></g>
+<g fill="#413b35" opacity=".8"><ellipse cx="244" cy="390" rx="76" ry="13"/><ellipse cx="707" cy="392" rx="73" ry="12"/><ellipse cx="476" cy="405" rx="125" ry="15"/></g>
 </svg>

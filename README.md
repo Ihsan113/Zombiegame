@@ -1,4 +1,4 @@
-# Pixel Zombie LAN — v0.4.13
+# Pixel Zombie LAN — v0.4.15
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
 
@@ -75,3 +75,11 @@ v0.4.10 was parsed and run in Godot 4.7.2 (netcode checked at v0.4.9, barricade 
 ### Generated visual assets (v0.4.14)
 
 The project now includes `assets/grenade_explosion_asset.png`, `assets/airdrop_parachute_generated.png`, `assets/airdrop_crate_generated.png`, and `assets/airdrop_landing_dust_generated.png`. Full generated source sheets are retained in `assets/grenade_explosion_spritesheet_source.png` and `assets/airdrop_spritesheet_source.png`. The in-game grenade blast still uses the existing synchronized effect lifetime and host authority.
+
+
+## v0.4.15 — cohesive generated VFX and airdrop presentation
+- Replaced the old explosion raster, whose partially transparent orange/brown background caused a large muddy rectangle over the road, with a cropped, premultiplied-alpha transparent pixel-art blast. It is rendered using its original aspect ratio and anchored at ground level.
+- Reduced the oversized circular shock ring to a thinner, flattened pressure ripple and reduced duplicate procedural sparks, debris and smoke so the textured asset reads as one coherent effect rather than stacked effects.
+- Replaced the bright blue crate with a worn olive/rust/red supply crate that matches the dusk palette. Rendering now preserves the texture aspect ratio and aligns the crate bottom to the road contact point. Large original source sheets are kept in `art_source/` and excluded from Android export.
+- Combined the landed loot label and expiry countdown into one compact panel above the crate; removed the duplicate label below it and the strong rectangular warning outline.
+- Kept the compact binary snapshot protocol, ENet settings, RPC signatures and LAN cadence unchanged. Android version code/name: 27 / 0.4.15.

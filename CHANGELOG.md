@@ -105,3 +105,11 @@ Other changes:
 - Added a generated ground-level dust sprite to the synchronized airdrop expiry puff.
 - Preserved original generated sprite sheets under `assets/*_spritesheet_source.png` for future frame slicing.
 - Kept host-authoritative gameplay and the compact LAN snapshot protocol unchanged.
+
+
+## 0.4.15 — VFX asset integration polish
+- Replaced the grenade explosion image with a truly transparent, ground-hugging generated pixel-art blast, cropped/resized with alpha-aware processing and no opaque warm background.
+- Reduced shock-ring diameter and outline weight; toned down overlapping procedural fragments and smoke to avoid an oversized circular overlay.
+- Replaced the airdrop crate texture with a worn muted olive/rust supply crate and preserved texture proportions while aligning its base to the road.
+- Merged loot type and remaining time into a single small landed-drop tag instead of two stacked labels.
+- No multiplayer protocol or network-configuration changes. Android version code/name: 27 / 0.4.15.
