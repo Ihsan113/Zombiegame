@@ -32,3 +32,9 @@
 - Grenade control is hold-drag-release, with a 2D landing point, ballistic-style dotted preview, reticle and range readout. The host validates normalized X/Y target coordinates.
 - Wall control is hold-drag-release, previewing the A-frame sprite in green/red and deploying on release only when valid. Removed separate range slider and placement-confirm controls.
 - Bumped Android version code/name to 18 / 0.4.5.
+
+
+## 0.4.6 — LAN smoothing and grounded grenade/barricade visuals
+- Barricade image enlarged proportionally and anchored to the ground with a stronger contact shadow; placement preview matches placed size. Adjusted obstacle spacing and zombie approach distance.
+- Removed long vertical-looking projectile line. Added short directionally placed spark particles and ground shadow. Rebuilt explosion feedback with a fireball, expanding shockwave rings, radial sparks and smoke.
+- Added local movement prediction and gentle authoritative correction for joining clients, smoothed zombies across snapshots, 30 Hz input cadence, ~15 Hz world snapshots and FastLZ compression. Kept fire requests reliable on a dedicated ENet channel and removed the extra full-world broadcast after every shot to reduce packet bursts.

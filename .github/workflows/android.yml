@@ -112,6 +112,15 @@ jobs:
               'const GRENADE_MIN_RANGE_RATIO := 0.065',
               'const GRENADE_MAX_RANGE_RATIO := 0.30',
               'const WALL_PLACE_RANGE_RATIO := 0.145',
+              'const SNAPSHOT_INTERVAL := 0.066',
+              'const INPUT_INTERVAL := 0.033',
+              'peer.compression_mode = ENetMultiplayerPeer.COMPRESS_FASTLZ',
+              'func _predict_local_player(delta: float) -> void:',
+              'func _apply_zombie_snapshot(incoming: Array, snap_positions: bool = false) -> void:',
+              'var target_zombies: Array[Dictionary] = []',
+              'var wall_rect := Rect2(pos.x - 60.0, pos.y - 36.0, 120.0, 72.0)',
+              'var blast_radius: float = 14.0 + 126.0 * ring_progress',
+              'draw_ellipse_shadow(grenade_ground_pos + Vector2(0.0, 5.0), 7.0, 2.6, 0.36)',
               'const MAX_BARRICADES := 8',
               'const GRENADE_BLAST_RADIUS := 112.0',
               '_arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE',
@@ -183,8 +192,12 @@ jobs:
                   raise SystemExit('Malformed SVG ' + str(svg_path) + ': ' + str(exc))
           if 'var loot_kind := "ammo"' in script or 'if int(p.get("ammo", 120)) <= 0' in script:
               raise SystemExit('Infinite-ammo build must not retain ammo-consuming gameplay or new ammo drops')
+          if 'draw_line(pos + Vector2(-4.0, 10.0), grenade_visual_pos' in script:
+              raise SystemExit('Legacy grenade-to-ground tether returned; use ground shadow and directional sparks instead')
+          if 'func _predict_local_player(delta: float) -> void:' not in script or 'func _apply_zombie_snapshot(incoming: Array, snap_positions: bool = false) -> void:' not in script:
+              raise SystemExit('LAN client prediction/zombie interpolation functions missing')
           if 'grenade_slider_touch_id' in script or '_draw_grenade_range_slider' in script or 'grenade_range_slider' in script:
-              raise SystemExit('Legacy grenade slider still present; v0.4.5 requires hold-drag-release aiming')
+              raise SystemExit('Legacy grenade slider still present; v0.4.6 requires hold-drag-release aiming')
           if 'func _update_grenade_target_from_pointer(pointer_pos: Vector2) -> void' not in script or 'HOLD & DRAG GREN' not in script or 'HOLD & DRAG WALL' not in script:
               raise SystemExit('Hold-drag-release interaction markers are missing')
           print(f'Validated {len(refs)} resource references, landscape settings, infinite ammo, hold-drag grenade/wall controls, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
@@ -226,7 +239,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.5-APK
+          name: PixelZombieLAN-v0.4.6-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -235,15 +248,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.5-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.6-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.5-source.zip
+          test -s build/PixelZombieLAN-v0.4.6-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.5-source
-          path: build/PixelZombieLAN-v0.4.5-source.zip
+          name: PixelZombieLAN-v0.4.6-source
+          path: build/PixelZombieLAN-v0.4.6-source.zip
           if-no-files-found: error
           retention-days: 14

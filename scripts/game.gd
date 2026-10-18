@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.5
+# Pixel Zombie LAN — wave defense prototype v0.4.6
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -24,14 +24,14 @@ const GRENADE_MAX_CARRY := 5
 const GRENADE_MIN_RANGE_RATIO := 0.065
 const GRENADE_MAX_RANGE_RATIO := 0.30
 const WALL_PLACE_RANGE_RATIO := 0.145
-const WALL_MIN_PLAYER_DISTANCE := 46.0
+const WALL_MIN_PLAYER_DISTANCE := 82.0
 const MEDKIT_MAX_CARRY := 5
 const WALL_KIT_MAX_CARRY := 5
 const MAX_BARRICADES := 8
-const WALL_ATTACK_RANGE := 38.0
+const WALL_ATTACK_RANGE := 71.0
 const WALL_LANE_TOLERANCE := 34.0
-const SNAPSHOT_INTERVAL := 0.10 # 10 world snapshots/second
-const INPUT_INTERVAL := 0.05    # 20 input updates/second
+const SNAPSHOT_INTERVAL := 0.066 # About 15 world snapshots/second; client interpolation fills frames.
+const INPUT_INTERVAL := 0.033    # About 30 input updates/second for responsive client movement.
 const SAVE_PATH := "user://world_save.json"
 
 var screen_mode := "home" # home, help, lobby, game, pause, game_over
@@ -58,6 +58,7 @@ var peer: ENetMultiplayerPeer
 var players: Dictionary = {}
 var input_vectors: Dictionary = {}
 var zombies: Array[Dictionary] = []
+var target_zombies: Array[Dictionary] = []
 var airdrops: Array[Dictionary] = []
 var barricades: Array[Dictionary] = []
 var active_grenades: Array[Dictionary] = []
@@ -89,6 +90,7 @@ var wall_place_active := false
 var wall_preview_position := Vector2(480.0, 350.0)
 var wall_place_touch_id := -1
 var client_input_timer := 0.0
+var client_snapshot_age := 0.0
 var snapshot_timer := 0.0
 var fire_cooldowns: Dictionary = {}
 var heal_cooldowns: Dictionary = {}
@@ -146,13 +148,16 @@ func _process(delta: float) -> void:
             _host_simulate(delta)
             snapshot_timer += delta
             if snapshot_timer >= SNAPSHOT_INTERVAL:
-                snapshot_timer = 0.0
+                snapshot_timer = fmod(snapshot_timer, SNAPSHOT_INTERVAL)
                 _broadcast_world()
         elif _is_connected_client():
+            client_snapshot_age += delta
+            _predict_local_player(delta)
+            _tick_client_effects(delta)
             client_input_timer += delta
             if client_input_timer >= INPUT_INTERVAL:
-                client_input_timer = 0.0
-                rpc_id(1, "submit_input", joystick_vector)
+                client_input_timer = fmod(client_input_timer, INPUT_INTERVAL)
+                rpc_id(1, "submit_input", joystick_vector.limit_length(1.0))
             _interpolate_client_state(delta)
 
         _process_action_requests(delta)
@@ -613,10 +618,9 @@ func submit_input(movement: Vector2) -> void:
 @rpc("authority", "call_remote", "unreliable_ordered")
 func receive_world(world_players: Dictionary, world_zombies: Array, time_value: float, incoming_effects: Array, incoming_airdrops: Array, incoming_barricades: Array, incoming_grenades: Array, incoming_wave: int, incoming_spawned: int, incoming_kills: int, incoming_total: int, incoming_break_timer: float, incoming_wave_time_remaining: float, incoming_wave_timed_out: bool, incoming_game_over: bool) -> void:
     var was_game_over := game_over
+    client_snapshot_age = 0.0
     target_players = world_players.duplicate(true)
-    zombies.clear()
-    for z in world_zombies:
-        zombies.append(z.duplicate(true))
+    _apply_zombie_snapshot(world_zombies, false)
     combat_effects.clear()
     for effect in incoming_effects:
         combat_effects.append(effect.duplicate(true))
@@ -654,9 +658,8 @@ func receive_world(world_players: Dictionary, world_zombies: Array, time_value: 
 func receive_initial_world(world_players: Dictionary, world_zombies: Array, seed_value: int, time_value: float, incoming_effects: Array, incoming_airdrops: Array, incoming_barricades: Array, incoming_grenades: Array, incoming_wave: int, incoming_spawned: int, incoming_kills: int, incoming_total: int, incoming_spawn_timer: float, incoming_break_timer: float, incoming_wave_time_remaining: float, incoming_wave_timed_out: bool, incoming_game_over: bool) -> void:
     players = world_players.duplicate(true)
     target_players = world_players.duplicate(true)
-    zombies.clear()
-    for z in world_zombies:
-        zombies.append(z.duplicate(true))
+    client_snapshot_age = 0.0
+    _apply_zombie_snapshot(world_zombies, true)
     combat_effects.clear()
     for effect in incoming_effects:
         combat_effects.append(effect.duplicate(true))
@@ -694,9 +697,8 @@ func begin_game_remote() -> void:
 func receive_game_over_snapshot(world_players: Dictionary, world_zombies: Array, time_value: float, incoming_effects: Array, incoming_airdrops: Array, incoming_barricades: Array, incoming_grenades: Array, incoming_wave: int, incoming_spawned: int, incoming_kills: int, incoming_total: int, incoming_break_timer: float, incoming_wave_time_remaining: float, incoming_wave_timed_out: bool) -> void:
     players = world_players.duplicate(true)
     target_players = world_players.duplicate(true)
-    zombies.clear()
-    for z in world_zombies:
-        zombies.append(z.duplicate(true))
+    client_snapshot_age = 0.0
+    _apply_zombie_snapshot(world_zombies, true)
     combat_effects.clear()
     for effect in incoming_effects:
         combat_effects.append(effect.duplicate(true))
@@ -764,6 +766,7 @@ func _start_offline(load_saved: bool = false) -> void:
     input_vectors.clear()
     target_players.clear()
     zombies.clear()
+    target_zombies.clear()
     airdrops.clear()
     barricades.clear()
     active_grenades.clear()
@@ -796,8 +799,62 @@ func _start_offline(load_saved: bool = false) -> void:
     last_save_time = world_time
     snapshot_timer = 0.0
 
+func _predict_local_player(delta: float) -> void:
+    if game_over or screen_mode != "game" or not players.has(local_player_id):
+        return
+    var p: Dictionary = players[local_player_id]
+    if float(p.get("hp", 0.0)) <= 0.0:
+        p["walking"] = false
+        players[local_player_id] = p
+        return
+    var movement: Vector2 = joystick_vector.limit_length(1.0)
+    p["x"] = clampf(float(p.get("x", screen_size.x * 0.5)) + movement.x * PLAYER_SPEED * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
+    p["y"] = clampf(float(p.get("y", screen_size.y * 0.68)) + movement.y * PLAYER_SPEED * delta, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    if absf(movement.x) > 0.14:
+        p["face_x"] = -1.0 if movement.x < 0.0 else 1.0
+    p["walking"] = movement.length() > 0.12
+    players[local_player_id] = p
+
+func _apply_zombie_snapshot(incoming: Array, snap_positions: bool = false) -> void:
+    target_zombies.clear()
+    for value in incoming:
+        if typeof(value) == TYPE_DICTIONARY:
+            target_zombies.append(value.duplicate(true))
+
+    if snap_positions or zombies.is_empty():
+        zombies.clear()
+        for z in target_zombies:
+            zombies.append(z.duplicate(true))
+        return
+
+    var wanted_ids: Dictionary = {}
+    for z in target_zombies:
+        wanted_ids[int(z.get("id", -1))] = true
+    for index in range(zombies.size() - 1, -1, -1):
+        if not wanted_ids.has(int(zombies[index].get("id", -1))):
+            zombies.remove_at(index)
+
+    for target_z in target_zombies:
+        var zombie_id := int(target_z.get("id", -1))
+        var found_index := -1
+        for index in range(zombies.size()):
+            if int(zombies[index].get("id", -2)) == zombie_id:
+                found_index = index
+                break
+        if found_index < 0:
+            zombies.append(target_z.duplicate(true))
+        else:
+            var current: Dictionary = zombies[found_index]
+            var current_x := float(current.get("x", target_z.get("x", 0.0)))
+            var current_y := float(current.get("y", target_z.get("y", 0.0)))
+            var merged: Dictionary = target_z.duplicate(true)
+            merged["x"] = current_x
+            merged["y"] = current_y
+            zombies[found_index] = merged
+
 func _interpolate_client_state(delta: float) -> void:
-    var weight := minf(1.0, delta * 15.0)
+    var remote_weight: float = minf(1.0, delta * 15.0)
+    var zombie_weight: float = minf(1.0, delta * 18.0)
     for id_variant in target_players.keys():
         var id := int(id_variant)
         var target: Dictionary = target_players[id]
@@ -805,28 +862,64 @@ func _interpolate_client_state(delta: float) -> void:
             players[id] = target.duplicate(true)
             continue
         var current: Dictionary = players[id]
-        current["x"] = lerpf(float(current.get("x", target.get("x", 480.0))), float(target.get("x", 480.0)), weight)
-        current["y"] = lerpf(float(current.get("y", target.get("y", 270.0))), float(target.get("y", 270.0)), weight)
+        var current_pos := Vector2(float(current.get("x", target.get("x", 480.0))), float(current.get("y", target.get("y", 270.0))))
+        var target_pos := Vector2(float(target.get("x", 480.0)), float(target.get("y", 270.0)))
+        if id == local_player_id:
+            # Keep local input feeling immediate; gently reconcile predicted position to host authority.
+            if current_pos.distance_to(target_pos) > 112.0:
+                current_pos = target_pos
+            else:
+                current_pos = current_pos.lerp(target_pos, minf(1.0, delta * 3.8))
+        else:
+            current_pos = current_pos.lerp(target_pos, remote_weight)
+        current["x"] = current_pos.x
+        current["y"] = current_pos.y
         current["hp"] = target.get("hp", 100.0)
         current["medkits"] = target.get("medkits", 2)
         current["ammo"] = -1
         current["grenades"] = target.get("grenades", 3)
         current["wall_kits"] = target.get("wall_kits", 2)
-        current["face_x"] = target.get("face_x", 1.0)
-        current["walking"] = target.get("walking", false)
+        current["face_x"] = joystick_vector.x if id == local_player_id and absf(joystick_vector.x) > 0.14 else target.get("face_x", 1.0)
+        current["walking"] = joystick_vector.length() > 0.12 if id == local_player_id else target.get("walking", false)
         current["shoot_timer"] = target.get("shoot_timer", 0.0)
         current["hurt_timer"] = target.get("hurt_timer", 0.0)
         players[id] = current
+
+    for zombie_index in range(zombies.size()):
+        var current_zombie: Dictionary = zombies[zombie_index]
+        var current_id := int(current_zombie.get("id", -1))
+        for target_zombie in target_zombies:
+            if int(target_zombie.get("id", -2)) != current_id:
+                continue
+            var current_pos := Vector2(float(current_zombie.get("x", 0.0)), float(current_zombie.get("y", 0.0)))
+            var target_pos := Vector2(float(target_zombie.get("x", 0.0)), float(target_zombie.get("y", 0.0)))
+            if current_pos.distance_to(target_pos) > 100.0:
+                current_pos = target_pos
+            else:
+                current_pos = current_pos.lerp(target_pos, zombie_weight)
+            current_zombie["x"] = current_pos.x
+            current_zombie["y"] = current_pos.y
+            zombies[zombie_index] = current_zombie
+            break
     for id_variant in players.keys().duplicate():
         if not target_players.has(id_variant):
             players.erase(id_variant)
+
+func _tick_client_effects(delta: float) -> void:
+    for effect_index in range(combat_effects.size() - 1, -1, -1):
+        var effect: Dictionary = combat_effects[effect_index]
+        effect["ttl"] = maxf(0.0, float(effect.get("ttl", 0.0)) - delta)
+        if float(effect["ttl"]) <= 0.0:
+            combat_effects.remove_at(effect_index)
+        else:
+            combat_effects[effect_index] = effect
 
 func _broadcast_world() -> void:
     if not is_host or multiplayer.multiplayer_peer == null:
         return
     rpc("receive_world", players, zombies, world_time, combat_effects, airdrops, barricades, active_grenades, wave_number, wave_spawned, wave_kills, wave_total, wave_break_timer, wave_time_remaining, wave_timed_out, game_over)
 
-@rpc("any_peer", "call_remote", "reliable")
+@rpc("any_peer", "call_remote", "reliable", 1)
 func request_fire() -> void:
     if not is_host:
         return
@@ -899,7 +992,6 @@ func _host_fire(id: int) -> void:
             zombies.remove_at(closest_index)
         else:
             zombies[closest_index] = zombie
-    _broadcast_world()
 
 @rpc("any_peer", "call_remote", "reliable")
 func request_heal() -> void:
@@ -1048,7 +1140,7 @@ func _wall_placement_is_valid(id: int, wall_pos: Vector2) -> bool:
         return false
     for existing in barricades:
         var existing_pos := Vector2(float(existing.get("x", 0.0)), float(existing.get("y", 0.0)))
-        if existing_pos.distance_to(wall_pos) < 88.0:
+        if existing_pos.distance_to(wall_pos) < 132.0:
             return false
     return true
 
@@ -1296,7 +1388,7 @@ func _update_grenades(delta: float) -> void:
         grenade["fuse"] = float(grenade.get("fuse", 1.02)) - delta
         if float(grenade["fuse"]) <= 0.0:
             var blast_pos := Vector2(float(grenade.get("x", 0.0)), float(grenade.get("y", 0.0)))
-            _add_combat_effect(6, blast_pos, blast_pos, 0.50)
+            _add_combat_effect(6, blast_pos, blast_pos, 0.95)
             _emit_sfx("explosion")
             for zombie_index in range(zombies.size() - 1, -1, -1):
                 var zombie: Dictionary = zombies[zombie_index]
@@ -1329,6 +1421,7 @@ func _restart_run() -> void:
     if not is_host:
         ui_status = "Only the host can restart this run."
         return
+    target_zombies.clear()
     zombies.clear()
     airdrops.clear()
     barricades.clear()
@@ -1439,6 +1532,7 @@ func _load_world() -> void:
     wave_timed_out = bool(parsed.get("wave_timed_out", false))
     game_over = false
     airdrop_spawn_timer = maxf(2.0, float(parsed.get("airdrop_spawn_timer", 28.0)))
+    target_zombies.clear()
     zombies.clear()
     airdrops.clear()
     barricades.clear()
@@ -1503,6 +1597,7 @@ func _start_host() -> void:
         multiplayer.multiplayer_peer.close()
         multiplayer.multiplayer_peer = null
     peer = ENetMultiplayerPeer.new()
+    peer.compression_mode = ENetMultiplayerPeer.COMPRESS_FASTLZ
     var error_code := peer.create_server(PORT, MAX_PLAYERS - 1)
     if error_code != OK:
         ui_status = "Host failed: %s" % error_string(error_code)
@@ -1517,6 +1612,7 @@ func _start_host() -> void:
     input_vectors.clear()
     target_players.clear()
     zombies.clear()
+    target_zombies.clear()
     airdrops.clear()
     barricades.clear()
     active_grenades.clear()
@@ -1555,6 +1651,7 @@ func _join_host(ip: String) -> void:
         multiplayer.multiplayer_peer.close()
         multiplayer.multiplayer_peer = null
     peer = ENetMultiplayerPeer.new()
+    peer.compression_mode = ENetMultiplayerPeer.COMPRESS_FASTLZ
     var error_code := peer.create_client(cleaned_ip, PORT)
     if error_code != OK:
         ui_status = "Join failed: %s" % error_string(error_code)
@@ -1567,6 +1664,7 @@ func _join_host(ip: String) -> void:
     host_ip = cleaned_ip
     players.clear()
     target_players.clear()
+    target_zombies.clear()
     zombies.clear()
     combat_effects.clear()
     input_vectors.clear()
@@ -1616,6 +1714,7 @@ func _reset_network_state() -> void:
     fire_held = false
     fire_touch_id = -1
     fire_requested = false
+    target_zombies.clear()
     grenade_requested = false
     build_requested = false
     fire_repeat_timer = 0.0
@@ -1873,7 +1972,7 @@ func _draw_game_world() -> void:
     for zi in range(zombies.size()):
         render_entries.append({"y": float(zombies[zi].get("y", h * 0.68)), "type": "zombie", "index": zi})
     for wi in range(barricades.size()):
-        render_entries.append({"y": float(barricades[wi].get("y", h * 0.68)) + 8.0, "type": "barricade", "index": wi})
+        render_entries.append({"y": float(barricades[wi].get("y", h * 0.68)) + 36.0, "type": "barricade", "index": wi})
     for di in range(airdrops.size()):
         render_entries.append({"y": float(airdrops[di].get("y", h * 0.68)) + 8.0, "type": "airdrop", "index": di})
     for gi in range(active_grenades.size()):
@@ -1938,11 +2037,27 @@ func _draw_game_world() -> void:
         elif entry_type == "grenade":
             var grenade: Dictionary = active_grenades[int(entry.index)]
             pos = Vector2(float(grenade.get("x", 0.0)), float(grenade.get("y", h * 0.68)))
-            var flight_progress := clampf(float(grenade.get("elapsed", 0.0)) / maxf(0.05, float(grenade.get("travel_time", 0.46))), 0.0, 1.0)
+            var travel_time: float = maxf(0.05, float(grenade.get("travel_time", 0.46)))
+            var render_elapsed: float = float(grenade.get("elapsed", 0.0))
+            if _is_connected_client():
+                render_elapsed += client_snapshot_age
+            var flight_progress := clampf(render_elapsed / travel_time, 0.0, 1.0)
             var flight_height: float = float(grenade.get("flight_height", 72.0))
-            var grenade_visual_pos := pos + Vector2(0.0, -sin(flight_progress * PI) * flight_height)
-            draw_line(pos + Vector2(-4.0, 10.0), grenade_visual_pos + Vector2(0.0, 4.0), Color(0.85, 0.79, 0.58, 0.52), 1.0, true)
-            draw_ellipse_shadow(grenade_visual_pos + Vector2(1.0, 5.0), 5.0, 2.5, 0.28)
+            var launch_pos := Vector2(float(grenade.get("start_x", pos.x)), float(grenade.get("start_y", pos.y)))
+            var target_pos := Vector2(float(grenade.get("target_x", pos.x)), float(grenade.get("target_y", pos.y)))
+            var grenade_ground_pos := pos
+            if _is_connected_client():
+                grenade_ground_pos = launch_pos.lerp(target_pos, flight_progress)
+            var grenade_visual_pos := grenade_ground_pos + Vector2(0.0, -sin(flight_progress * PI) * flight_height)
+            var travel_dir: Vector2 = (target_pos - launch_pos).normalized()
+            if travel_dir.length_squared() < 0.01:
+                travel_dir = Vector2.RIGHT
+            # Shadow stays on the pavement. Tiny particles follow the throw direction; no
+            # line is drawn from the ground to the airborne sprite, which looked like a pole.
+            draw_ellipse_shadow(grenade_ground_pos + Vector2(0.0, 5.0), 7.0, 2.6, 0.36)
+            var spark_alpha: float = 0.42 * (1.0 - flight_progress)
+            draw_circle(grenade_visual_pos - travel_dir * 5.0, 1.6, Color(0.92, 0.78, 0.48, spark_alpha))
+            draw_circle(grenade_visual_pos - travel_dir * 9.0, 1.0, Color(0.79, 0.70, 0.48, spark_alpha * 0.72))
             if grenade_texture != null:
                 draw_set_transform(grenade_visual_pos, sin(animation_clock * 14.0 + float(int(grenade.get("id", 0)) % 7)) * 0.12, Vector2.ONE)
                 draw_texture_rect(grenade_texture, Rect2(-8.0, -11.0, 16.0, 22.0), false, Color.WHITE)
@@ -1961,25 +2076,30 @@ func _draw_game_world() -> void:
 func _draw_barricade(wall: Dictionary, pos: Vector2) -> void:
     var max_hp := maxf(1.0, float(wall.get("max_hp", 125.0)))
     var hp := clampf(float(wall.get("hp", max_hp)) / max_hp, 0.0, 1.0)
-    # Compact A-frame road barricade: broad hazard beam, splayed feet and a small grounding shadow.
-    var rect := Rect2(pos.x - 43.0, pos.y - 28.0, 86.0, 52.0)
-    draw_ellipse_shadow(pos + Vector2(0.0, 22.0), 38.0, 7.0, 0.34)
+    # The position is the character-style center/ground lane coordinate. Keep the feet
+    # aligned with the survivor foot line instead of leaving a gap below the sprite.
+    var ground_y: float = pos.y + 35.0
+    var wall_rect := Rect2(pos.x - 60.0, pos.y - 36.0, 120.0, 72.0)
+    draw_ellipse_shadow(Vector2(pos.x + 2.0, ground_y + 1.5), 48.0, 7.0, 0.48)
+    draw_line(Vector2(pos.x - 46.0, ground_y + 1.0), Vector2(pos.x + 46.0, ground_y + 1.0), Color(0.02, 0.025, 0.024, 0.44), 2.0, true)
     if barricade_texture != null:
-        draw_texture_rect(barricade_texture, rect, false, Color.WHITE)
+        draw_texture_rect(barricade_texture, wall_rect, false, Color.WHITE)
     else:
-        draw_line(pos + Vector2(-37.0, -17.0), pos + Vector2(-26.0, 21.0), Color("#554739"), 7.0, true)
-        draw_line(pos + Vector2(37.0, -17.0), pos + Vector2(26.0, 21.0), Color("#554739"), 7.0, true)
-        draw_rect(Rect2(pos.x - 39.0, pos.y - 22.0, 78.0, 18.0), Color("#3b4441"))
-        for stripe_index in range(6):
-            var stripe_x: float = pos.x - 34.0 + float(stripe_index) * 13.0
-            draw_line(Vector2(stripe_x, pos.y - 21.0), Vector2(stripe_x + 9.0, pos.y - 5.0), Color("#cfac62"), 5.0, true)
-        draw_rect(Rect2(pos.x - 39.0, pos.y - 22.0, 78.0, 18.0), Color("#1b2221"), false, 2.0)
-    # Structural damage remains visible on the beam as the barrier loses integrity.
+        # A-frame fallback with broad hazard beam, sloped legs and visible floor contact.
+        draw_line(pos + Vector2(-49.0, -22.0), pos + Vector2(-39.0, 33.0), Color("#554739"), 10.0, true)
+        draw_line(pos + Vector2(49.0, -22.0), pos + Vector2(39.0, 33.0), Color("#554739"), 10.0, true)
+        draw_line(pos + Vector2(-28.0, 6.0), pos + Vector2(28.0, 25.0), Color("#6e5741"), 7.0, true)
+        draw_rect(Rect2(pos.x - 56.0, pos.y - 29.0, 112.0, 24.0), Color("#343d3b"))
+        for stripe_index in range(7):
+            var stripe_x: float = pos.x - 50.0 + float(stripe_index) * 16.0
+            draw_line(Vector2(stripe_x, pos.y - 27.0), Vector2(stripe_x + 10.0, pos.y - 7.0), Color("#cfac62"), 5.0, true)
+        draw_rect(Rect2(pos.x - 56.0, pos.y - 29.0, 112.0, 24.0), Color("#1b2221"), false, 2.0)
+    # Damage cracks stay on the upper beam, while foot pads remain grounded.
     if hp < 0.72:
-        draw_line(pos + Vector2(-21.0, -15.0), pos + Vector2(-12.0, -5.0), Color("#34241c"), 2.0, true)
+        draw_line(pos + Vector2(-28.0, -22.0), pos + Vector2(-16.0, -8.0), Color("#34241c"), 2.2, true)
     if hp < 0.42:
-        draw_line(pos + Vector2(13.0, -15.0), pos + Vector2(5.0, -7.0), Color("#241b17"), 2.0, true)
-    var hp_bar := Rect2(pos.x - 23.0, pos.y - 36.0, 46.0, 4.0)
+        draw_line(pos + Vector2(20.0, -22.0), pos + Vector2(8.0, -8.0), Color("#241b17"), 2.2, true)
+    var hp_bar := Rect2(pos.x - 27.0, pos.y - 49.0, 54.0, 4.5)
     draw_rect(Rect2(hp_bar.position - Vector2(1.0, 1.0), hp_bar.size + Vector2(2.0, 2.0)), Color(0.01, 0.015, 0.016, 0.88))
     draw_rect(hp_bar, Color("#302627"))
     draw_rect(Rect2(hp_bar.position, Vector2(hp_bar.size.x * hp, hp_bar.size.y)), Color("#8bb66b") if hp > 0.45 else Color("#d4514b"))
@@ -2086,18 +2206,18 @@ func _draw_grenade_aim_preview() -> void:
 
 func _draw_wall_placement_preview() -> void:
     var valid := _wall_placement_is_valid(local_player_id, wall_preview_position)
-    var preview_rect := Rect2(wall_preview_position.x - 43.0, wall_preview_position.y - 28.0, 86.0, 52.0)
+    var preview_rect := Rect2(wall_preview_position.x - 60.0, wall_preview_position.y - 36.0, 120.0, 72.0)
     var ghost_color := Color(0.73, 1.0, 0.68, 0.73) if valid else Color(1.0, 0.34, 0.34, 0.70)
-    draw_ellipse_shadow(wall_preview_position + Vector2(0.0, 22.0), 38.0, 7.0, 0.28)
+    draw_ellipse_shadow(wall_preview_position + Vector2(2.0, 36.0), 48.0, 7.0, 0.36)
     if barricade_texture != null:
         draw_texture_rect(barricade_texture, preview_rect, false, ghost_color)
     else:
         draw_rect(preview_rect, ghost_color)
         draw_rect(preview_rect, Color.WHITE, false, 2.0)
     var placement_color := Color("#91d77e") if valid else Color("#ed6262")
-    draw_arc(wall_preview_position + Vector2(0.0, 3.0), 49.0, 0.0, TAU, 36, Color(placement_color.r, placement_color.g, placement_color.b, 0.82), 2.0)
+    draw_arc(wall_preview_position + Vector2(0.0, 35.0), 58.0, 0.0, TAU, 36, Color(placement_color.r, placement_color.g, placement_color.b, 0.82), 2.0)
     var preview_label := "RELEASE TO DEPLOY" if valid else "MOVE / BLOCKED"
-    var label_rect := Rect2(wall_preview_position.x - 59.0, wall_preview_position.y - 49.0, 118.0, 16.0)
+    var label_rect := Rect2(wall_preview_position.x - 66.0, wall_preview_position.y - 57.0, 132.0, 16.0)
     draw_rect(label_rect, Color(0.01, 0.015, 0.018, 0.88))
     draw_rect(Rect2(label_rect.position, Vector2(2.0, label_rect.size.y)), placement_color)
     draw_string(ui_font, Vector2(label_rect.position.x + 4.0, label_rect.position.y + 11.5), preview_label, HORIZONTAL_ALIGNMENT_CENTER, label_rect.size.x - 8.0, 8, placement_color)
@@ -2410,10 +2530,31 @@ func _draw_combat_effects() -> void:
                 draw_line(slash_start, slash_end, Color(0.72, 0.12, 0.15, alpha * 0.82), 2.2, true)
                 draw_line(slash_start + Vector2(0, -1), slash_end + Vector2(0, -1), Color(0.98, 0.47, 0.39, alpha * 0.62), 1.0, true)
         elif kind == 6:
-            var blast_radius := 18.0 + 72.0 * progress
-            draw_arc(start_pos, blast_radius, 0, TAU, 42, Color(1.0, 0.52, 0.19, alpha * 0.92), 4.0 * alpha + 1.0)
-            draw_arc(start_pos, blast_radius * 0.72, 0, TAU, 36, Color(1.0, 0.82, 0.42, alpha * 0.78), 2.4 * alpha + 0.5)
-            draw_circle(start_pos, 12.0 * (1.0 - progress) + 2.0, Color(1.0, 0.59, 0.24, alpha * 0.66))
+            var blast_fade: float = clampf(1.0 - progress, 0.0, 1.0)
+            var ring_progress: float = clampf(progress * 1.22, 0.0, 1.0)
+            var blast_radius: float = 14.0 + 126.0 * ring_progress
+            # Brief dark scorch and a broad expanding shock ring anchor the explosion to the road.
+            draw_ellipse_shadow(start_pos + Vector2(0.0, 7.0), 12.0 + 42.0 * progress, 4.0 + 8.0 * progress, 0.22 + 0.30 * blast_fade)
+            draw_arc(start_pos, blast_radius, 0.0, TAU, 52, Color(1.0, 0.43, 0.16, blast_fade * 0.86), 3.8 * blast_fade + 0.6)
+            draw_arc(start_pos, blast_radius * 0.70, 0.0, TAU, 44, Color(1.0, 0.78, 0.35, blast_fade * 0.72), 2.2 * blast_fade + 0.5)
+            # Fireball collapses quickly while smoke continues to rise.
+            var fire_radius: float = 31.0 * pow(blast_fade, 1.7) + 1.5
+            draw_circle(start_pos + Vector2(0.0, -3.0), fire_radius, Color(0.92, 0.23, 0.08, blast_fade * 0.80))
+            draw_circle(start_pos + Vector2(-2.0, -5.0), fire_radius * 0.66, Color(1.0, 0.56, 0.13, blast_fade * 0.92))
+            draw_circle(start_pos + Vector2(-3.0, -6.0), fire_radius * 0.34, Color(1.0, 0.86, 0.48, blast_fade * 0.88))
+            for spark_index in range(12):
+                var spark_angle: float = TAU * float(spark_index) / 12.0 + 0.19
+                var spark_dir := Vector2(cos(spark_angle), sin(spark_angle))
+                var spark_start := start_pos + spark_dir * (fire_radius * 0.58)
+                var spark_length: float = (8.0 + float((spark_index * 7) % 9)) * blast_fade
+                var spark_end := spark_start + spark_dir * spark_length + Vector2(0.0, -5.0 * progress)
+                draw_line(spark_start, spark_end, Color(1.0, 0.66, 0.25, blast_fade * 0.88), 1.5, true)
+            var smoke_alpha: float = clampf(progress * 2.0, 0.0, 1.0) * blast_fade * 0.62
+            for smoke_index in range(6):
+                var smoke_angle: float = TAU * float(smoke_index) / 6.0 + 0.55
+                var smoke_offset := Vector2(cos(smoke_angle) * (7.0 + progress * 24.0), -progress * (10.0 + float(smoke_index % 3) * 8.0))
+                var smoke_radius: float = 5.0 + progress * (5.0 + float(smoke_index % 3) * 2.0)
+                draw_circle(start_pos + smoke_offset, smoke_radius, Color(0.18, 0.20, 0.19, smoke_alpha))
         elif kind == 7:
             var pickup_radius := 8.0 + progress * 25.0
             draw_arc(start_pos, pickup_radius, 0, TAU, 24, Color(0.78, 0.89, 0.56, alpha), 2.0)

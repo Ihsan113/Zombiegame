@@ -1,48 +1,30 @@
-# Pixel Zombie LAN — v0.4.5
+# Pixel Zombie LAN — v0.4.6
 
-A landscape Android zombie wave-defense prototype built with Godot 4. It supports offline solo play and a host-authoritative local Wi-Fi session for up to four players (ENet UDP port 24567); an internet connection is not needed after installation.
+A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
 
-## What's new in v0.4.5
-- Infinite ammunition: FIRE no longer consumes bullets; the HUD shows `AMMO ∞`. Airdrops now contain useful loot instead of redundant ammo: grenades, wall kits or medkits.
-- Single-gesture grenade aiming: press and hold GREN, drag the target marker anywhere in the defense lane to adjust both direction and distance, then release to throw. A dotted arc and landing marker update while dragging. The host validates the 2D target and simulates the throw.
-- Single-gesture barricade placement: press and hold WALL, drag the A-frame ghost to a valid point, then release to deploy. Invalid spots turn red; no separate PLACE button or slider is needed.
-- Replaced the crate-like wall sprite with a detailed A-frame roadside barricade featuring a hazard beam, splayed legs, cross-bracing, weathered metal and feet. The PNG is transparent and uses an SVG fallback.
-- Airdrop loot has randomized useful items and labeled pickup rewards. If a category is full, overflow converts to a medkit or emergency HP rather than wasted ammo.
-- Android version code 18 / version name 0.4.5.
+## v0.4.6 updates
+- Enlarged the transparent A-frame barricade art to match its native aspect ratio and aligned its feet and contact shadow to the survivor ground line. Preview and placed barricade use the same shape; obstacle spacing and zombie attack distance match its width.
+- Removed the long ground-to-projectile tether during grenade throws. The grenade now has a ground shadow and tiny motion sparks; explosion feedback includes a collapsing fireball, expanding shock rings, radial sparks, scorch shadow and rising smoke.
+- Added client-side local-player prediction with gentle correction to the host state, plus interpolation for remote players and zombies.
+- Clients submit movement at about 30 Hz; the host broadcasts snapshots at about 15 Hz. ENet FastLZ compression is enabled symmetrically. Fire input no longer causes an extra full-world broadcast for every shot.
+- Host remains authoritative for movement bounds, combat hits, health, grenade damage, loot and barricade placement.
 
 ## Controls
-- Left virtual analog: move around the defense lane.
-- Hold FIRE: fire horizontal shots in the direction the survivor last faced. Ammunition is unlimited.
-- HEAL: spend one medkit to restore up to 35 HP.
-- GREN: hold and drag from the GREN button toward the desired landing point, then release to throw. The arc, crosshair and estimated range follow the pointer. Starts with 3 grenades; supply drops can replenish them.
-- WALL: hold and drag the WALL button into the arena to position the A-frame barricade; release to deploy when the preview is green. Red means invalid placement. No separate confirmation slider/button. Barricades block aligned zombies, have HP and can be destroyed.
+- Left virtual analog: move in the lower defense lane.
+- Hold FIRE: repeat horizontal shots in the last left/right facing direction. Ammo is unlimited.
+- HEAL: consume one medkit to restore up to 35 HP.
+- GREN: hold and drag to the landing point, then release to throw. The dotted arc and landing marker show the aim.
+- WALL: hold and drag the A-frame barricade preview, then release when it is green. Red indicates invalid placement. Barricades block aligned zombies, have HP and can be destroyed.
 - Pause: resume, manually save, or leave the session.
 
-## Supply drops and barricades
-Supply crates descend under a parachute and land in the defense lane. Each random crate yields grenades, wall kits or a medkit. The crate label shows the content. Survivors start with two wall kits; placement is host-validated and restricted to a reasonable distance and lane. A maximum of eight barricades can exist; zombies attack barriers before reaching players, and damaged barriers display HP/degradation marks.
+## Supply drops
+Supply crates descend under a parachute. Loot is randomized between grenades, wall kits and medkits. If a category is full, excess loot converts to a useful alternative rather than ammunition, because ammunition is unlimited.
 
-## LAN multiplayer
-The host opens Multiplayer LAN → Create World, then shares its hotspot IPv4 address. Friends connected to the same hotspot select Join World and enter that address. Android hotspot isolation varies by device, so physical-device testing is still required.
+## LAN setup
+The host selects **Multiplayer LAN → Create World** and shares the hotspot IPv4 address. Other devices must join the same hotspot, select **Join World**, and enter that address. Wi-Fi hotspot isolation and device performance vary, so test the actual phones together. Client prediction/interpolation reduces perceived input delay and snapshot stepping; it cannot compensate for a poor hotspot or a heavily loaded device.
 
-## Saved runs
-Saving is manual from the host pause menu/lobby. Continue Saved is explicit; new solo/host runs clear previous zombie and effect state. Leaving does not auto-save.
+## Build from source
+Push the ZIP contents so `project.godot` is in the repository root. GitHub Actions checks resource references, landscape configuration, script markers, SVG/WAV assets, Godot import and headless startup before exporting a debug APK and uploading a source ZIP. Install only after the workflow succeeds.
 
-## Build
-Push the source ZIP contents so `project.godot` is in the repository root. GitHub Actions imports assets, validates resource references and sound files, checks script markers, runs a headless scene startup, exports a debug APK and uploads a source ZIP.
-
-## Prototype/testing note
-Grenade and airdrop assets are SVG; the barricade uses a transparent detailed PNG with a matching SVG fallback. SFX are synthesized locally. Static checks verify resource paths and formats, but Godot runtime compilation, touchscreen feel and actual four-device LAN behavior must be confirmed by GitHub Actions and device testing.
-
-
-## v0.4.4 — CI validator correction
-- Fixed the airdrop loot-label match so grenade loot has an explicit branch and the code matches the workflow's required implementation markers.
-- Legacy saved `ammo` drops are labelled and migrated as grenade loot, since ammunition is unlimited.
-- Bumped Android version code/name to 17 / 0.4.4.
-- No gameplay controls, grenade aim, wall placement, or arena geometry changes in this maintenance update.
-
-
-## v0.4.5 — A-frame barricade and direct touch gestures
-- Replaced the boxy barricade sprite with a detailed transparent A-frame road barrier; render dimensions, shadow and HP bar are tuned to the new silhouette.
-- Grenade targeting is now one continuous hold-drag-release gesture. It uses a 2D target, dotted arc, landing reticle and distance label; touch release throws immediately. Host RPC sends normalized target coordinates.
-- Wall placement uses the same hold-drag-release pattern. The ghost barricade follows the pointer and deploys only on release if valid; removed the grenade range slider and cancel/place controls.
-- Bumped Android version code/name to 18 / 0.4.5.
+## Known verification limit
+The source and static checks can be inspected here, but Godot 4.7.2 is not installed in this environment. The newest script still needs GitHub Actions compilation and real device testing for frame pacing, explosion appearance, barricade grounding and four-device LAN behavior.
