@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="144" height="120" viewBox="0 0 144 120">
+<defs>
+ <linearGradient id="crate" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#697153"/><stop offset=".25" stop-color="#46543e"/><stop offset=".7" stop-color="#303a30"/><stop offset="1" stop-color="#1c2824"/></linearGradient>
+ <linearGradient id="metal" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#c2bda2"/><stop offset=".3" stop-color="#7a8172"/><stop offset="1" stop-color="#323c36"/></linearGradient>
+ <linearGradient id="top" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#849071"/><stop offset=".45" stop-color="#586548"/><stop offset="1" stop-color="#303b2d"/></linearGradient>
+ <pattern id="rib" width="14" height="12" patternUnits="userSpaceOnUse"><path d="M2 1v10" stroke="#1b251e" stroke-width="3"/><path d="M5 1v10" stroke="#788367" stroke-width="1.5"/></pattern>
+</defs>
+<!-- shadow -->
+<ellipse cx="73" cy="108" rx="59" ry="8" fill="#030605" opacity=".42"/>
+<!-- crate face -->
+<path d="M15 31 L122 28 L129 94 L18 98 Z" fill="url(#crate)" stroke="#19231d" stroke-width="4"/>
+<path d="M19 36 L119 33 L124 89 L22 93 Z" fill="url(#rib)" opacity=".8"/>
+<!-- reinforced vertical corners -->
+<path d="M16 30 L27 28 L31 95 L20 97 Z M111 29 L123 28 L131 93 L119 95 Z" fill="url(#metal)" stroke="#1b241e" stroke-width="2.5"/>
+<path d="M20 38L23 87M116 37L122 86" stroke="#d2c9aa" stroke-width="1.6" opacity=".76"/>
+<!-- top lid -->
+<path d="M15 31 L31 15 L124 13 L137 28 L122 36 Z" fill="url(#top)" stroke="#1a241e" stroke-width="4"/>
+<path d="M31 18 L119 16 L128 27 L31 30 Z" fill="#798467" opacity=".62"/>
+<path d="M37 21h70m-61 4h45" stroke="#c0b992" stroke-width="1.5" opacity=".65"/>
+<!-- metal straps and latch -->
+<path d="M45 24 L54 23 L58 94 L48 94 Z M84 23 L94 22 L98 91 L88 91 Z" fill="url(#metal)" stroke="#1d2720" stroke-width="2"/>
+<path d="M47 27L52 90M87 26L92 88" stroke="#d0c8ac" stroke-width="1.4" opacity=".7"/>
+<path d="M64 43h18v22H64Z" fill="#1e2923" stroke="#adae92" stroke-width="2"/>
+<path d="M67 46h12v16H67Z" fill="#9d9e7d" opacity=".6"/>
+<path d="M69 50h8m-8 4h8m-8 4h5" stroke="#29332b" stroke-width="1.6"/>
+<!-- stencil markings, no logo -->
+<path d="M29 48h9v20h-9Z" fill="#d4cba9" opacity=".9"/>
+<path d="M31 51h5m-5 4h5m-5 4h5m-5 4h5" stroke="#364035" stroke-width="1.4"/>
+<path d="M104 44h10v20h-10Z" fill="#d1c7a3" opacity=".9"/>
+<path d="M106 47h6m-6 4h6m-6 4h6m-6 4h6" stroke="#374034" stroke-width="1.4"/>
+<!-- corner bumpers and bolts -->
+<g fill="#b8b8a2" stroke="#303a32" stroke-width="1.6"><circle cx="24" cy="34" r="3"/><circle cx="121" cy="33" r="3"/><circle cx="27" cy="90" r="3"/><circle cx="124" cy="87" r="3"/><circle cx="51" cy="33" r="2.5"/><circle cx="91" cy="32" r="2.5"/></g>
+<path d="M20 99h106" stroke="#111b17" stroke-width="4"/><path d="M26 101h93" stroke="#838a74" stroke-width="2"/>
+<path d="M20 78l7 -2m-4 5l8 -2m79 -30l8 -2m-6 5l8 -2" stroke="#c0a16d" stroke-width="1.5" opacity=".75"/>
+</svg>

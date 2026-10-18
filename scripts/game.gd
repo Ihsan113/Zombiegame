@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.2
+# Pixel Zombie LAN — wave defense prototype v0.4.3
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -21,7 +21,10 @@ const ARENA_BOTTOM_CLEARANCE := 40.0
 const GRENADE_BLAST_RADIUS := 112.0
 const GRENADE_DAMAGE := 5.0
 const GRENADE_MAX_CARRY := 5
-const AMMO_MAX_CARRY := 360
+const GRENADE_MIN_RANGE_RATIO := 0.065
+const GRENADE_MAX_RANGE_RATIO := 0.30
+const WALL_PLACE_RANGE_RATIO := 0.145
+const WALL_MIN_PLAYER_DISTANCE := 46.0
 const MEDKIT_MAX_CARRY := 5
 const WALL_KIT_MAX_CARRY := 5
 const MAX_BARRICADES := 8
@@ -36,6 +39,10 @@ var is_offline := false
 var button_rects: Dictionary = {}
 var sprite_atlas: Texture2D
 var background_texture: Texture2D
+var grenade_texture: Texture2D
+var barricade_texture: Texture2D
+var airdrop_crate_texture: Texture2D
+var parachute_texture: Texture2D
 var combat_effects: Array[Dictionary] = []
 var wave_number := 1
 var wave_total := WAVE_ZOMBIE_COUNT
@@ -74,6 +81,12 @@ var fire_repeat_timer := 0.0
 var heal_requested := false
 var grenade_requested := false
 var build_requested := false
+var grenade_aim_active := false
+var grenade_aim_range_ratio := 0.18
+var grenade_slider_touch_id := -1
+var wall_place_active := false
+var wall_preview_position := Vector2(480.0, 350.0)
+var wall_place_touch_id := -1
 var client_input_timer := 0.0
 var snapshot_timer := 0.0
 var fire_cooldowns: Dictionary = {}
@@ -105,6 +118,10 @@ func _ready() -> void:
     background_texture = load("res://assets/arena_bg.jpg") as Texture2D
     if background_texture == null:
         background_texture = load("res://assets/arena_bg.svg") as Texture2D
+    grenade_texture = load("res://assets/grenade_detail.svg") as Texture2D
+    barricade_texture = load("res://assets/barricade_detail.svg") as Texture2D
+    airdrop_crate_texture = load("res://assets/airdrop_crate_detail.svg") as Texture2D
+    parachute_texture = load("res://assets/parachute_detail.svg") as Texture2D
     if sprite_atlas == null:
         push_warning("Pixel Zombie LAN: neither PNG nor SVG sprite atlas loaded; simple fallback characters will be drawn.")
     if background_texture == null:
@@ -272,19 +289,26 @@ func _process_action_requests(delta: float) -> void:
 
     if grenade_requested:
         grenade_requested = false
+        var throw_range: float = clampf(grenade_aim_range_ratio, GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO)
+        grenade_aim_active = false
+        grenade_slider_touch_id = -1
         if is_host:
-            _host_throw_grenade(local_player_id)
+            _host_throw_grenade(local_player_id, throw_range)
         elif _is_connected_client():
-            rpc_id(1, "request_grenade")
+            rpc_id(1, "request_grenade", throw_range)
         else:
             ui_status = "Grenades are available during a world session"
 
     if build_requested:
         build_requested = false
+        var x_ratio: float = clampf(wall_preview_position.x / maxf(1.0, screen_size.x), 0.0, 1.0)
+        var y_ratio: float = clampf(wall_preview_position.y / maxf(1.0, screen_size.y), 0.0, 1.0)
+        wall_place_active = false
+        wall_place_touch_id = -1
         if is_host:
-            _host_build_wall(local_player_id)
+            _host_build_wall(local_player_id, x_ratio, y_ratio)
         elif _is_connected_client():
-            rpc_id(1, "request_build_wall")
+            rpc_id(1, "request_build_wall", x_ratio, y_ratio)
         else:
             ui_status = "Barricades are available during a world session"
 
@@ -518,7 +542,7 @@ func _make_player(id: int) -> Dictionary:
         "y": spawn.y,
         "hp": 100.0,
         "medkits": 2,
-        "ammo": 120,
+        "ammo": -1,
         "grenades": 3,
         "wall_kits": 2,
         "face_x": 1.0,
@@ -694,6 +718,7 @@ func receive_game_over_snapshot(world_players: Dictionary, world_zombies: Array,
     fire_held = false
     fire_requested = false
     fire_repeat_timer = 0.0
+    _cancel_targeting_modes()
     joystick_active = false
     joystick_vector = Vector2.ZERO
     ui_status = "SQUAD ELIMINATED"
@@ -705,6 +730,7 @@ func begin_game_over_remote() -> void:
     fire_held = false
     fire_requested = false
     fire_repeat_timer = 0.0
+    _cancel_targeting_modes()
     joystick_active = false
     joystick_vector = Vector2.ZERO
     ui_status = "SQUAD ELIMINATED"
@@ -779,7 +805,7 @@ func _interpolate_client_state(delta: float) -> void:
         current["y"] = lerpf(float(current.get("y", target.get("y", 270.0))), float(target.get("y", 270.0)), weight)
         current["hp"] = target.get("hp", 100.0)
         current["medkits"] = target.get("medkits", 2)
-        current["ammo"] = target.get("ammo", 120)
+        current["ammo"] = -1
         current["grenades"] = target.get("grenades", 3)
         current["wall_kits"] = target.get("wall_kits", 2)
         current["face_x"] = target.get("face_x", 1.0)
@@ -826,11 +852,8 @@ func _host_fire(id: int) -> void:
     var p: Dictionary = players[id]
     if float(p.get("hp", 0.0)) <= 0.0:
         return
-    if int(p.get("ammo", 120)) <= 0:
-        ui_status = "OUT OF AMMO — find a supply drop"
-        return
     fire_cooldowns[id] = now
-    p["ammo"] = maxi(0, int(p.get("ammo", 120)) - 1)
+    p["ammo"] = -1 # Unlimited ammunition; -1 is the canonical infinite-ammo sentinel.
     p["shoot_timer"] = 0.19
     players[id] = p
     _emit_sfx("shot")
@@ -883,20 +906,20 @@ func request_heal() -> void:
         _host_heal(sender_id)
 
 @rpc("any_peer", "call_remote", "reliable")
-func request_grenade() -> void:
+func request_grenade(range_ratio: float) -> void:
     if not is_host:
         return
     var sender_id := multiplayer.get_remote_sender_id()
     if players.has(sender_id):
-        _host_throw_grenade(sender_id)
+        _host_throw_grenade(sender_id, range_ratio)
 
 @rpc("any_peer", "call_remote", "reliable")
-func request_build_wall() -> void:
+func request_build_wall(x_ratio: float, y_ratio: float) -> void:
     if not is_host:
         return
     var sender_id := multiplayer.get_remote_sender_id()
     if players.has(sender_id):
-        _host_build_wall(sender_id)
+        _host_build_wall(sender_id, x_ratio, y_ratio)
 
 func _host_heal(id: int) -> void:
     if game_over or not players.has(id):
@@ -915,7 +938,7 @@ func _host_heal(id: int) -> void:
     _emit_sfx("heal")
     _broadcast_world()
 
-func _host_throw_grenade(id: int) -> void:
+func _host_throw_grenade(id: int, range_ratio: float) -> void:
     if game_over or not players.has(id):
         return
     var now := Time.get_ticks_msec()
@@ -928,29 +951,37 @@ func _host_throw_grenade(id: int) -> void:
     if count <= 0:
         ui_status = "No grenades — collect a supply drop"
         return
+
+    var safe_ratio: float = clampf(range_ratio, GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO)
     var origin := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
     var facing := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
+    var wanted_distance: float = screen_size.x * safe_ratio
+    var target_x: float = clampf(origin.x + facing * wanted_distance, 30.0, maxf(31.0, screen_size.x - 30.0))
+    var range_pixels: float = absf(target_x - origin.x)
+    var travel_time: float = lerpf(0.38, 0.82, clampf(range_pixels / maxf(1.0, screen_size.x * GRENADE_MAX_RANGE_RATIO), 0.0, 1.0))
     p["grenades"] = count - 1
+    p["ammo"] = -1
     players[id] = p
     grenade_cooldowns[id] = now
     active_grenades.append({
         "id": randi(),
         "owner_id": id,
         "start_x": origin.x + facing * 18.0,
-        "start_y": origin.y - 7.0,
-        "target_x": clampf(origin.x + facing * 170.0, 30.0, maxf(31.0, screen_size.x - 30.0)),
+        "start_y": origin.y - 9.0,
+        "target_x": target_x,
         "target_y": clampf(origin.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE),
         "x": origin.x + facing * 18.0,
-        "y": origin.y - 7.0,
+        "y": origin.y - 9.0,
         "elapsed": 0.0,
-        "travel_time": 0.46,
-        "fuse": 1.02
+        "travel_time": travel_time,
+        "flight_height": clampf(range_pixels * 0.30, 48.0, 116.0),
+        "fuse": travel_time + 0.42
     })
     _emit_sfx("grenade_throw")
-    ui_status = "Grenade thrown — blast radius %d" % int(GRENADE_BLAST_RADIUS)
+    ui_status = "GRENADE OUT — range %.1f m" % (range_pixels / 45.0)
     _broadcast_world()
 
-func _host_build_wall(id: int) -> void:
+func _host_build_wall(id: int, x_ratio: float, y_ratio: float) -> void:
     if game_over or not players.has(id):
         return
     var now := Time.get_ticks_msec()
@@ -958,31 +989,88 @@ func _host_build_wall(id: int) -> void:
         return
     var p: Dictionary = players[id]
     if float(p.get("hp", 0.0)) <= 0.0:
+        ui_status = "Cannot build while eliminated"
         return
     if barricades.size() >= MAX_BARRICADES:
         ui_status = "Barricade limit reached — let the horde destroy one first"
         return
-    var kits := int(p.get("wall_kits", 0))
-    if kits <= 0:
+    if int(p.get("wall_kits", 0)) <= 0:
         ui_status = "No wall kits — find a supply drop"
         return
-    var face := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
     var wall_pos := Vector2(
-        clampf(float(p.get("x", screen_size.x * 0.5)) + face * 67.0, 48.0, maxf(49.0, screen_size.x - 48.0)),
-        clampf(float(p.get("y", screen_size.y * 0.68)), _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+        clampf(x_ratio * screen_size.x, 44.0, maxf(45.0, screen_size.x - 44.0)),
+        clampf(y_ratio * screen_size.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
     )
-    for existing in barricades:
-        var existing_pos := Vector2(float(existing.get("x", 0.0)), float(existing.get("y", 0.0)))
-        if existing_pos.distance_to(wall_pos) < 58.0:
-            ui_status = "Too close to another barricade"
-            return
-    p["wall_kits"] = kits - 1
+    if not _wall_placement_is_valid(id, wall_pos):
+        ui_status = "Invalid wall spot — move it closer to the squad and away from other walls"
+        return
+    p["wall_kits"] = int(p.get("wall_kits", 0)) - 1
+    p["ammo"] = -1
     players[id] = p
     build_cooldowns[id] = now
-    barricades.append({"id": randi(), "x": wall_pos.x, "y": wall_pos.y, "hp": 90.0, "max_hp": 90.0, "owner_id": id})
+    barricades.append({"id": randi(), "x": wall_pos.x, "y": wall_pos.y, "hp": 125.0, "max_hp": 125.0, "owner_id": id})
     _emit_sfx("wall_build")
-    ui_status = "Barricade placed — zombies must break through it"
+    ui_status = "BARRICADE DEPLOYED — zombies must break through it"
     _broadcast_world()
+
+func _wall_placement_is_valid(id: int, wall_pos: Vector2) -> bool:
+    if not players.has(id):
+        return false
+    var p: Dictionary = players[id]
+    if float(p.get("hp", 0.0)) <= 0.0 or int(p.get("wall_kits", 0)) <= 0:
+        return false
+    if barricades.size() >= MAX_BARRICADES:
+        return false
+    var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+    if player_pos.distance_to(wall_pos) < WALL_MIN_PLAYER_DISTANCE:
+        return false
+    if player_pos.distance_to(wall_pos) > screen_size.x * WALL_PLACE_RANGE_RATIO:
+        return false
+    if wall_pos.y < _arena_top() + ARENA_TOP_CLEARANCE or wall_pos.y > _arena_bottom() - ARENA_BOTTOM_CLEARANCE:
+        return false
+    for existing in barricades:
+        var existing_pos := Vector2(float(existing.get("x", 0.0)), float(existing.get("y", 0.0)))
+        if existing_pos.distance_to(wall_pos) < 66.0:
+            return false
+    return true
+
+func _set_wall_preview_from_pointer(pointer_pos: Vector2) -> void:
+    if not players.has(local_player_id):
+        return
+    var p: Dictionary = players[local_player_id]
+    var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+    var desired := Vector2(
+        clampf(pointer_pos.x, 44.0, maxf(45.0, screen_size.x - 44.0)),
+        clampf(pointer_pos.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+    var offset := desired - player_pos
+    var max_distance: float = screen_size.x * WALL_PLACE_RANGE_RATIO
+    if offset.length() > max_distance:
+        desired = player_pos + offset.normalized() * max_distance
+    wall_preview_position = Vector2(
+        clampf(desired.x, 44.0, maxf(45.0, screen_size.x - 44.0)),
+        clampf(desired.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+
+func _begin_wall_placement() -> void:
+    grenade_aim_active = false
+    grenade_slider_touch_id = -1
+    wall_place_active = true
+    wall_place_touch_id = -1
+    if players.has(local_player_id):
+        var p: Dictionary = players[local_player_id]
+        var face := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
+        wall_preview_position = Vector2(
+            clampf(float(p.get("x", screen_size.x * 0.5)) + face * 78.0, 44.0, maxf(45.0, screen_size.x - 44.0)),
+            clampf(float(p.get("y", screen_size.y * 0.68)), _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+        )
+    ui_status = "WALL PLACEMENT — drag the ghost, then tap PLACE"
+
+func _cancel_targeting_modes() -> void:
+    grenade_aim_active = false
+    grenade_slider_touch_id = -1
+    wall_place_active = false
+    wall_place_touch_id = -1
 
 func _find_blocking_barricade(zombie_pos: Vector2, target_pos: Vector2) -> int:
     var travel_sign := signf(target_pos.x - zombie_pos.x)
@@ -1007,16 +1095,13 @@ func _find_blocking_barricade(zombie_pos: Vector2, target_pos: Vector2) -> int:
 
 func _spawn_airdrop() -> void:
     var loot_roll := randi_range(0, 99)
-    var loot_kind := "ammo"
-    var quantity := randi_range(45, 75)
+    var loot_kind := "grenade"
+    var quantity := randi_range(1, 2)
     if loot_roll >= 82:
         loot_kind = "medkit"
         quantity = 1
-    elif loot_roll >= 62:
+    elif loot_roll >= 48:
         loot_kind = "wall"
-        quantity = randi_range(1, 2)
-    elif loot_roll >= 43:
-        loot_kind = "grenade"
         quantity = randi_range(1, 2)
     var start_x := randf_range(58.0, maxf(59.0, screen_size.x - 58.0))
     var drop_y := randf_range(_arena_top() + 65.0, _arena_bottom() - 48.0)
@@ -1034,26 +1119,27 @@ func _spawn_airdrop() -> void:
         "quantity": quantity
     })
     airdrop_sequence += 1
-    ui_status = "SUPPLY DROP INCOMING — watch for the parachute"
+    ui_status = "SUPPLY DROP INCOMING — grenade, wall kit, or medkit"
 
 func _grant_airdrop_loot(id: int, drop: Dictionary) -> void:
     if not players.has(id):
         return
     var p: Dictionary = players[id]
-    var kind := str(drop.get("loot_kind", "ammo"))
+    var kind := str(drop.get("loot_kind", "grenade"))
     var quantity := maxi(1, int(drop.get("quantity", 1)))
     match kind:
-        "ammo":
-            var before_ammo := int(p.get("ammo", 120))
-            p["ammo"] = mini(AMMO_MAX_CARRY, before_ammo + quantity)
-            ui_status = "SUPPLY LOOT: +%d bullets" % (int(p["ammo"]) - before_ammo)
         "grenade":
             var before_grenades := int(p.get("grenades", 0))
             p["grenades"] = mini(GRENADE_MAX_CARRY, before_grenades + quantity)
             var received_grenades := int(p["grenades"]) - before_grenades
             if received_grenades == 0:
-                p["ammo"] = mini(AMMO_MAX_CARRY, int(p.get("ammo", 120)) + 25)
-                ui_status = "Grenades full — converted supply to +25 bullets"
+                var old_medkits := int(p.get("medkits", 0))
+                if old_medkits < MEDKIT_MAX_CARRY:
+                    p["medkits"] = old_medkits + 1
+                    ui_status = "Grenade pouch full — converted cache to +1 medkit"
+                else:
+                    p["hp"] = minf(100.0, float(p.get("hp", 100.0)) + 25.0)
+                    ui_status = "Supply pouch full — +25 emergency HP"
             else:
                 ui_status = "SUPPLY LOOT: +%d grenade(s)" % received_grenades
         "wall":
@@ -1061,8 +1147,13 @@ func _grant_airdrop_loot(id: int, drop: Dictionary) -> void:
             p["wall_kits"] = mini(WALL_KIT_MAX_CARRY, before_walls + quantity)
             var received_walls := int(p["wall_kits"]) - before_walls
             if received_walls == 0:
-                p["ammo"] = mini(AMMO_MAX_CARRY, int(p.get("ammo", 120)) + 25)
-                ui_status = "Wall kit capacity reached — +25 bullets instead"
+                var old_medkits := int(p.get("medkits", 0))
+                if old_medkits < MEDKIT_MAX_CARRY:
+                    p["medkits"] = old_medkits + 1
+                    ui_status = "Wall kit capacity reached — converted cache to +1 medkit"
+                else:
+                    p["hp"] = minf(100.0, float(p.get("hp", 100.0)) + 25.0)
+                    ui_status = "Supply pouch full — +25 emergency HP"
             else:
                 ui_status = "SUPPLY LOOT: +%d wall kit(s)" % received_walls
         "medkit":
@@ -1070,10 +1161,21 @@ func _grant_airdrop_loot(id: int, drop: Dictionary) -> void:
             p["medkits"] = mini(MEDKIT_MAX_CARRY, before_medkits + quantity)
             var received_medkits := int(p["medkits"]) - before_medkits
             if received_medkits == 0:
-                p["ammo"] = mini(AMMO_MAX_CARRY, int(p.get("ammo", 120)) + 25)
-                ui_status = "Medkits full — converted supply to +25 bullets"
+                var healed := minf(25.0, 100.0 - float(p.get("hp", 100.0)))
+                p["hp"] = minf(100.0, float(p.get("hp", 100.0)) + 25.0)
+                ui_status = "MEDKIT CAPACITY FULL — emergency +%.0f HP" % healed
             else:
                 ui_status = "SUPPLY LOOT: +%d medkit(s)" % received_medkits
+        "ammo":
+            # Backward compatibility for caches saved by v0.4.2 before ammunition became infinite.
+            var before_grenades := int(p.get("grenades", 0))
+            if before_grenades < GRENADE_MAX_CARRY:
+                p["grenades"] = before_grenades + 1
+                ui_status = "LEGACY CACHE converted to +1 grenade"
+            else:
+                p["hp"] = minf(100.0, float(p.get("hp", 100.0)) + 25.0)
+                ui_status = "LEGACY CACHE converted to +25 HP"
+    p["ammo"] = -1
     players[id] = p
     _emit_sfx("pickup")
 
@@ -1194,7 +1296,7 @@ func _restart_run() -> void:
         p["y"] = clampf(spawn.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
         p["hp"] = 100.0
         p["medkits"] = 2
-        p["ammo"] = 120
+        p["ammo"] = -1
         p["grenades"] = 3
         p["wall_kits"] = 2
         p["walking"] = false
@@ -1209,7 +1311,9 @@ func _restart_run() -> void:
     fire_requested = false
     fire_touch_id = -1
     fire_repeat_timer = 0.0
+    _cancel_targeting_modes()
     joystick_active = false
+    joystick_touch_id = -1
     joystick_vector = Vector2.ZERO
     snapshot_timer = 0.0
     if not is_offline and multiplayer.multiplayer_peer != null:
@@ -1308,8 +1412,8 @@ func _load_world() -> void:
                     "fall_duration": maxf(0.1, float(drop.get("fall_duration", 2.6))),
                     "despawn_timer": maxf(0.0, float(drop.get("despawn_timer", 24.0))),
                     "landed": bool(drop.get("landed", false)),
-                    "loot_kind": str(drop.get("loot_kind", "ammo")),
-                    "quantity": maxi(1, int(drop.get("quantity", 1)))
+                    "loot_kind": "grenade" if str(drop.get("loot_kind", "ammo")) == "ammo" else str(drop.get("loot_kind", "grenade")),
+                    "quantity": 1 if str(drop.get("loot_kind", "ammo")) == "ammo" else maxi(1, int(drop.get("quantity", 1)))
                 })
     var saved_walls = parsed.get("barricades", [])
     if typeof(saved_walls) == TYPE_ARRAY:
@@ -1342,6 +1446,7 @@ func _start_host() -> void:
     is_host = true
     is_offline = false
     local_player_id = 1
+    _cancel_targeting_modes()
     screen_mode = "lobby"
     players.clear()
     input_vectors.clear()
@@ -1392,6 +1497,7 @@ func _join_host(ip: String) -> void:
     multiplayer.multiplayer_peer = peer
     is_host = false
     is_offline = false
+    _cancel_targeting_modes()
     screen_mode = "lobby"
     host_ip = cleaned_ip
     players.clear()
@@ -1448,6 +1554,7 @@ func _reset_network_state() -> void:
     grenade_requested = false
     build_requested = false
     fire_repeat_timer = 0.0
+    _cancel_targeting_modes()
     players.clear()
     input_vectors.clear()
     target_players.clear()
@@ -1593,7 +1700,7 @@ func _draw_help() -> void:
     var card_h := 150.0
     var cards := [
         {"title": "01  MOVE", "body": "Use the left\nvirtual analog to\nwalk around the city.", "color": Color("#a9b77f")},
-        {"title": "02  FIGHT", "body": "Hold FIRE for bursts.\nGrenades explode nearby;\nWALL builds a defense.", "color": Color("#cc5151")},
+        {"title": "02  FIGHT", "body": "Hold FIRE for endless shots.\nTap GREN, set range, THROW.\nWALL previews before PLACE.", "color": Color("#cc5151")},
         {"title": "03  HEAL", "body": "HEAL consumes one\nmedkit and restores\nhealth when needed.", "color": Color("#c19a68")}
     ]
     for i in range(cards.size()):
@@ -1767,70 +1874,155 @@ func _draw_game_world() -> void:
             var grenade: Dictionary = active_grenades[int(entry.index)]
             pos = Vector2(float(grenade.get("x", 0.0)), float(grenade.get("y", h * 0.68)))
             var flight_progress := clampf(float(grenade.get("elapsed", 0.0)) / maxf(0.05, float(grenade.get("travel_time", 0.46))), 0.0, 1.0)
-            var grenade_visual_pos := pos + Vector2(0.0, -sin(flight_progress * PI) * 25.0)
-            draw_line(pos + Vector2(-4.0, 10.0), grenade_visual_pos + Vector2(0.0, 4.0), Color(0.85, 0.79, 0.58, 0.65), 1.0, true)
-            draw_circle(grenade_visual_pos + Vector2(1.0, 2.0), 6.0, Color(0.02, 0.03, 0.025, 0.45))
-            draw_circle(grenade_visual_pos, 5.5, Color("#455244"))
-            draw_arc(grenade_visual_pos, 5.5, 0, TAU, 16, Color("#c7b77e"), 1.2)
-            draw_rect(Rect2(grenade_visual_pos.x - 2.0, grenade_visual_pos.y - 7.0, 4.0, 3.0), Color("#c6b88b"))
+            var flight_height: float = float(grenade.get("flight_height", 72.0))
+            var grenade_visual_pos := pos + Vector2(0.0, -sin(flight_progress * PI) * flight_height)
+            draw_line(pos + Vector2(-4.0, 10.0), grenade_visual_pos + Vector2(0.0, 4.0), Color(0.85, 0.79, 0.58, 0.52), 1.0, true)
+            draw_ellipse_shadow(grenade_visual_pos + Vector2(1.0, 5.0), 5.0, 2.5, 0.28)
+            if grenade_texture != null:
+                draw_set_transform(grenade_visual_pos, sin(animation_clock * 14.0 + float(int(grenade.get("id", 0)) % 7)) * 0.12, Vector2.ONE)
+                draw_texture_rect(grenade_texture, Rect2(-8.0, -11.0, 16.0, 22.0), false, Color.WHITE)
+                draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+            else:
+                draw_circle(grenade_visual_pos, 5.5, Color("#455244"))
+                draw_arc(grenade_visual_pos, 5.5, 0, TAU, 16, Color("#c7b77e"), 1.2)
 
+    if grenade_aim_active:
+        _draw_grenade_aim_preview()
+    if wall_place_active:
+        _draw_wall_placement_preview()
     _draw_combat_effects()
     _draw_game_hud()
 
 func _draw_barricade(wall: Dictionary, pos: Vector2) -> void:
-    var max_hp := maxf(1.0, float(wall.get("max_hp", 90.0)))
+    var max_hp := maxf(1.0, float(wall.get("max_hp", 125.0)))
     var hp := clampf(float(wall.get("hp", max_hp)) / max_hp, 0.0, 1.0)
-    var rect := Rect2(pos.x - 34.0, pos.y - 26.0, 68.0, 48.0)
-    draw_rect(Rect2(rect.position + Vector2(4, 7), rect.size), Color(0.005, 0.008, 0.008, 0.45))
-    # Layered damaged timber planks with two diagonal braces, visually distinct from the road markings.
-    for plank_index in range(3):
-        var plank_y := rect.position.y + float(plank_index) * 14.0
-        var plank_rect := Rect2(rect.position.x, plank_y, rect.size.x, 12.0)
-        draw_rect(plank_rect, Color("#73533d") if plank_index != 1 else Color("#8c6547"))
-        draw_rect(Rect2(plank_rect.position, Vector2(plank_rect.size.x, 2.0)), Color("#c29a68"))
-        draw_line(Vector2(rect.position.x + 6.0, plank_y + 8.0), Vector2(rect.position.x + 61.0, plank_y + 3.0), Color("#4a382d"), 1.5, true)
-    draw_line(rect.position + Vector2(5, 3), rect.position + Vector2(63, 43), Color("#cfb181"), 4.0, true)
-    draw_line(rect.position + Vector2(63, 3), rect.position + Vector2(5, 43), Color("#cfb181"), 4.0, true)
-    draw_rect(rect, Color("#202725"), false, 2.0)
-    var hp_bar := Rect2(pos.x - 26.0, pos.y - 36.0, 52.0, 4.0)
-    draw_rect(hp_bar, Color("#312323"))
-    draw_rect(Rect2(hp_bar.position, Vector2(hp_bar.size.x * hp, hp_bar.size.y)), Color("#83b96b") if hp > 0.4 else Color("#d4514b"))
+    # Sprite is a reinforced field barricade with weathered planks, bracing and metal feet.
+    var rect := Rect2(pos.x - 34.0, pos.y - 31.0, 68.0, 62.0)
+    draw_ellipse_shadow(pos + Vector2(0.0, 25.0), 34.0, 8.0, 0.32)
+    if barricade_texture != null:
+        draw_texture_rect(barricade_texture, rect, false, Color.WHITE)
+    else:
+        draw_rect(Rect2(rect.position + Vector2(2, 6), rect.size), Color(0.0, 0.0, 0.0, 0.36))
+        for plank_index in range(4):
+            var plank_y: float = rect.position.y + float(plank_index) * 13.0
+            var plank_rect := Rect2(rect.position.x + 2.0, plank_y, rect.size.x - 4.0, 11.0)
+            draw_rect(plank_rect, Color("#6f503a") if plank_index % 2 == 0 else Color("#806044"))
+            draw_rect(Rect2(plank_rect.position, Vector2(plank_rect.size.x, 2.0)), Color("#b58a5a"))
+        draw_line(rect.position + Vector2(5, 4), rect.position + Vector2(63, 55), Color("#cfb181"), 4.0, true)
+        draw_line(rect.position + Vector2(63, 4), rect.position + Vector2(5, 55), Color("#cfb181"), 4.0, true)
+        draw_rect(rect, Color("#202725"), false, 2.0)
+    # Splinter and impact detail increases as structural integrity drops.
+    if hp < 0.72:
+        draw_line(pos + Vector2(-15, -7), pos + Vector2(-7, 1), Color("#2e211b"), 2.0, true)
+        draw_line(pos + Vector2(5, 1), pos + Vector2(13, 11), Color("#241c18"), 1.8, true)
+    if hp < 0.42:
+        draw_line(pos + Vector2(10, -19), pos + Vector2(2, -6), Color("#271d18"), 2.0, true)
+        draw_line(pos + Vector2(-20, 12), pos + Vector2(-11, 3), Color("#34221a"), 2.0, true)
+    var hp_bar := Rect2(pos.x - 25.0, pos.y - 39.0, 50.0, 4.0)
+    draw_rect(Rect2(hp_bar.position - Vector2(1, 1), hp_bar.size + Vector2(2, 2)), Color(0.01, 0.015, 0.016, 0.88))
+    draw_rect(hp_bar, Color("#302627"))
+    draw_rect(Rect2(hp_bar.position, Vector2(hp_bar.size.x * hp, hp_bar.size.y)), Color("#8bb66b") if hp > 0.45 else Color("#d4514b"))
+
+func draw_ellipse_shadow(center: Vector2, radius_x: float, radius_y: float, alpha: float) -> void:
+    var points := PackedVector2Array()
+    for i in range(20):
+        var angle := TAU * float(i) / 20.0
+        points.append(center + Vector2(cos(angle) * radius_x, sin(angle) * radius_y))
+    draw_colored_polygon(points, Color(0.005, 0.008, 0.008, alpha))
 
 func _draw_airdrop(drop: Dictionary, pos: Vector2) -> void:
     var landed := bool(drop.get("landed", false))
     if not landed:
-        var canopy := Vector2(pos.x, pos.y - 22.0)
-        draw_arc(canopy + Vector2(0, 2), 21.0, PI, TAU, 18, Color("#d8d0b8"), 2.4)
-        draw_colored_polygon(PackedVector2Array([canopy + Vector2(-20, 2), canopy + Vector2(-12, -11), canopy + Vector2(0, -15), canopy + Vector2(12, -11), canopy + Vector2(20, 2)]), Color("#d3c9ad"))
-        for rope_x in [-13.0, 0.0, 13.0]:
-            draw_line(canopy + Vector2(rope_x, 1), pos + Vector2(0, -1), Color("#c0b8a4"), 1.0, true)
+        var canopy_pos := pos + Vector2(0.0, -47.0)
+        if parachute_texture != null:
+            draw_texture_rect(parachute_texture, Rect2(canopy_pos - Vector2(49.0, 29.0), Vector2(98.0, 58.0)), false, Color.WHITE)
+        else:
+            draw_colored_polygon(PackedVector2Array([canopy_pos + Vector2(-40, 7), canopy_pos + Vector2(-34, -9), canopy_pos + Vector2(-17, -22), canopy_pos + Vector2(0, -27), canopy_pos + Vector2(17, -22), canopy_pos + Vector2(34, -9), canopy_pos + Vector2(40, 7)]), Color("#b9ad8c"))
+            draw_arc(canopy_pos + Vector2(0, 7), 40.0, PI, TAU, 24, Color("#e0d0ab"), 2.0)
+        draw_line(canopy_pos + Vector2(-34, 2), pos + Vector2(-12, -4), Color("#c6b999", 0.88), 1.4, true)
+        draw_line(canopy_pos + Vector2(-18, 10), pos + Vector2(-7, -5), Color("#c6b999", 0.88), 1.2, true)
+        draw_line(canopy_pos + Vector2(18, 10), pos + Vector2(7, -5), Color("#c6b999", 0.88), 1.2, true)
+        draw_line(canopy_pos + Vector2(34, 2), pos + Vector2(12, -4), Color("#c6b999", 0.88), 1.4, true)
     else:
-        draw_circle(pos + Vector2(0, 13), 19.0, Color(0.01, 0.015, 0.01, 0.32))
-    var crate := Rect2(pos.x - 15.0, pos.y - 10.0, 30.0, 22.0)
-    draw_rect(Rect2(crate.position + Vector2(2, 3), crate.size), Color(0.0, 0.0, 0.0, 0.3))
-    draw_rect(crate, Color("#735139"))
-    draw_rect(Rect2(crate.position, Vector2(crate.size.x, 4.0)), Color("#b9945d"))
-    draw_rect(Rect2(pos.x - 2.0, pos.y - 10.0, 4.0, 22.0), Color("#d2b16c"))
-    draw_rect(crate, Color("#242b25"), false, 1.5)
-    var loot_kind := str(drop.get("loot_kind", "ammo"))
+        draw_ellipse_shadow(pos + Vector2(0.0, 16.0), 28.0, 8.0, 0.34)
+    var crate_rect := Rect2(pos.x - 23.0, pos.y - 17.0, 46.0, 36.0)
+    if airdrop_crate_texture != null:
+        draw_texture_rect(airdrop_crate_texture, crate_rect, false, Color.WHITE)
+    else:
+        draw_rect(crate_rect, Color("#4c5540"))
+        draw_rect(Rect2(crate_rect.position, Vector2(crate_rect.size.x, 4.0)), Color("#a99869"))
+        draw_rect(crate_rect, Color("#242b25"), false, 2.0)
+        draw_line(Vector2(crate_rect.position.x + 4.0, crate_rect.position.y + 4.0), Vector2(crate_rect.end.x - 4.0, crate_rect.end.y - 4.0), Color("#c1a46c"), 3.0, true)
+    var loot_kind := str(drop.get("loot_kind", "grenade"))
     var loot_quantity := maxi(1, int(drop.get("quantity", 1)))
-    var loot_tag := "AMMO +%d" % loot_quantity
-    var loot_color := Color("#e5c16b")
+    var loot_tag := "GREN +%d" % loot_quantity
+    var loot_color := Color("#d5bb80")
     match loot_kind:
-        "grenade":
-            loot_tag = "GREN +%d" % loot_quantity
-            loot_color = Color("#c8a66a")
         "wall":
             loot_tag = "WALL +%d" % loot_quantity
-            loot_color = Color("#b3ba9b")
+            loot_color = Color("#c3b18c")
         "medkit":
-            loot_tag = "MEDKIT"
+            loot_tag = "MEDKIT +%d" % loot_quantity
             loot_color = Color("#e28477")
+        "ammo":
+            loot_tag = "GREN +1"
+            loot_color = Color("#d5bb80")
     if not landed:
-        loot_tag = "SUPPLY"
+        loot_tag = "SUPPLY DROP"
         loot_color = Color("#f1d79a")
-    draw_rect(Rect2(pos.x - 26.0, pos.y + 28.0, 52.0, 13.0), Color(0.01, 0.015, 0.016, 0.76))
-    draw_string(ui_font, Vector2(pos.x - 25.0, pos.y + 38.0), loot_tag, HORIZONTAL_ALIGNMENT_CENTER, 50.0, 8, loot_color)
+    var label_rect := Rect2(pos.x - 34.0, pos.y + 25.0, 68.0, 13.0)
+    draw_rect(label_rect, Color(0.01, 0.015, 0.016, 0.78))
+    draw_rect(Rect2(label_rect.position, Vector2(2.0, label_rect.size.y)), loot_color)
+    draw_string(ui_font, Vector2(label_rect.position.x + 3.0, label_rect.position.y + 9.5), loot_tag, HORIZONTAL_ALIGNMENT_CENTER, label_rect.size.x - 6.0, 8, loot_color)
+
+func _grenade_range_pixels() -> float:
+    return screen_size.x * clampf(grenade_aim_range_ratio, GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO)
+
+func _draw_grenade_aim_preview() -> void:
+    if not players.has(local_player_id):
+        return
+    var p: Dictionary = players[local_player_id]
+    var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+    var facing := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
+    var origin := player_pos + Vector2(facing * 20.0, -10.0)
+    var target_x := clampf(player_pos.x + facing * _grenade_range_pixels(), 30.0, maxf(31.0, screen_size.x - 30.0))
+    var target := Vector2(target_x, clampf(player_pos.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE))
+    var horizontal_range := absf(target.x - origin.x)
+    var arc_height := clampf(horizontal_range * 0.34, 34.0, 122.0)
+    var previous := origin
+    for point_index in range(1, 25):
+        var t := float(point_index) / 24.0
+        var point := origin.lerp(target, t) + Vector2(0.0, -sin(PI * t) * arc_height)
+        if point_index % 2 == 0:
+            draw_line(previous, point, Color(0.01, 0.01, 0.01, 0.48), 4.0, true)
+            draw_line(previous, point, Color(0.96, 0.83, 0.58, 0.95), 2.0, true)
+        previous = point
+    draw_ellipse_shadow(target + Vector2(0.0, 4.0), 22.0, 7.0, 0.36)
+    draw_arc(target, 17.0, 0.0, TAU, 36, Color("#f0d6a1"), 2.0)
+    draw_arc(target, 9.0, 0.0, TAU, 28, Color("#d64b4e"), 2.0)
+    draw_line(target + Vector2(-25.0, 0.0), target + Vector2(-11.0, 0.0), Color("#f3d59a"), 1.5, true)
+    draw_line(target + Vector2(11.0, 0.0), target + Vector2(25.0, 0.0), Color("#f3d59a"), 1.5, true)
+    draw_line(target + Vector2(0.0, -25.0), target + Vector2(0.0, -11.0), Color("#f3d59a"), 1.5, true)
+    draw_line(target + Vector2(0.0, 11.0), target + Vector2(0.0, 25.0), Color("#f3d59a"), 1.5, true)
+    var distance_text := "%.1f m" % (absf(target.x - player_pos.x) / 45.0)
+    var label_pos := target + Vector2(0.0, -24.0)
+    draw_rect(Rect2(label_pos.x - 31.0, label_pos.y - 16.0, 62.0, 18.0), Color(0.01, 0.015, 0.018, 0.88))
+    draw_string(ui_font, label_pos + Vector2(-28.0, -3.0), distance_text, HORIZONTAL_ALIGNMENT_CENTER, 56.0, 11, Color("#f4dca7"))
+
+func _draw_wall_placement_preview() -> void:
+    var valid := _wall_placement_is_valid(local_player_id, wall_preview_position)
+    var preview_rect := Rect2(wall_preview_position.x - 34.0, wall_preview_position.y - 31.0, 68.0, 62.0)
+    var ghost_color := Color(0.70, 1.0, 0.68, 0.68) if valid else Color(1.0, 0.34, 0.34, 0.66)
+    if barricade_texture != null:
+        draw_texture_rect(barricade_texture, preview_rect, false, ghost_color)
+    else:
+        draw_rect(preview_rect, ghost_color)
+        draw_rect(preview_rect, Color.WHITE, false, 2.0)
+    draw_rect(preview_rect, Color("#8dd180") if valid else Color("#ec6262"), false, 2.0)
+    var preview_label := "WALL PLACEMENT OK" if valid else "INVALID POSITION"
+    var label_rect := Rect2(wall_preview_position.x - 57.0, wall_preview_position.y - 49.0, 114.0, 15.0)
+    draw_rect(label_rect, Color(0.01, 0.015, 0.018, 0.82))
+    draw_string(ui_font, Vector2(label_rect.position.x + 3.0, label_rect.position.y + 10.5), preview_label, HORIZONTAL_ALIGNMENT_CENTER, label_rect.size.x - 6.0, 8, Color("#b5e69b") if valid else Color("#f28a82"))
 
 func _draw_game_hud() -> void:
     var w := screen_size.x
@@ -1870,7 +2062,6 @@ func _draw_game_hud() -> void:
 
     var hp := clampi(int(local_p.get("hp", 100)), 0, 100)
     var medkits := int(local_p.get("medkits", 2))
-    var ammo := int(local_p.get("ammo", 120))
     var grenades := int(local_p.get("grenades", 3))
     var wall_kits := int(local_p.get("wall_kits", 2))
     var health_rect := Rect2(w - 274.0, 12, 239.0, 61.0)
@@ -1882,8 +2073,7 @@ func _draw_game_hud() -> void:
     var hp_rect := Rect2(w - 260, 37, 211.0, 6.0)
     draw_rect(hp_rect, Color("#45292b"))
     draw_rect(Rect2(hp_rect.position, Vector2(hp_rect.size.x * float(hp) / 100.0, hp_rect.size.y)), hp_color)
-    var inventory_color := Color("#d5c7a9") if ammo > 0 else Color("#e66b61")
-    draw_string(ui_font, Vector2(w - 260, 62), "AMMO %d  •  GREN %d  •  MED %d  •  WALL %d" % [ammo, grenades, medkits, wall_kits], HORIZONTAL_ALIGNMENT_LEFT, 219, 8, inventory_color)
+    draw_string(ui_font, Vector2(w - 260, 62), "AMMO ∞  •  GREN %d  •  MED %d  •  WALL %d" % [grenades, medkits, wall_kits], HORIZONTAL_ALIGNMENT_LEFT, 219, 8, Color("#d5c7a9"))
 
     var control_scale := _control_scale()
     var joystick_radius := _joystick_radius()
@@ -1903,9 +2093,35 @@ func _draw_game_hud() -> void:
     var wall_pos := Vector2(w - 82.0 * control_scale, h - 177.0 * control_scale)
     _draw_action_button("game_fire", fire_pos, 41.0 * control_scale, "FIRE", Color("#b83f45"))
     _draw_action_button("game_heal", heal_pos, 31.0 * control_scale, "HEAL", Color("#647d57"))
-    _draw_action_button("game_grenade", grenade_pos, 29.0 * control_scale, "GREN %d" % grenades, Color("#8b7850"))
-    _draw_action_button("game_build", wall_pos, 29.0 * control_scale, "WALL %d" % wall_kits, Color("#69756b"))
+    var grenade_label := "THROW" if grenade_aim_active else "GREN %d" % grenades
+    var wall_label := "PLACE" if wall_place_active else "WALL %d" % wall_kits
+    _draw_action_button("game_grenade", grenade_pos, 29.0 * control_scale, grenade_label, Color("#b98b45") if grenade_aim_active else Color("#8b7850"))
+    _draw_action_button("game_build", wall_pos, 29.0 * control_scale, wall_label, Color("#83a76a") if wall_place_active else Color("#69756b"))
     _draw_ui_button("game_pause", Rect2(w - 65.0, 72.0, 49.0, 41.0), "Ⅱ", "", Color("#c19a68"), false)
+    if grenade_aim_active:
+        _draw_grenade_range_slider(control_scale)
+        var slider_rect: Rect2 = button_rects.get("grenade_range_slider", Rect2())
+        _draw_ui_button("grenade_aim_cancel", Rect2(slider_rect.position.x - 77.0 * control_scale, slider_rect.position.y + 1.0 * control_scale, 68.0 * control_scale, 25.0 * control_scale), "CANCEL", "", Color("#c34e4f"), false)
+    if wall_place_active:
+        _draw_ui_button("wall_place_cancel", Rect2(w - 297.0 * control_scale, h - 198.0 * control_scale, 88.0 * control_scale, 30.0 * control_scale), "CANCEL", "", Color("#c34e4f"), false)
+
+func _draw_grenade_range_slider(control_scale: float) -> void:
+    var slider_width: float = minf(270.0 * control_scale, screen_size.x * 0.28)
+    var slider_height: float = 27.0 * control_scale
+    var slider_rect := Rect2(Vector2(screen_size.x * 0.5 - slider_width * 0.5, screen_size.y - 48.0 * control_scale), Vector2(slider_width, slider_height))
+    button_rects["grenade_range_slider"] = slider_rect
+    draw_rect(Rect2(slider_rect.position + Vector2(2.0, 3.0), slider_rect.size), Color(0.0, 0.0, 0.0, 0.50))
+    draw_rect(slider_rect, Color(0.01, 0.016, 0.018, 0.88))
+    draw_rect(Rect2(slider_rect.position, Vector2(slider_rect.size.x, 2.0)), Color("#c8ab72", 0.82))
+    var track := Rect2(slider_rect.position + Vector2(12.0 * control_scale, 15.0 * control_scale), Vector2(slider_rect.size.x - 24.0 * control_scale, 4.0 * control_scale))
+    draw_rect(track, Color("#444948"))
+    var t: float = inverse_lerp(GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO, grenade_aim_range_ratio)
+    var knob_x: float = track.position.x + track.size.x * t
+    draw_rect(Rect2(track.position, Vector2(track.size.x * t, track.size.y)), Color("#d4a75b"))
+    draw_circle(Vector2(knob_x, track.position.y + track.size.y * 0.5), 6.0 * control_scale, Color("#f0d6a1"))
+    draw_arc(Vector2(knob_x, track.position.y + track.size.y * 0.5), 6.0 * control_scale, 0.0, TAU, 20, Color("#47331f"), 1.2)
+    var range_meters := _grenade_range_pixels() / 45.0
+    draw_string(ui_font, Vector2(slider_rect.position.x + 5.0, slider_rect.position.y + 10.0 * control_scale), "GRENADE RANGE  %.1f m" % range_meters, HORIZONTAL_ALIGNMENT_CENTER, slider_rect.size.x - 10.0, 8, Color("#f0dfb9"))
 
 func _draw_pause_menu() -> void:
     var w := screen_size.x
@@ -1991,17 +2207,19 @@ func _draw_action_button(id: String, pos: Vector2, radius: float, label: String,
         draw_rect(Rect2(pos.x - 11.0, pos.y - 3.5, 22.0, 7.0), Color("#eff1df"))
         draw_string(ui_font, pos + Vector2(-radius + 2.0, radius * 0.62), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 4.0, 9, Color.WHITE)
     elif id == "game_grenade":
-        draw_circle(pos + Vector2(0, -4), 8.0, Color("#252a21"))
-        draw_arc(pos + Vector2(0, -4), 8.0, 0, TAU, 20, Color("#d4bc81"), 1.5)
-        draw_rect(Rect2(pos.x + 2.0, pos.y - 15.0, 5.0, 4.0), Color("#d4bc81"))
-        draw_line(pos + Vector2(5, -16), pos + Vector2(10, -21), Color("#fff0a6"), 2.0, true)
-        draw_circle(pos + Vector2(11, -22), 2.0, Color("#e4a14b"))
+        if grenade_texture != null:
+            draw_texture_rect(grenade_texture, Rect2(pos.x - 10.0, pos.y - 17.0, 20.0, 24.0), false, Color.WHITE)
+        else:
+            draw_circle(pos + Vector2(0, -4), 8.0, Color("#252a21"))
+            draw_arc(pos + Vector2(0, -4), 8.0, 0, TAU, 20, Color("#d4bc81"), 1.5)
         draw_string(ui_font, pos + Vector2(-radius + 1.0, radius * 0.67), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 2.0, 8, Color.WHITE)
     else:
-        for plank_index in range(3):
-            var plank_x := pos.x - 12.0 + float(plank_index) * 9.0
-            draw_rect(Rect2(plank_x, pos.y - 12.0, 6.0, 22.0), Color("#c5b58d"))
-            draw_line(Vector2(plank_x + 1.0, pos.y - 5.0), Vector2(plank_x + 5.0, pos.y - 1.0), Color("#5b6158"), 1.2, true)
+        if barricade_texture != null:
+            draw_texture_rect(barricade_texture, Rect2(pos.x - 15.0, pos.y - 14.0, 30.0, 23.0), false, Color.WHITE)
+        else:
+            for plank_index in range(3):
+                var plank_x: float = pos.x - 12.0 + float(plank_index) * 9.0
+                draw_rect(Rect2(plank_x, pos.y - 12.0, 6.0, 22.0), Color("#c5b58d"))
         draw_string(ui_font, pos + Vector2(-radius + 1.0, radius * 0.67), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 2.0, 8, Color.WHITE)
 
 func _draw_title_text(pos: Vector2, label: String, size: int, color: Color) -> void:
@@ -2201,14 +2419,34 @@ func _handle_ui_button(id: String) -> void:
             fire_repeat_timer = 0.0
             grenade_requested = false
             build_requested = false
+            _cancel_targeting_modes()
         "game_fire":
             fire_requested = true
         "game_heal":
             heal_requested = true
         "game_grenade":
-            grenade_requested = true
+            if grenade_aim_active:
+                grenade_requested = true
+            else:
+                wall_place_active = false
+                wall_place_touch_id = -1
+                grenade_aim_active = true
+                grenade_slider_touch_id = -1
+                grenade_aim_range_ratio = clampf(grenade_aim_range_ratio, GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO)
+                ui_status = "AIM GRENADE — adjust range, then tap THROW"
+        "grenade_aim_cancel":
+            grenade_aim_active = false
+            grenade_slider_touch_id = -1
+            ui_status = "Grenade aim cancelled"
         "game_build":
-            build_requested = true
+            if wall_place_active:
+                build_requested = true
+            else:
+                _begin_wall_placement()
+        "wall_place_cancel":
+            wall_place_active = false
+            wall_place_touch_id = -1
+            ui_status = "Wall placement cancelled"
         "pause_resume":
             screen_mode = "game"
         "pause_save":
@@ -2251,6 +2489,10 @@ func _input(event: InputEvent) -> void:
     elif event is InputEventScreenDrag:
         if joystick_active and event.index == joystick_touch_id:
             joystick_vector = ((event.position - joystick_origin) / _joystick_radius()).limit_length(1.0)
+        elif event.index == grenade_slider_touch_id:
+            _update_grenade_range_from_position(event.position.x)
+        elif event.index == wall_place_touch_id and wall_place_active:
+            _set_wall_preview_from_pointer(event.position)
     elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
         if event.pressed:
             _touch_start(-2, event.position)
@@ -2259,16 +2501,46 @@ func _input(event: InputEvent) -> void:
     elif event is InputEventMouseMotion:
         if joystick_active and joystick_touch_id == -2:
             joystick_vector = ((event.position - joystick_origin) / _joystick_radius()).limit_length(1.0)
+        elif grenade_slider_touch_id == -2:
+            _update_grenade_range_from_position(event.position.x)
+        elif wall_place_touch_id == -2 and wall_place_active:
+            _set_wall_preview_from_pointer(event.position)
+
+func _update_grenade_range_from_position(pointer_x: float) -> void:
+    var slider_rect: Rect2 = button_rects.get("grenade_range_slider", Rect2())
+    if slider_rect.size.x <= 0.0:
+        return
+    var margin: float = 12.0 * _control_scale()
+    var left: float = slider_rect.position.x + margin
+    var right: float = slider_rect.end.x - margin
+    var t: float = clampf((pointer_x - left) / maxf(1.0, right - left), 0.0, 1.0)
+    grenade_aim_range_ratio = lerpf(GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO, t)
 
 func _touch_start(index: int, pos: Vector2) -> void:
+    if screen_mode == "game" and grenade_aim_active and button_rects.has("grenade_range_slider"):
+        var slider_rect: Rect2 = button_rects["grenade_range_slider"]
+        if slider_rect.has_point(pos):
+            grenade_slider_touch_id = index
+            _update_grenade_range_from_position(pos.x)
+            return
     if _handle_press(pos, index):
         return
-    if screen_mode == "game" and pos.x < screen_size.x * 0.40 and pos.y > screen_size.y * 0.57 and not joystick_active:
+    if screen_mode != "game":
+        return
+    if wall_place_active and pos.y >= _arena_top() - 5.0 and pos.y <= _arena_bottom() + 8.0:
+        wall_place_touch_id = index
+        _set_wall_preview_from_pointer(pos)
+        return
+    if pos.x < screen_size.x * 0.40 and pos.y > screen_size.y * 0.57 and not joystick_active:
         joystick_active = true
         joystick_touch_id = index
         joystick_vector = ((pos - joystick_origin) / _joystick_radius()).limit_length(1.0)
 
 func _touch_end(index: int) -> void:
+    if index == grenade_slider_touch_id:
+        grenade_slider_touch_id = -1
+    if index == wall_place_touch_id:
+        wall_place_touch_id = -1
     if index == fire_touch_id:
         fire_held = false
         fire_touch_id = -1

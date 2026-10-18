@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="144" viewBox="0 0 240 144">
+<defs>
+ <linearGradient id="canopy" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#d0c6a6"/><stop offset=".45" stop-color="#8f9875"/><stop offset="1" stop-color="#505f4d"/></linearGradient>
+ <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#a7ad8a"/><stop offset="1" stop-color="#657358"/></linearGradient>
+ <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#5e6b54"/><stop offset="1" stop-color="#28372e"/></linearGradient>
+</defs>
+<!-- canopy underside shadow -->
+<path d="M19 71 Q16 42 40 22 Q66 3 120 5 Q174 3 200 22 Q224 42 221 71 Q198 84 179 77 Q159 88 141 79 Q120 88 99 79 Q78 88 59 78 Q39 86 19 71Z" fill="#111915" opacity=".32"/>
+<!-- canopy panel base -->
+<path d="M16 66 Q14 40 39 20 Q66 1 120 4 Q174 1 201 20 Q226 40 224 66 Q202 75 182 67 Q160 79 141 69 Q120 79 99 69 Q79 78 59 67 Q37 76 16 66Z" fill="url(#canopy)" stroke="#242f27" stroke-width="4"/>
+<!-- alternate fabric gores -->
+<path d="M17 63 Q17 36 42 18 Q54 10 71 7 L95 70 Q77 75 59 66 Q37 74 17 63Z" fill="#b2b79a"/>
+<path d="M71 7 Q95 3 120 4 L120 72 Q108 75 95 70Z" fill="#78876a"/>
+<path d="M120 4 Q145 3 169 7 L145 70 Q132 75 120 72Z" fill="#adb39a"/>
+<path d="M169 7 Q187 12 201 20 Q226 40 224 66 Q204 75 182 67 Q162 74 145 70Z" fill="#687a5b"/>
+<!-- seam stitching -->
+<g fill="none" stroke="#d4d0b3" stroke-width="1.6" opacity=".9"><path d="M16 66Q14 40 39 20Q66 1 120 4Q174 1 201 20Q226 40 224 66"/><path d="M71 7L95 70M120 4V72M169 7L145 70"/></g>
+<g stroke="#354432" stroke-width="2.2" fill="none"><path d="M16 66Q37 74 59 67Q79 78 99 69Q120 79 141 69Q160 79 182 67Q202 75 224 66"/><path d="M40 29l11 -8m41 2l7 29m42 -28l-5 29m42 -27l12 12"/></g>
+<!-- reinforced attachment patches -->
+<g fill="#343f31" stroke="#c2c2a0" stroke-width="1.5"><ellipse cx="35" cy="65" rx="5" ry="3"/><ellipse cx="77" cy="70" rx="5" ry="3"/><ellipse cx="120" cy="73" rx="5" ry="3"/><ellipse cx="163" cy="70" rx="5" ry="3"/><ellipse cx="205" cy="65" rx="5" ry="3"/></g>
+</svg>

@@ -109,6 +109,9 @@ jobs:
               'const ARENA_TOP_CLEARANCE := 22.0',
               'const ARENA_BOTTOM_CLEARANCE := 40.0',
               'const GRENADE_MAX_CARRY := 5',
+              'const GRENADE_MIN_RANGE_RATIO := 0.065',
+              'const GRENADE_MAX_RANGE_RATIO := 0.30',
+              'const WALL_PLACE_RANGE_RATIO := 0.145',
               'const MAX_BARRICADES := 8',
               'const GRENADE_BLAST_RADIUS := 112.0',
               '_arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE',
@@ -122,16 +125,27 @@ jobs:
               'func receive_sfx_event(',
               'var wave_time_remaining',
               'var animation_clock := 0.0',
-              'func _host_throw_grenade(id: int)',
-              'func _host_build_wall(id: int)',
+              'func _host_throw_grenade(id: int, range_ratio: float)',
+              'func _host_build_wall(id: int, x_ratio: float, y_ratio: float)',
+              'func _draw_grenade_aim_preview()',
+              'func _draw_grenade_range_slider(control_scale: float)',
+              'func _draw_wall_placement_preview()',
+              'func _wall_placement_is_valid(id: int, wall_pos: Vector2)',
+              'func _set_wall_preview_from_pointer(pointer_pos: Vector2)',
+              'grenade_texture = load("res://assets/grenade_detail.svg") as Texture2D',
+              'barricade_texture = load("res://assets/barricade_detail.svg") as Texture2D',
+              'airdrop_crate_texture = load("res://assets/airdrop_crate_detail.svg") as Texture2D',
+              'parachute_texture = load("res://assets/parachute_detail.svg") as Texture2D',
+              'AMMO ∞',
               'func _spawn_airdrop()',
               'func _update_airdrops(delta: float)',
               'func _update_grenades(delta: float)',
               'func _draw_barricade(wall: Dictionary, pos: Vector2)',
               '"grenades": 3',
               '"wall_kits": 2',
-              '"ammo": 120',
-              'var loot_kind := "ammo"',
+              '"ammo": -1',
+              'var loot_kind := "grenade"',
+              'p["ammo"] = -1 # Unlimited ammunition; -1 is the canonical infinite-ammo sentinel.',
               'loot_tag = "GREN +%d"',
               'loot_kind = "medkit"',
               'loot_kind = "wall"',
@@ -156,7 +170,18 @@ jobs:
               raise SystemExit('World exit must clear runtime state without auto-saving stale zombie positions.')
           if 'if load_saved:\n        if FileAccess.file_exists(SAVE_PATH):\n            _load_world()' not in script:
               raise SystemExit('Saved worlds must only load through explicit Continue Saved action.')
-          print(f'Validated {len(refs)} resource references, landscape settings, wave clock, game-over reset, and {len(clips)} WAV sound effects.')
+          import xml.etree.ElementTree as ET
+          svg_assets = sorted((root / 'assets').glob('*.svg'))
+          for svg_path in svg_assets:
+              if not svg_path.is_file():
+                  raise SystemExit('Missing SVG asset: ' + str(svg_path))
+              try:
+                  ET.parse(svg_path)
+              except ET.ParseError as exc:
+                  raise SystemExit('Malformed SVG ' + str(svg_path) + ': ' + str(exc))
+          if 'var loot_kind := "ammo"' in script or 'if int(p.get("ammo", 120)) <= 0' in script:
+              raise SystemExit('Infinite-ammo build must not retain ammo-consuming gameplay or new ammo drops')
+          print(f'Validated {len(refs)} resource references, landscape settings, infinite ammo, grenade aiming, wall placement, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
           PYCODE
 
       - name: Import and validate project scripts
@@ -195,7 +220,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.2-APK
+          name: PixelZombieLAN-v0.4.3-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -204,15 +229,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.2-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.3-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.2-source.zip
+          test -s build/PixelZombieLAN-v0.4.3-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.2-source
-          path: build/PixelZombieLAN-v0.4.2-source.zip
+          name: PixelZombieLAN-v0.4.3-source
+          path: build/PixelZombieLAN-v0.4.3-source.zip
           if-no-files-found: error
           retention-days: 14

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+<defs>
+ <linearGradient id="body" x1="0" y1="0" x2="1" y2=".2"><stop stop-color="#202b25"/><stop offset=".2" stop-color="#56604a"/><stop offset=".46" stop-color="#7d8661"/><stop offset=".7" stop-color="#424d3c"/><stop offset="1" stop-color="#202820"/></linearGradient>
+ <linearGradient id="metal" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#c5c0a0"/><stop offset=".3" stop-color="#777d6a"/><stop offset=".65" stop-color="#343d36"/><stop offset="1" stop-color="#171f1b"/></linearGradient>
+ <linearGradient id="lever" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#42483e"/><stop offset=".45" stop-color="#9b9c81"/><stop offset="1" stop-color="#343b32"/></linearGradient>
+ <filter id="shadow" x="-30%" y="-30%" width="160%" height="180%"><feGaussianBlur stdDeviation="3"/></filter>
+</defs>
+<ellipse cx="65" cy="106" rx="26" ry="8" fill="#050907" opacity=".35" filter="url(#shadow)"/>
+<!-- pull ring and safety lever -->
+<path d="M57 28 L51 14 Q49 8 56 7 L74 6 Q81 7 79 14 L74 31" fill="url(#metal)" stroke="#1a211d" stroke-width="3"/>
+<path d="M54 10 L74 9 L76 13 L57 16 Z" fill="#d4c6a2" opacity=".75"/>
+<ellipse cx="49" cy="12" rx="9" ry="7" fill="none" stroke="#a4a78b" stroke-width="4"/>
+<ellipse cx="49" cy="12" rx="4" ry="3" fill="none" stroke="#313b32" stroke-width="2"/>
+<path d="M68 17 Q83 15 87 27 L81 41 Q78 47 71 43 L63 38 Z" fill="url(#lever)" stroke="#19221b" stroke-width="3"/>
+<path d="M72 21 Q80 21 82 28 L77 38 L71 34 Z" fill="#bdba98" opacity=".65"/>
+<!-- grenade shoulders and segmented body -->
+<path d="M48 28 Q42 34 39 43 L33 57 Q29 70 37 83 L44 96 Q49 104 63 105 Q78 104 84 95 L91 80 Q98 66 90 52 L82 37 Q78 29 70 27 Z" fill="url(#body)" stroke="#17201a" stroke-width="4"/>
+<path d="M49 29 L73 28 L79 39 L44 42 Z" fill="#84896a" stroke="#283329" stroke-width="2.5"/>
+<g stroke="#1d271f" stroke-width="3.5" fill="none">
+ <path d="M38 48 Q63 55 91 47"/><path d="M33 59 Q63 68 95 58"/><path d="M33 71 Q63 81 94 70"/><path d="M38 83 Q63 91 88 81"/><path d="M45 94 Q63 99 80 92"/>
+</g>
+<g stroke="#9ba17a" stroke-width="2" fill="none" opacity=".85">
+ <path d="M43 47 Q41 52 42 58 M56 47 Q52 53 53 60 M69 48 Q66 54 67 61 M82 47 Q80 52 81 57"/>
+ <path d="M39 61 Q37 67 39 73 M52 63 Q50 70 52 76 M67 64 Q65 70 67 78 M82 62 Q80 68 81 74"/>
+ <path d="M43 77 Q42 83 46 88 M60 80 Q59 86 62 92 M75 78 Q74 85 77 88"/>
+</g>
+<path d="M42 40 Q49 33 57 34 L50 46 L44 61 L39 58 Z" fill="#a0a27d" opacity=".46"/>
+<path d="M61 42 L76 40 L86 58 L78 72 L70 64 Z" fill="#171f1b" opacity=".3"/>
+<rect x="54" y="22" width="22" height="9" rx="2" fill="url(#metal)" stroke="#1d271f" stroke-width="2"/>
+<path d="M52 25 H75" stroke="#d2c7a5" stroke-width="1.5" opacity=".8"/>
+<!-- scuffs and paint marker -->
+<path d="M40 66 l7 -3 m-4 9 l5 -2 m27 20 l7 -4 M49 87 l4 1" stroke="#d1b98a" stroke-width="2" opacity=".75"/>
+<rect x="55" y="72" width="16" height="7" rx="1" fill="#b8b48c" opacity=".7"/>
+<path d="M58 74h10m-10 2h8" stroke="#354034" stroke-width="1.2"/>
+<path d="M40 102 Q63 112 84 101" fill="none" stroke="#161e19" stroke-width="4"/>
+</svg>
