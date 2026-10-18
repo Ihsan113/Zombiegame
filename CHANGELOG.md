@@ -71,3 +71,9 @@ Other changes:
 - Gameplay stays host-authoritative: zombie targeting, hits, speed-hack budget and snapshots use the exact position; only drawing is smoothed.
 - CI markers updated (60 Hz constants, host-view functions).
 - **All devices must install v0.4.9 together.** Android version code/name: 22 / 0.4.9.
+
+
+## 0.4.10 — barricade grounding
+- Barricade no longer looks like it floats over the asphalt: per-foot contact shadows and a footprint-shaped cast shadow replace the flat ellipse and ground line; slight dusk tint on the sprite.
+- Placement preview uses the same grounding plus a flattened ring on the road.
+- Visual only (no RPC/gameplay change). Android version code/name: 23 / 0.4.10.

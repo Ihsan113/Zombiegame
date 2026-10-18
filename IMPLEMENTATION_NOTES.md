@@ -1,4 +1,4 @@
-# Implementation notes — v0.4.9
+# Implementation notes — v0.4.10
 
 - Target: Godot 4, landscape Android; 4-player host-authoritative ENet/UDP LAN on port 24567.
 - `assets/barricade_detail.png` is the transparent A-frame road barrier; SVG is its fallback. Both render at 120×72, preserving the asset's 720×433 aspect ratio. With the game entity position at the same center convention as a survivor, the barrier's feet and a wider contact shadow reach the ground line. Wall placement preview shares the same dimensions. Minimum spacing is 132 px and zombie attack distance is tuned to engage at the outside edge.
@@ -29,3 +29,9 @@
 - **Timers.** Snapshot and input timers fire when `timer >= interval - delta/2` and subtract (not fmod) the interval, giving even spacing at 60 fps.
 - **Cadence.** 60 Hz input and snapshots; `INTERP_DELAY_MIN` 50 ms.
 - **Measured (Godot 4.7.2 headless, UDP loopback + impairment proxy, v0.4.8 -> v0.4.9).** Host's view of the client survivor: stalled frames 50-57 % -> 2-3 %, speed CV 1.0-1.3 -> ~0.2, jerk p95 300-600 -> 20-40 px/s (60 Hz frame quantisation). Client's view of other survivors lags 95-135 ms -> 65-100 ms. Own-survivor lag/error unchanged (15 ms floor, ~0.6 px). Traffic ~6 -> ~11 KB/s.
+
+
+## v0.4.10 barricade grounding
+- `assets/barricade_detail.png` is a 3/4 view, so its four foot pads sit at different depths. `BARRICADE_FEET` / `BARRICADE_FOOT_RX` hold the pad bottoms in the 120x72 draw rect (measured from the PNG's alpha bottom profile); `_draw_barricade_grounding(pos, strength)` draws a 3-layer cast shadow (convex hull of the pads and the pads shifted by `BARRICADE_SHADOW_OFFSET`) plus a tight and a soft contact ellipse under every pad, before the sprite. Used by both placed walls (strength 1.0) and the placement preview (0.7).
+- If the barricade art is replaced, re-measure the four pad positions and update those constants.
+- Sprite tint `BARRICADE_TINT`; the old flat ellipse and straight ground line were removed.

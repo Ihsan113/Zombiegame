@@ -1,6 +1,10 @@
-# Pixel Zombie LAN — v0.4.9
+# Pixel Zombie LAN — v0.4.10
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
+
+## v0.4.10 updates — barricade sits on the asphalt
+- The A-frame barricade looked like it floated: one flat ellipse + a straight line were drawn below the sprite, but its four feet touch the road at different depths (3/4 view). Shadows are now anchored to the real foot-pad positions (contact shadow per foot, soft cast shadow following the footprint toward the camera) and the sprite is tinted slightly into the dusk palette.
+- The placement preview uses the same grounding and a flattened ring lying on the road. Visual only: no network/gameplay change, so v0.4.9 and v0.4.10 can still play together.
 
 ## v0.4.9 updates — smooth for host AND client
 - The host used to draw a client's survivor straight from command packets, so it moved in steps (frozen about every second frame, worse with Wi-Fi jitter). The host now draws remote survivors from a short, jitter-adaptive track built from the commands' own durations, so network jitter no longer shows up as stutter. Gameplay (zombie targeting, hits) still uses the exact authoritative position.
@@ -39,7 +43,7 @@ The host selects **Multiplayer LAN → Create World** and shares the hotspot IPv
 Push the ZIP contents so `project.godot` is in the repository root. GitHub Actions checks resource references, landscape configuration, script markers, SVG/WAV assets, Godot import and headless startup before exporting a debug APK and uploading a source ZIP. Install only after the workflow succeeds.
 
 ## Verification
-v0.4.9 was parsed and run in Godot 4.7.2 (headless): snapshot codec tests plus a real host+client session over UDP with simulated delay, jitter and packet loss (`tools/net_test/`). Real-phone testing is still recommended for frame pacing, hotspot behavior and four-device sessions.
+v0.4.10 was parsed and run in Godot 4.7.2 (netcode checked at v0.4.9, barricade visuals rendered via Xvfb) (headless): snapshot codec tests plus a real host+client session over UDP with simulated delay, jitter and packet loss (`tools/net_test/`). Real-phone testing is still recommended for frame pacing, hotspot behavior and four-device sessions.
 
 
 ## v0.4.7 — Godot 4.7 ENet compression API fix

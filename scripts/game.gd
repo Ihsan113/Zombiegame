@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.9
+# Pixel Zombie LAN — wave defense prototype v0.4.10
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -24,6 +24,13 @@ const GRENADE_MAX_CARRY := 5
 const GRENADE_MIN_RANGE_RATIO := 0.065
 const GRENADE_MAX_RANGE_RATIO := 0.30
 const WALL_PLACE_RANGE_RATIO := 0.145
+# Barricade art is a 3/4 view, so its four foot pads touch the road at different depths. These are the
+# pad bottoms of assets/barricade_detail.png in the 120x72 draw rect, relative to the wall position
+# (back-left, back-right, front-right, front-left). Shadows are anchored to them so it sits on the asphalt.
+const BARRICADE_FEET: Array[Vector2] = [Vector2(-25.7, 15.1), Vector2(51.5, 26.0), Vector2(28.5, 34.2), Vector2(-50.2, 21.2)]
+const BARRICADE_FOOT_RX: Array[float] = [9.0, 8.0, 12.0, 10.5]
+const BARRICADE_SHADOW_OFFSET := Vector2(-21.0, 6.0) # sun sits low behind the skyline, shadows fall toward the camera
+const BARRICADE_TINT := Color(0.89, 0.87, 0.86, 1.0) # pulls the bright sprite into the dusk palette of the road
 const WALL_MIN_PLAYER_DISTANCE := 82.0
 const MEDKIT_MAX_CARRY := 5
 const WALL_KIT_MAX_CARRY := 5
@@ -734,7 +741,7 @@ func _on_peer_disconnected(id: int) -> void:
     ui_status = "Player %d disconnected · %d/%d" % [id, players.size(), MAX_PLAYERS]
 
 # ---------------------------------------------------------------------------
-# LAN networking (v0.4.9)
+# LAN networking (v0.4.9+)
 #   Host -> client : compact binary snapshots, always a single datagram (<= MAX_SNAPSHOT_BYTES).
 #   Client -> host : sequence-numbered movement commands (redundantly resent) for reconciliation.
 #   Client view    : snapshot interpolation buffer, local prediction, local fire feedback.
@@ -2921,12 +2928,10 @@ func _draw_barricade(wall: Dictionary, pos: Vector2) -> void:
     var hp := clampf(float(wall.get("hp", max_hp)) / max_hp, 0.0, 1.0)
     # The position is the character-style center/ground lane coordinate. Keep the feet
     # aligned with the survivor foot line instead of leaving a gap below the sprite.
-    var ground_y: float = pos.y + 35.0
     var wall_rect := Rect2(pos.x - 60.0, pos.y - 36.0, 120.0, 72.0)
-    draw_ellipse_shadow(Vector2(pos.x + 2.0, ground_y + 1.5), 48.0, 7.0, 0.48)
-    draw_line(Vector2(pos.x - 46.0, ground_y + 1.0), Vector2(pos.x + 46.0, ground_y + 1.0), Color(0.02, 0.025, 0.024, 0.44), 2.0, true)
+    _draw_barricade_grounding(pos, 1.0)
     if barricade_texture != null:
-        draw_texture_rect(barricade_texture, wall_rect, false, Color.WHITE)
+        draw_texture_rect(barricade_texture, wall_rect, false, BARRICADE_TINT)
     else:
         # A-frame fallback with broad hazard beam, sloped legs and visible floor contact.
         draw_line(pos + Vector2(-49.0, -22.0), pos + Vector2(-39.0, 33.0), Color("#554739"), 10.0, true)
@@ -2946,6 +2951,33 @@ func _draw_barricade(wall: Dictionary, pos: Vector2) -> void:
     draw_rect(Rect2(hp_bar.position - Vector2(1.0, 1.0), hp_bar.size + Vector2(2.0, 2.0)), Color(0.01, 0.015, 0.016, 0.88))
     draw_rect(hp_bar, Color("#302627"))
     draw_rect(Rect2(hp_bar.position, Vector2(hp_bar.size.x * hp, hp_bar.size.y)), Color("#8bb66b") if hp > 0.45 else Color("#d4514b"))
+
+func _draw_barricade_grounding(pos: Vector2, strength: float) -> void:
+    # 1) soft cast shadow: hull of the foot pads and the same pads pushed along the light direction
+    var hull_source := PackedVector2Array()
+    var centroid := Vector2.ZERO
+    for foot in BARRICADE_FEET:
+        var foot_pos: Vector2 = pos + foot
+        hull_source.append(foot_pos)
+        hull_source.append(foot_pos + BARRICADE_SHADOW_OFFSET)
+        centroid += foot_pos + BARRICADE_SHADOW_OFFSET * 0.5
+    centroid /= float(BARRICADE_FEET.size())
+    var hull := Geometry2D.convex_hull(hull_source)
+    if hull.size() > 1 and hull[0].is_equal_approx(hull[hull.size() - 1]):
+        hull.remove_at(hull.size() - 1)
+    if hull.size() >= 3:
+        var layers: Array[Vector2] = [Vector2(1.22, 0.14), Vector2(1.11, 0.19), Vector2(1.0, 0.27)]
+        for layer in layers:
+            var scaled := PackedVector2Array()
+            for point in hull:
+                scaled.append(centroid + (point - centroid) * layer.x)
+            draw_colored_polygon(scaled, Color(0.005, 0.008, 0.008, layer.y * strength))
+    # 2) tight contact shadow + wide soft occlusion under every foot pad (sprite is drawn over the top half)
+    for i in range(BARRICADE_FEET.size()):
+        var foot_pos: Vector2 = pos + BARRICADE_FEET[i] + Vector2(0.0, -0.8)
+        var rx: float = BARRICADE_FOOT_RX[i]
+        draw_ellipse_shadow(foot_pos + Vector2(0.0, 0.6), rx * 1.55, 4.6, 0.22 * strength)
+        draw_ellipse_shadow(foot_pos, rx * 1.05, 3.0, 0.62 * strength)
 
 func draw_ellipse_shadow(center: Vector2, radius_x: float, radius_y: float, alpha: float) -> void:
     var points := PackedVector2Array()
@@ -3051,14 +3083,17 @@ func _draw_wall_placement_preview() -> void:
     var valid := _wall_placement_is_valid(local_player_id, wall_preview_position)
     var preview_rect := Rect2(wall_preview_position.x - 60.0, wall_preview_position.y - 36.0, 120.0, 72.0)
     var ghost_color := Color(0.73, 1.0, 0.68, 0.73) if valid else Color(1.0, 0.34, 0.34, 0.70)
-    draw_ellipse_shadow(wall_preview_position + Vector2(2.0, 36.0), 48.0, 7.0, 0.36)
+    _draw_barricade_grounding(wall_preview_position, 0.7)
     if barricade_texture != null:
         draw_texture_rect(barricade_texture, preview_rect, false, ghost_color)
     else:
         draw_rect(preview_rect, ghost_color)
         draw_rect(preview_rect, Color.WHITE, false, 2.0)
     var placement_color := Color("#91d77e") if valid else Color("#ed6262")
-    draw_arc(wall_preview_position + Vector2(0.0, 35.0), 58.0, 0.0, TAU, 36, Color(placement_color.r, placement_color.g, placement_color.b, 0.82), 2.0)
+    # Flattened ring lying on the road around the barricade footprint (matches the lane perspective).
+    draw_set_transform(wall_preview_position + Vector2(2.0, 25.0), 0.0, Vector2(1.0, 0.40))
+    draw_arc(Vector2.ZERO, 66.0, 0.0, TAU, 48, Color(placement_color.r, placement_color.g, placement_color.b, 0.85), 3.0)
+    draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
     var preview_label := "RELEASE TO DEPLOY" if valid else "MOVE / BLOCKED"
     var label_rect := Rect2(wall_preview_position.x - 66.0, wall_preview_position.y - 57.0, 132.0, 16.0)
     draw_rect(label_rect, Color(0.01, 0.015, 0.018, 0.88))
