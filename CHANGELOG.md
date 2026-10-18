@@ -25,3 +25,10 @@
 - Fixed the airdrop loot label match to declare grenade loot explicitly and satisfy the existing semantic marker checks.
 - Legacy saved ammo drops now label as grenade loot because ammunition is unlimited.
 - Android version code/name: 17 / 0.4.4.
+
+
+## 0.4.5 — A-frame barricade and one-gesture controls
+- Replaced the square barricade art with a weathered A-frame roadside barrier and retuned its render size/shadow/health bar.
+- Grenade control is hold-drag-release, with a 2D landing point, ballistic-style dotted preview, reticle and range readout. The host validates normalized X/Y target coordinates.
+- Wall control is hold-drag-release, previewing the A-frame sprite in green/red and deploying on release only when valid. Removed separate range slider and placement-confirm controls.
+- Bumped Android version code/name to 18 / 0.4.5.

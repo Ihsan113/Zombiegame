@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.3
+# Pixel Zombie LAN — wave defense prototype v0.4.5
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -83,7 +83,8 @@ var grenade_requested := false
 var build_requested := false
 var grenade_aim_active := false
 var grenade_aim_range_ratio := 0.18
-var grenade_slider_touch_id := -1
+var grenade_aim_touch_id := -1
+var grenade_aim_target_position := Vector2(620.0, 350.0)
 var wall_place_active := false
 var wall_preview_position := Vector2(480.0, 350.0)
 var wall_place_touch_id := -1
@@ -119,7 +120,9 @@ func _ready() -> void:
     if background_texture == null:
         background_texture = load("res://assets/arena_bg.svg") as Texture2D
     grenade_texture = load("res://assets/grenade_detail.svg") as Texture2D
-    barricade_texture = load("res://assets/barricade_detail.svg") as Texture2D
+    barricade_texture = load("res://assets/barricade_detail.png") as Texture2D
+    if barricade_texture == null:
+        barricade_texture = load("res://assets/barricade_detail.svg") as Texture2D
     airdrop_crate_texture = load("res://assets/airdrop_crate_detail.svg") as Texture2D
     parachute_texture = load("res://assets/parachute_detail.svg") as Texture2D
     if sprite_atlas == null:
@@ -289,13 +292,14 @@ func _process_action_requests(delta: float) -> void:
 
     if grenade_requested:
         grenade_requested = false
-        var throw_range: float = clampf(grenade_aim_range_ratio, GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO)
+        var safe_target_x_ratio: float = clampf(grenade_aim_target_position.x / maxf(1.0, screen_size.x), 0.0, 1.0)
+        var safe_target_y_ratio: float = clampf(grenade_aim_target_position.y / maxf(1.0, screen_size.y), 0.0, 1.0)
         grenade_aim_active = false
-        grenade_slider_touch_id = -1
+        grenade_aim_touch_id = -1
         if is_host:
-            _host_throw_grenade(local_player_id, throw_range)
+            _host_throw_grenade(local_player_id, safe_target_x_ratio, safe_target_y_ratio)
         elif _is_connected_client():
-            rpc_id(1, "request_grenade", throw_range)
+            rpc_id(1, "request_grenade", safe_target_x_ratio, safe_target_y_ratio)
         else:
             ui_status = "Grenades are available during a world session"
 
@@ -906,12 +910,12 @@ func request_heal() -> void:
         _host_heal(sender_id)
 
 @rpc("any_peer", "call_remote", "reliable")
-func request_grenade(range_ratio: float) -> void:
+func request_grenade(target_x_ratio: float, target_y_ratio: float) -> void:
     if not is_host:
         return
     var sender_id := multiplayer.get_remote_sender_id()
     if players.has(sender_id):
-        _host_throw_grenade(sender_id, range_ratio)
+        _host_throw_grenade(sender_id, target_x_ratio, target_y_ratio)
 
 @rpc("any_peer", "call_remote", "reliable")
 func request_build_wall(x_ratio: float, y_ratio: float) -> void:
@@ -938,7 +942,7 @@ func _host_heal(id: int) -> void:
     _emit_sfx("heal")
     _broadcast_world()
 
-func _host_throw_grenade(id: int, range_ratio: float) -> void:
+func _host_throw_grenade(id: int, target_x_ratio: float, target_y_ratio: float) -> void:
     if game_over or not players.has(id):
         return
     var now := Time.get_ticks_msec()
@@ -952,13 +956,27 @@ func _host_throw_grenade(id: int, range_ratio: float) -> void:
         ui_status = "No grenades — collect a supply drop"
         return
 
-    var safe_ratio: float = clampf(range_ratio, GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO)
     var origin := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
     var facing := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
-    var wanted_distance: float = screen_size.x * safe_ratio
-    var target_x: float = clampf(origin.x + facing * wanted_distance, 30.0, maxf(31.0, screen_size.x - 30.0))
-    var range_pixels: float = absf(target_x - origin.x)
-    var travel_time: float = lerpf(0.38, 0.82, clampf(range_pixels / maxf(1.0, screen_size.x * GRENADE_MAX_RANGE_RATIO), 0.0, 1.0))
+    var min_distance: float = screen_size.x * GRENADE_MIN_RANGE_RATIO
+    var max_distance: float = screen_size.x * GRENADE_MAX_RANGE_RATIO
+    var target := Vector2(
+        clampf(target_x_ratio * screen_size.x, 30.0, maxf(31.0, screen_size.x - 30.0)),
+        clampf(target_y_ratio * screen_size.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+    var aim_vector: Vector2 = target - origin
+    if aim_vector.length() < 1.0:
+        aim_vector = Vector2(facing, 0.0)
+    var throw_direction: Vector2 = aim_vector.normalized()
+    var requested_distance: float = clampf(aim_vector.length(), min_distance, max_distance)
+    target = origin + throw_direction * requested_distance
+    target = Vector2(
+        clampf(target.x, 30.0, maxf(31.0, screen_size.x - 30.0)),
+        clampf(target.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+    var range_pixels: float = origin.distance_to(target)
+    var travel_time: float = lerpf(0.38, 0.82, clampf(range_pixels / maxf(1.0, max_distance), 0.0, 1.0))
+    var launch_pos: Vector2 = origin + throw_direction * 18.0 + Vector2(0.0, -9.0)
     p["grenades"] = count - 1
     p["ammo"] = -1
     players[id] = p
@@ -966,15 +984,15 @@ func _host_throw_grenade(id: int, range_ratio: float) -> void:
     active_grenades.append({
         "id": randi(),
         "owner_id": id,
-        "start_x": origin.x + facing * 18.0,
-        "start_y": origin.y - 9.0,
-        "target_x": target_x,
-        "target_y": clampf(origin.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE),
-        "x": origin.x + facing * 18.0,
-        "y": origin.y - 9.0,
+        "start_x": launch_pos.x,
+        "start_y": launch_pos.y,
+        "target_x": target.x,
+        "target_y": target.y,
+        "x": launch_pos.x,
+        "y": launch_pos.y,
         "elapsed": 0.0,
         "travel_time": travel_time,
-        "flight_height": clampf(range_pixels * 0.30, 48.0, 116.0),
+        "flight_height": clampf(range_pixels * 0.30, 44.0, 116.0),
         "fuse": travel_time + 0.42
     })
     _emit_sfx("grenade_throw")
@@ -1030,7 +1048,7 @@ func _wall_placement_is_valid(id: int, wall_pos: Vector2) -> bool:
         return false
     for existing in barricades:
         var existing_pos := Vector2(float(existing.get("x", 0.0)), float(existing.get("y", 0.0)))
-        if existing_pos.distance_to(wall_pos) < 66.0:
+        if existing_pos.distance_to(wall_pos) < 88.0:
             return false
     return true
 
@@ -1052,11 +1070,56 @@ func _set_wall_preview_from_pointer(pointer_pos: Vector2) -> void:
         clampf(desired.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
     )
 
-func _begin_wall_placement() -> void:
-    grenade_aim_active = false
-    grenade_slider_touch_id = -1
-    wall_place_active = true
+func _begin_grenade_aim(touch_id: int = -1) -> void:
+    var p: Dictionary = players.get(local_player_id, {})
+    if p.is_empty() or int(p.get("grenades", 0)) <= 0:
+        ui_status = "No grenades — collect a supply drop"
+        return
+    wall_place_active = false
     wall_place_touch_id = -1
+    build_requested = false
+    grenade_requested = false
+    grenade_aim_active = true
+    grenade_aim_touch_id = touch_id
+    var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+    var face := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
+    grenade_aim_target_position = Vector2(
+        clampf(player_pos.x + face * _grenade_range_pixels(), 30.0, maxf(31.0, screen_size.x - 30.0)),
+        clampf(player_pos.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+    ui_status = "HOLD & DRAG GREN • RELEASE TO THROW"
+
+func _update_grenade_target_from_pointer(pointer_pos: Vector2) -> void:
+    if not players.has(local_player_id):
+        return
+    var p: Dictionary = players[local_player_id]
+    var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+    var pointer_target := Vector2(
+        clampf(pointer_pos.x, 30.0, maxf(31.0, screen_size.x - 30.0)),
+        clampf(pointer_pos.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+    var aim_vector: Vector2 = pointer_target - player_pos
+    var min_distance: float = screen_size.x * GRENADE_MIN_RANGE_RATIO
+    var max_distance: float = screen_size.x * GRENADE_MAX_RANGE_RATIO
+    var facing := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
+    if aim_vector.length() < 1.0:
+        aim_vector = Vector2(facing, 0.0)
+    var aim_direction: Vector2 = aim_vector.normalized()
+    var aim_distance: float = clampf(aim_vector.length(), min_distance, max_distance)
+    grenade_aim_target_position = player_pos + aim_direction * aim_distance
+    grenade_aim_target_position = Vector2(
+        clampf(grenade_aim_target_position.x, 30.0, maxf(31.0, screen_size.x - 30.0)),
+        clampf(grenade_aim_target_position.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+    grenade_aim_range_ratio = clampf(player_pos.distance_to(grenade_aim_target_position) / maxf(1.0, screen_size.x), GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO)
+
+func _begin_wall_placement(touch_id: int = -1) -> void:
+    grenade_aim_active = false
+    grenade_aim_touch_id = -1
+    grenade_requested = false
+    wall_place_active = true
+    wall_place_touch_id = touch_id
+    build_requested = false
     if players.has(local_player_id):
         var p: Dictionary = players[local_player_id]
         var face := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
@@ -1064,13 +1127,15 @@ func _begin_wall_placement() -> void:
             clampf(float(p.get("x", screen_size.x * 0.5)) + face * 78.0, 44.0, maxf(45.0, screen_size.x - 44.0)),
             clampf(float(p.get("y", screen_size.y * 0.68)), _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
         )
-    ui_status = "WALL PLACEMENT — drag the ghost, then tap PLACE"
+    ui_status = "HOLD & DRAG WALL • RELEASE TO DEPLOY"
 
 func _cancel_targeting_modes() -> void:
     grenade_aim_active = false
-    grenade_slider_touch_id = -1
+    grenade_aim_touch_id = -1
     wall_place_active = false
     wall_place_touch_id = -1
+    grenade_requested = false
+    build_requested = false
 
 func _find_blocking_barricade(zombie_pos: Vector2, target_pos: Vector2) -> int:
     var travel_sign := signf(target_pos.x - zombie_pos.x)
@@ -1700,7 +1765,7 @@ func _draw_help() -> void:
     var card_h := 150.0
     var cards := [
         {"title": "01  MOVE", "body": "Use the left\nvirtual analog to\nwalk around the city.", "color": Color("#a9b77f")},
-        {"title": "02  FIGHT", "body": "Hold FIRE for endless shots.\nTap GREN, set range, THROW.\nWALL previews before PLACE.", "color": Color("#cc5151")},
+        {"title": "02  FIGHT", "body": "Hold FIRE for endless shots.\nHold + drag GREN, release to throw.\nHold + drag WALL, release to place.", "color": Color("#cc5151")},
         {"title": "03  HEAL", "body": "HEAL consumes one\nmedkit and restores\nhealth when needed.", "color": Color("#c19a68")}
     ]
     for i in range(cards.size()):
@@ -1896,30 +1961,26 @@ func _draw_game_world() -> void:
 func _draw_barricade(wall: Dictionary, pos: Vector2) -> void:
     var max_hp := maxf(1.0, float(wall.get("max_hp", 125.0)))
     var hp := clampf(float(wall.get("hp", max_hp)) / max_hp, 0.0, 1.0)
-    # Sprite is a reinforced field barricade with weathered planks, bracing and metal feet.
-    var rect := Rect2(pos.x - 34.0, pos.y - 31.0, 68.0, 62.0)
-    draw_ellipse_shadow(pos + Vector2(0.0, 25.0), 34.0, 8.0, 0.32)
+    # Compact A-frame road barricade: broad hazard beam, splayed feet and a small grounding shadow.
+    var rect := Rect2(pos.x - 43.0, pos.y - 28.0, 86.0, 52.0)
+    draw_ellipse_shadow(pos + Vector2(0.0, 22.0), 38.0, 7.0, 0.34)
     if barricade_texture != null:
         draw_texture_rect(barricade_texture, rect, false, Color.WHITE)
     else:
-        draw_rect(Rect2(rect.position + Vector2(2, 6), rect.size), Color(0.0, 0.0, 0.0, 0.36))
-        for plank_index in range(4):
-            var plank_y: float = rect.position.y + float(plank_index) * 13.0
-            var plank_rect := Rect2(rect.position.x + 2.0, plank_y, rect.size.x - 4.0, 11.0)
-            draw_rect(plank_rect, Color("#6f503a") if plank_index % 2 == 0 else Color("#806044"))
-            draw_rect(Rect2(plank_rect.position, Vector2(plank_rect.size.x, 2.0)), Color("#b58a5a"))
-        draw_line(rect.position + Vector2(5, 4), rect.position + Vector2(63, 55), Color("#cfb181"), 4.0, true)
-        draw_line(rect.position + Vector2(63, 4), rect.position + Vector2(5, 55), Color("#cfb181"), 4.0, true)
-        draw_rect(rect, Color("#202725"), false, 2.0)
-    # Splinter and impact detail increases as structural integrity drops.
+        draw_line(pos + Vector2(-37.0, -17.0), pos + Vector2(-26.0, 21.0), Color("#554739"), 7.0, true)
+        draw_line(pos + Vector2(37.0, -17.0), pos + Vector2(26.0, 21.0), Color("#554739"), 7.0, true)
+        draw_rect(Rect2(pos.x - 39.0, pos.y - 22.0, 78.0, 18.0), Color("#3b4441"))
+        for stripe_index in range(6):
+            var stripe_x: float = pos.x - 34.0 + float(stripe_index) * 13.0
+            draw_line(Vector2(stripe_x, pos.y - 21.0), Vector2(stripe_x + 9.0, pos.y - 5.0), Color("#cfac62"), 5.0, true)
+        draw_rect(Rect2(pos.x - 39.0, pos.y - 22.0, 78.0, 18.0), Color("#1b2221"), false, 2.0)
+    # Structural damage remains visible on the beam as the barrier loses integrity.
     if hp < 0.72:
-        draw_line(pos + Vector2(-15, -7), pos + Vector2(-7, 1), Color("#2e211b"), 2.0, true)
-        draw_line(pos + Vector2(5, 1), pos + Vector2(13, 11), Color("#241c18"), 1.8, true)
+        draw_line(pos + Vector2(-21.0, -15.0), pos + Vector2(-12.0, -5.0), Color("#34241c"), 2.0, true)
     if hp < 0.42:
-        draw_line(pos + Vector2(10, -19), pos + Vector2(2, -6), Color("#271d18"), 2.0, true)
-        draw_line(pos + Vector2(-20, 12), pos + Vector2(-11, 3), Color("#34221a"), 2.0, true)
-    var hp_bar := Rect2(pos.x - 25.0, pos.y - 39.0, 50.0, 4.0)
-    draw_rect(Rect2(hp_bar.position - Vector2(1, 1), hp_bar.size + Vector2(2, 2)), Color(0.01, 0.015, 0.016, 0.88))
+        draw_line(pos + Vector2(13.0, -15.0), pos + Vector2(5.0, -7.0), Color("#241b17"), 2.0, true)
+    var hp_bar := Rect2(pos.x - 23.0, pos.y - 36.0, 46.0, 4.0)
+    draw_rect(Rect2(hp_bar.position - Vector2(1.0, 1.0), hp_bar.size + Vector2(2.0, 2.0)), Color(0.01, 0.015, 0.016, 0.88))
     draw_rect(hp_bar, Color("#302627"))
     draw_rect(Rect2(hp_bar.position, Vector2(hp_bar.size.x * hp, hp_bar.size.y)), Color("#8bb66b") if hp > 0.45 else Color("#d4514b"))
 
@@ -1988,46 +2049,58 @@ func _draw_grenade_aim_preview() -> void:
         return
     var p: Dictionary = players[local_player_id]
     var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
-    var facing := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
-    var origin := player_pos + Vector2(facing * 20.0, -10.0)
-    var target_x := clampf(player_pos.x + facing * _grenade_range_pixels(), 30.0, maxf(31.0, screen_size.x - 30.0))
-    var target := Vector2(target_x, clampf(player_pos.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE))
-    var horizontal_range := absf(target.x - origin.x)
-    var arc_height := clampf(horizontal_range * 0.34, 34.0, 122.0)
-    var previous := origin
-    for point_index in range(1, 25):
-        var t := float(point_index) / 24.0
-        var point := origin.lerp(target, t) + Vector2(0.0, -sin(PI * t) * arc_height)
+    var target: Vector2 = grenade_aim_target_position
+    target = Vector2(
+        clampf(target.x, 30.0, maxf(31.0, screen_size.x - 30.0)),
+        clampf(target.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+    var launch_direction: Vector2 = (target - player_pos).normalized()
+    if launch_direction.length_squared() < 0.01:
+        launch_direction = Vector2(-1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0, 0.0)
+    var origin: Vector2 = player_pos + launch_direction * 18.0 + Vector2(0.0, -9.0)
+    var throw_distance: float = origin.distance_to(target)
+    var arc_height: float = clampf(throw_distance * 0.30, 34.0, 116.0)
+    var previous: Vector2 = origin
+    for point_index in range(1, 31):
+        var t: float = float(point_index) / 30.0
+        var point: Vector2 = origin.lerp(target, t) + Vector2(0.0, -sin(PI * t) * arc_height)
         if point_index % 2 == 0:
-            draw_line(previous, point, Color(0.01, 0.01, 0.01, 0.48), 4.0, true)
-            draw_line(previous, point, Color(0.96, 0.83, 0.58, 0.95), 2.0, true)
+            draw_line(previous, point, Color(0.01, 0.01, 0.01, 0.55), 4.0, true)
+            draw_line(previous, point, Color("#e7d19b", 0.92), 2.0, true)
         previous = point
-    draw_ellipse_shadow(target + Vector2(0.0, 4.0), 22.0, 7.0, 0.36)
-    draw_arc(target, 17.0, 0.0, TAU, 36, Color("#f0d6a1"), 2.0)
-    draw_arc(target, 9.0, 0.0, TAU, 28, Color("#d64b4e"), 2.0)
-    draw_line(target + Vector2(-25.0, 0.0), target + Vector2(-11.0, 0.0), Color("#f3d59a"), 1.5, true)
-    draw_line(target + Vector2(11.0, 0.0), target + Vector2(25.0, 0.0), Color("#f3d59a"), 1.5, true)
-    draw_line(target + Vector2(0.0, -25.0), target + Vector2(0.0, -11.0), Color("#f3d59a"), 1.5, true)
-    draw_line(target + Vector2(0.0, 11.0), target + Vector2(0.0, 25.0), Color("#f3d59a"), 1.5, true)
-    var distance_text := "%.1f m" % (absf(target.x - player_pos.x) / 45.0)
-    var label_pos := target + Vector2(0.0, -24.0)
-    draw_rect(Rect2(label_pos.x - 31.0, label_pos.y - 16.0, 62.0, 18.0), Color(0.01, 0.015, 0.018, 0.88))
-    draw_string(ui_font, label_pos + Vector2(-28.0, -3.0), distance_text, HORIZONTAL_ALIGNMENT_CENTER, 56.0, 11, Color("#f4dca7"))
+    draw_ellipse_shadow(target + Vector2(0.0, 5.0), 21.0, 7.0, 0.42)
+    draw_circle(target, 11.0, Color(0.01, 0.015, 0.018, 0.58))
+    draw_arc(target, 17.0, 0.0, TAU, 36, Color("#e7d19b"), 2.0)
+    draw_arc(target, 9.0, 0.0, TAU, 28, Color("#c74649"), 2.0)
+    draw_line(target + Vector2(-25.0, 0.0), target + Vector2(-11.0, 0.0), Color("#f0d9a7"), 1.5, true)
+    draw_line(target + Vector2(11.0, 0.0), target + Vector2(25.0, 0.0), Color("#f0d9a7"), 1.5, true)
+    draw_line(target + Vector2(0.0, -25.0), target + Vector2(0.0, -11.0), Color("#f0d9a7"), 1.5, true)
+    draw_line(target + Vector2(0.0, 11.0), target + Vector2(0.0, 25.0), Color("#f0d9a7"), 1.5, true)
+    var distance_text := "RELEASE • %.1f m" % (player_pos.distance_to(target) / 45.0)
+    var label_pos: Vector2 = target + Vector2(0.0, -31.0)
+    var label_rect := Rect2(label_pos.x - 55.0, label_pos.y - 15.0, 110.0, 17.0)
+    draw_rect(Rect2(label_rect.position + Vector2(1.0, 2.0), label_rect.size), Color(0.0, 0.0, 0.0, 0.28))
+    draw_rect(label_rect, Color(0.01, 0.015, 0.018, 0.90))
+    draw_rect(Rect2(label_rect.position, Vector2(2.0, label_rect.size.y)), Color("#d6ae64"))
+    draw_string(ui_font, Vector2(label_rect.position.x + 5.0, label_rect.position.y + 11.5), distance_text, HORIZONTAL_ALIGNMENT_CENTER, label_rect.size.x - 10.0, 8, Color("#f4dca7"))
 
 func _draw_wall_placement_preview() -> void:
     var valid := _wall_placement_is_valid(local_player_id, wall_preview_position)
-    var preview_rect := Rect2(wall_preview_position.x - 34.0, wall_preview_position.y - 31.0, 68.0, 62.0)
-    var ghost_color := Color(0.70, 1.0, 0.68, 0.68) if valid else Color(1.0, 0.34, 0.34, 0.66)
+    var preview_rect := Rect2(wall_preview_position.x - 43.0, wall_preview_position.y - 28.0, 86.0, 52.0)
+    var ghost_color := Color(0.73, 1.0, 0.68, 0.73) if valid else Color(1.0, 0.34, 0.34, 0.70)
+    draw_ellipse_shadow(wall_preview_position + Vector2(0.0, 22.0), 38.0, 7.0, 0.28)
     if barricade_texture != null:
         draw_texture_rect(barricade_texture, preview_rect, false, ghost_color)
     else:
         draw_rect(preview_rect, ghost_color)
         draw_rect(preview_rect, Color.WHITE, false, 2.0)
-    draw_rect(preview_rect, Color("#8dd180") if valid else Color("#ec6262"), false, 2.0)
-    var preview_label := "WALL PLACEMENT OK" if valid else "INVALID POSITION"
-    var label_rect := Rect2(wall_preview_position.x - 57.0, wall_preview_position.y - 49.0, 114.0, 15.0)
-    draw_rect(label_rect, Color(0.01, 0.015, 0.018, 0.82))
-    draw_string(ui_font, Vector2(label_rect.position.x + 3.0, label_rect.position.y + 10.5), preview_label, HORIZONTAL_ALIGNMENT_CENTER, label_rect.size.x - 6.0, 8, Color("#b5e69b") if valid else Color("#f28a82"))
+    var placement_color := Color("#91d77e") if valid else Color("#ed6262")
+    draw_arc(wall_preview_position + Vector2(0.0, 3.0), 49.0, 0.0, TAU, 36, Color(placement_color.r, placement_color.g, placement_color.b, 0.82), 2.0)
+    var preview_label := "RELEASE TO DEPLOY" if valid else "MOVE / BLOCKED"
+    var label_rect := Rect2(wall_preview_position.x - 59.0, wall_preview_position.y - 49.0, 118.0, 16.0)
+    draw_rect(label_rect, Color(0.01, 0.015, 0.018, 0.88))
+    draw_rect(Rect2(label_rect.position, Vector2(2.0, label_rect.size.y)), placement_color)
+    draw_string(ui_font, Vector2(label_rect.position.x + 4.0, label_rect.position.y + 11.5), preview_label, HORIZONTAL_ALIGNMENT_CENTER, label_rect.size.x - 8.0, 8, placement_color)
 
 func _draw_game_hud() -> void:
     var w := screen_size.x
@@ -2098,35 +2171,11 @@ func _draw_game_hud() -> void:
     var wall_pos := Vector2(w - 82.0 * control_scale, h - 177.0 * control_scale)
     _draw_action_button("game_fire", fire_pos, 41.0 * control_scale, "FIRE", Color("#b83f45"))
     _draw_action_button("game_heal", heal_pos, 31.0 * control_scale, "HEAL", Color("#647d57"))
-    var grenade_label := "THROW" if grenade_aim_active else "GREN %d" % grenades
-    var wall_label := "PLACE" if wall_place_active else "WALL %d" % wall_kits
-    _draw_action_button("game_grenade", grenade_pos, 29.0 * control_scale, grenade_label, Color("#b98b45") if grenade_aim_active else Color("#8b7850"))
-    _draw_action_button("game_build", wall_pos, 29.0 * control_scale, wall_label, Color("#83a76a") if wall_place_active else Color("#69756b"))
+    var grenade_label := "DRAG" if grenade_aim_active else "GREN %d" % grenades
+    var wall_label := "DRAG" if wall_place_active else "WALL %d" % wall_kits
+    _draw_action_button("game_grenade", grenade_pos, 29.0 * control_scale, grenade_label, Color("#d0a14b") if grenade_aim_active else Color("#8b7850"))
+    _draw_action_button("game_build", wall_pos, 29.0 * control_scale, wall_label, Color("#8bb775") if wall_place_active else Color("#69756b"))
     _draw_ui_button("game_pause", Rect2(w - 65.0, 72.0, 49.0, 41.0), "Ⅱ", "", Color("#c19a68"), false)
-    if grenade_aim_active:
-        _draw_grenade_range_slider(control_scale)
-        var slider_rect: Rect2 = button_rects.get("grenade_range_slider", Rect2())
-        _draw_ui_button("grenade_aim_cancel", Rect2(slider_rect.position.x - 77.0 * control_scale, slider_rect.position.y + 1.0 * control_scale, 68.0 * control_scale, 25.0 * control_scale), "CANCEL", "", Color("#c34e4f"), false)
-    if wall_place_active:
-        _draw_ui_button("wall_place_cancel", Rect2(w - 297.0 * control_scale, h - 198.0 * control_scale, 88.0 * control_scale, 30.0 * control_scale), "CANCEL", "", Color("#c34e4f"), false)
-
-func _draw_grenade_range_slider(control_scale: float) -> void:
-    var slider_width: float = minf(270.0 * control_scale, screen_size.x * 0.28)
-    var slider_height: float = 27.0 * control_scale
-    var slider_rect := Rect2(Vector2(screen_size.x * 0.5 - slider_width * 0.5, screen_size.y - 48.0 * control_scale), Vector2(slider_width, slider_height))
-    button_rects["grenade_range_slider"] = slider_rect
-    draw_rect(Rect2(slider_rect.position + Vector2(2.0, 3.0), slider_rect.size), Color(0.0, 0.0, 0.0, 0.50))
-    draw_rect(slider_rect, Color(0.01, 0.016, 0.018, 0.88))
-    draw_rect(Rect2(slider_rect.position, Vector2(slider_rect.size.x, 2.0)), Color("#c8ab72", 0.82))
-    var track := Rect2(slider_rect.position + Vector2(12.0 * control_scale, 15.0 * control_scale), Vector2(slider_rect.size.x - 24.0 * control_scale, 4.0 * control_scale))
-    draw_rect(track, Color("#444948"))
-    var t: float = inverse_lerp(GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO, grenade_aim_range_ratio)
-    var knob_x: float = track.position.x + track.size.x * t
-    draw_rect(Rect2(track.position, Vector2(track.size.x * t, track.size.y)), Color("#d4a75b"))
-    draw_circle(Vector2(knob_x, track.position.y + track.size.y * 0.5), 6.0 * control_scale, Color("#f0d6a1"))
-    draw_arc(Vector2(knob_x, track.position.y + track.size.y * 0.5), 6.0 * control_scale, 0.0, TAU, 20, Color("#47331f"), 1.2)
-    var range_meters := _grenade_range_pixels() / 45.0
-    draw_string(ui_font, Vector2(slider_rect.position.x + 5.0, slider_rect.position.y + 10.0 * control_scale), "GRENADE RANGE  %.1f m" % range_meters, HORIZONTAL_ALIGNMENT_CENTER, slider_rect.size.x - 10.0, 8, Color("#f0dfb9"))
 
 func _draw_pause_menu() -> void:
     var w := screen_size.x
@@ -2220,7 +2269,7 @@ func _draw_action_button(id: String, pos: Vector2, radius: float, label: String,
         draw_string(ui_font, pos + Vector2(-radius + 1.0, radius * 0.67), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 2.0, 8, Color.WHITE)
     else:
         if barricade_texture != null:
-            draw_texture_rect(barricade_texture, Rect2(pos.x - 15.0, pos.y - 14.0, 30.0, 23.0), false, Color.WHITE)
+            draw_texture_rect(barricade_texture, Rect2(pos.x - 16.0, pos.y - 11.0, 32.0, 19.0), false, Color.WHITE)
         else:
             for plank_index in range(3):
                 var plank_x: float = pos.x - 12.0 + float(plank_index) * 9.0
@@ -2433,25 +2482,12 @@ func _handle_ui_button(id: String) -> void:
             if grenade_aim_active:
                 grenade_requested = true
             else:
-                wall_place_active = false
-                wall_place_touch_id = -1
-                grenade_aim_active = true
-                grenade_slider_touch_id = -1
-                grenade_aim_range_ratio = clampf(grenade_aim_range_ratio, GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO)
-                ui_status = "AIM GRENADE — adjust range, then tap THROW"
-        "grenade_aim_cancel":
-            grenade_aim_active = false
-            grenade_slider_touch_id = -1
-            ui_status = "Grenade aim cancelled"
+                _begin_grenade_aim()
         "game_build":
             if wall_place_active:
                 build_requested = true
             else:
                 _begin_wall_placement()
-        "wall_place_cancel":
-            wall_place_active = false
-            wall_place_touch_id = -1
-            ui_status = "Wall placement cancelled"
         "pause_resume":
             screen_mode = "game"
         "pause_save":
@@ -2494,8 +2530,8 @@ func _input(event: InputEvent) -> void:
     elif event is InputEventScreenDrag:
         if joystick_active and event.index == joystick_touch_id:
             joystick_vector = ((event.position - joystick_origin) / _joystick_radius()).limit_length(1.0)
-        elif event.index == grenade_slider_touch_id:
-            _update_grenade_range_from_position(event.position.x)
+        elif event.index == grenade_aim_touch_id and grenade_aim_active:
+            _update_grenade_target_from_pointer(event.position)
         elif event.index == wall_place_touch_id and wall_place_active:
             _set_wall_preview_from_pointer(event.position)
     elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
@@ -2506,35 +2542,33 @@ func _input(event: InputEvent) -> void:
     elif event is InputEventMouseMotion:
         if joystick_active and joystick_touch_id == -2:
             joystick_vector = ((event.position - joystick_origin) / _joystick_radius()).limit_length(1.0)
-        elif grenade_slider_touch_id == -2:
-            _update_grenade_range_from_position(event.position.x)
+        elif grenade_aim_touch_id == -2 and grenade_aim_active:
+            _update_grenade_target_from_pointer(event.position)
         elif wall_place_touch_id == -2 and wall_place_active:
             _set_wall_preview_from_pointer(event.position)
 
-func _update_grenade_range_from_position(pointer_x: float) -> void:
-    var slider_rect: Rect2 = button_rects.get("grenade_range_slider", Rect2())
-    if slider_rect.size.x <= 0.0:
-        return
-    var margin: float = 12.0 * _control_scale()
-    var left: float = slider_rect.position.x + margin
-    var right: float = slider_rect.end.x - margin
-    var t: float = clampf((pointer_x - left) / maxf(1.0, right - left), 0.0, 1.0)
-    grenade_aim_range_ratio = lerpf(GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO, t)
-
 func _touch_start(index: int, pos: Vector2) -> void:
-    if screen_mode == "game" and grenade_aim_active and button_rects.has("grenade_range_slider"):
-        var slider_rect: Rect2 = button_rects["grenade_range_slider"]
-        if slider_rect.has_point(pos):
-            grenade_slider_touch_id = index
-            _update_grenade_range_from_position(pos.x)
+    if screen_mode == "game":
+        var grenade_rect: Rect2 = button_rects.get("game_grenade", Rect2())
+        if grenade_rect.has_point(pos):
+            _begin_grenade_aim(index)
+            return
+        var wall_rect: Rect2 = button_rects.get("game_build", Rect2())
+        if wall_rect.has_point(pos):
+            _begin_wall_placement(index)
             return
     if _handle_press(pos, index):
         return
     if screen_mode != "game":
         return
-    if wall_place_active and pos.y >= _arena_top() - 5.0 and pos.y <= _arena_bottom() + 8.0:
+    # Keep compatibility with a second pointer adjusting a placement preview when needed.
+    if wall_place_active and wall_place_touch_id < 0 and pos.y >= _arena_top() - 5.0 and pos.y <= _arena_bottom() + 8.0:
         wall_place_touch_id = index
         _set_wall_preview_from_pointer(pos)
+        return
+    if grenade_aim_active and grenade_aim_touch_id < 0 and pos.y >= _arena_top() - 5.0 and pos.y <= _arena_bottom() + 8.0:
+        grenade_aim_touch_id = index
+        _update_grenade_target_from_pointer(pos)
         return
     if pos.x < screen_size.x * 0.40 and pos.y > screen_size.y * 0.57 and not joystick_active:
         joystick_active = true
@@ -2542,10 +2576,14 @@ func _touch_start(index: int, pos: Vector2) -> void:
         joystick_vector = ((pos - joystick_origin) / _joystick_radius()).limit_length(1.0)
 
 func _touch_end(index: int) -> void:
-    if index == grenade_slider_touch_id:
-        grenade_slider_touch_id = -1
+    if index == grenade_aim_touch_id:
+        grenade_aim_touch_id = -1
+        if grenade_aim_active:
+            grenade_requested = true
     if index == wall_place_touch_id:
         wall_place_touch_id = -1
+        if wall_place_active:
+            build_requested = true
     if index == fire_touch_id:
         fire_held = false
         fire_touch_id = -1
