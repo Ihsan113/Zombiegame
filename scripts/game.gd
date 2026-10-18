@@ -119,6 +119,7 @@ var grenade_explosion_texture: Texture2D
 var barricade_texture: Texture2D
 var airdrop_crate_texture: Texture2D
 var parachute_texture: Texture2D
+var airdrop_landing_texture: Texture2D
 var combat_effects: Array[Dictionary] = []
 # Local-only presentation state. Kept out of snapshots so v0.4.11 LAN packet layout stays unchanged.
 var player_death_visuals: Dictionary = {}
@@ -248,8 +249,13 @@ func _ready() -> void:
     barricade_texture = load("res://assets/barricade_detail.png") as Texture2D
     if barricade_texture == null:
         barricade_texture = load("res://assets/barricade_detail.svg") as Texture2D
-    airdrop_crate_texture = load("res://assets/airdrop_crate_detail.svg") as Texture2D
-    parachute_texture = load("res://assets/parachute_detail.svg") as Texture2D
+    airdrop_crate_texture = load("res://assets/airdrop_crate_generated.png") as Texture2D
+    if airdrop_crate_texture == null:
+        airdrop_crate_texture = load("res://assets/airdrop_crate_detail.svg") as Texture2D
+    parachute_texture = load("res://assets/airdrop_parachute_generated.png") as Texture2D
+    if parachute_texture == null:
+        parachute_texture = load("res://assets/parachute_detail.svg") as Texture2D
+    airdrop_landing_texture = load("res://assets/airdrop_landing_dust_generated.png") as Texture2D
     if sprite_atlas == null:
         push_warning("Pixel Zombie LAN: neither PNG nor SVG sprite atlas loaded; simple fallback characters will be drawn.")
     if background_texture == null:
@@ -3699,9 +3705,12 @@ func _draw_combat_effects() -> void:
             draw_arc(start_pos, pickup_radius, 0, TAU, 24, Color(0.78, 0.89, 0.56, alpha), 2.0)
             draw_circle(start_pos, 3.0 + (1.0 - progress) * 4.0, Color(0.9, 0.96, 0.69, alpha))
         elif kind == 8:
-            # Supply crate expires into a restrained street-level dust puff instead of vanishing abruptly.
+            # Generated dust sprite anchors the expiry puff to the asphalt; procedural motes keep it alive.
             var puff_alpha: float = clampf(1.0 - progress, 0.0, 1.0)
             draw_ellipse_shadow(start_pos + Vector2(0.0, 4.0), 7.0 + progress * 19.0, 2.5 + progress * 4.0, 0.23 * puff_alpha)
+            if airdrop_landing_texture != null:
+                var dust_size := Vector2(100.0, 64.0) * (0.70 + progress * 0.40)
+                draw_texture_rect(airdrop_landing_texture, Rect2(start_pos + Vector2(-dust_size.x * 0.5, -dust_size.y * 0.78), dust_size), false, Color(1.0, 1.0, 1.0, puff_alpha * 0.72))
             for puff_index in range(8):
                 var puff_angle := TAU * float(puff_index) / 8.0 + 0.31
                 var puff_offset := Vector2(cos(puff_angle) * (4.0 + progress * (7.0 + float(puff_index % 3) * 4.0)), -progress * (3.0 + float(puff_index % 4) * 3.0))

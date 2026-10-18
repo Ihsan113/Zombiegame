@@ -97,3 +97,11 @@ Other changes:
 - Added snap-to-neighbour for wall previews dragged near an existing barricade end. Candidate placements keep the same lane depth and still pass distance/range/overlap validation.
 - Added `assets/grenade_explosion_asset.png` (with editable SVG source alongside it), a transparent explosion sprite used by the grenade renderer with animated scale and opacity. Existing deterministic shockwave, ember, debris, and smoke layers remain.
 - Preserved multiplayer snapshot field sizes and ENet settings. Android version code/name: 26 / 0.4.13.
+
+## v0.4.14 — Generated explosion and airdrop assets
+
+- Integrated generated grenade explosion art into the existing host-synchronized explosion effect.
+- Added generated parachute and supply-crate textures with SVG fallbacks.
+- Added a generated ground-level dust sprite to the synchronized airdrop expiry puff.
+- Preserved original generated sprite sheets under `assets/*_spritesheet_source.png` for future frame slicing.
+- Kept host-authoritative gameplay and the compact LAN snapshot protocol unchanged.

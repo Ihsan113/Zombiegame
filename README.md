@@ -71,3 +71,7 @@ v0.4.10 was parsed and run in Godot 4.7.2 (netcode checked at v0.4.9, barricade 
 - Added automatic neighbour snapping when the wall preview is dragged close to an existing wall end; the preview inherits the neighbour's lane depth for straighter defensive lines.
 - Added `assets/grenade_explosion_asset.png` (rendered from the editable transparent SVG source), a layered blast asset animated with growth and fade, blended with the existing shock ring, sparks, fragments, and lingering smoke.
 - Preserves the v0.4.11 compact snapshot protocol and ENet networking configuration. Android version code/name: 26 / 0.4.13.
+
+### Generated visual assets (v0.4.14)
+
+The project now includes `assets/grenade_explosion_asset.png`, `assets/airdrop_parachute_generated.png`, `assets/airdrop_crate_generated.png`, and `assets/airdrop_landing_dust_generated.png`. Full generated source sheets are retained in `assets/grenade_explosion_spritesheet_source.png` and `assets/airdrop_spritesheet_source.png`. The in-game grenade blast still uses the existing synchronized effect lifetime and host authority.
