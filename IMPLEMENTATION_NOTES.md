@@ -1,4 +1,4 @@
-# Implementation notes — v0.4.6
+# Implementation notes — v0.4.7
 
 - Target: Godot 4, landscape Android; 4-player host-authoritative ENet/UDP LAN on port 24567.
 - `assets/barricade_detail.png` is the transparent A-frame road barrier; SVG is its fallback. Both render at 120×72, preserving the asset's 720×433 aspect ratio. With the game entity position at the same center convention as a survivor, the barrier's feet and a wider contact shadow reach the ground line. Wall placement preview shares the same dimensions. Minimum spacing is 132 px and zombie attack distance is tuned to engage at the outside edge.
@@ -6,3 +6,9 @@
 - Clients predict their own survivor movement each frame and gently reconcile it against host authority. Other survivors interpolate at snapshot cadence; zombie snapshots merge by stable ID and interpolate X/Y rather than replacing all displayed positions.
 - Input cadence is ~30 Hz; host snapshot cadence is ~15 Hz. ENet FastLZ compression is configured on both host and client before the peer is created. `request_fire` uses unreliable-ordered delivery and firing no longer floods the LAN with an extra world snapshot for every shot; authoritative damage arrives on the next scheduled state snapshot. Granade/wall/heal requests remain reliable actions.
 - Static CI checks resource paths, settings, gameplay markers, SVG XML and WAV formats, then imports and launches the scene headless before APK export. No Godot binary is installed in the current editing environment, so CI and hardware testing remain the authoritative compile/runtime checks.
+
+
+## v0.4.7 compression correction
+- In Godot 4.7.2, `ENetMultiplayerPeer` exposes the underlying `ENetConnection` via `host`; compression is configured by `host.compress(ENetConnection.COMPRESS_FASTLZ)`.
+- Configure this after `create_server()`/`create_client()` returns `OK` and before assigning the peer to `multiplayer.multiplayer_peer`. Host and all clients must use the same compression mode.
+- CI now fails if the old invalid constant/property spelling appears or if host/client compression setup differs.

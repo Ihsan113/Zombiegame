@@ -38,3 +38,9 @@
 - Barricade image enlarged proportionally and anchored to the ground with a stronger contact shadow; placement preview matches placed size. Adjusted obstacle spacing and zombie approach distance.
 - Removed long vertical-looking projectile line. Added short directionally placed spark particles and ground shadow. Rebuilt explosion feedback with a fireball, expanding shockwave rings, radial sparks and smoke.
 - Added local movement prediction and gentle authoritative correction for joining clients, smoothed zombies across snapshots, 30 Hz input cadence, ~15 Hz world snapshots and FastLZ compression. Kept fire requests reliable on a dedicated ENet channel and removed the extra full-world broadcast after every shot to reduce packet bursts.
+
+
+## 0.4.7 — ENet compression API fix
+- Replaced the invalid `ENetMultiplayerPeer.COMPRESS_FASTLZ` reference with `ENetConnection.COMPRESS_FASTLZ`.
+- Set compression via the created peer's `host.compress(...)` for both host and client, before attaching the peer to the MultiplayerAPI.
+- Added a CI guard against the invalid API spelling; bumped Android version code/name to 20 / 0.4.7.

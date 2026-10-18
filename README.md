@@ -1,8 +1,8 @@
-# Pixel Zombie LAN — v0.4.6
+# Pixel Zombie LAN — v0.4.7
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
 
-## v0.4.6 updates
+## v0.4.7 updates
 - Enlarged the transparent A-frame barricade art to match its native aspect ratio and aligned its feet and contact shadow to the survivor ground line. Preview and placed barricade use the same shape; obstacle spacing and zombie attack distance match its width.
 - Removed the long ground-to-projectile tether during grenade throws. The grenade now has a ground shadow and tiny motion sparks; explosion feedback includes a collapsing fireball, expanding shock rings, radial sparks, scorch shadow and rising smoke.
 - Added client-side local-player prediction with gentle correction to the host state, plus interpolation for remote players and zombies.
@@ -28,3 +28,10 @@ Push the ZIP contents so `project.godot` is in the repository root. GitHub Actio
 
 ## Known verification limit
 The source and static checks can be inspected here, but Godot 4.7.2 is not installed in this environment. The newest script still needs GitHub Actions compilation and real device testing for frame pacing, explosion appearance, barricade grounding and four-device LAN behavior.
+
+
+## v0.4.7 — Godot 4.7 ENet compression API fix
+- Fixed the LAN compression compile error: Godot 4.7 defines `COMPRESS_FASTLZ` on `ENetConnection`, not `ENetMultiplayerPeer`.
+- Host and client now create their ENet peer first, then call `peer.host.compress(ENetConnection.COMPRESS_FASTLZ)` before assigning it to `multiplayer.multiplayer_peer`.
+- The CI validator rejects the invalid legacy enum/property spelling and checks that both sides use the same compression mode.
+- Android version code/name: 20 / 0.4.7.

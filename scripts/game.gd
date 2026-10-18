@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.6
+# Pixel Zombie LAN — wave defense prototype v0.4.7
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -1597,11 +1597,12 @@ func _start_host() -> void:
         multiplayer.multiplayer_peer.close()
         multiplayer.multiplayer_peer = null
     peer = ENetMultiplayerPeer.new()
-    peer.compression_mode = ENetMultiplayerPeer.COMPRESS_FASTLZ
     var error_code := peer.create_server(PORT, MAX_PLAYERS - 1)
     if error_code != OK:
         ui_status = "Host failed: %s" % error_string(error_code)
         return
+    # Godot 4.7 exposes compression through the underlying ENetConnection, not ENetMultiplayerPeer.
+    peer.host.compress(ENetConnection.COMPRESS_FASTLZ)
     multiplayer.multiplayer_peer = peer
     is_host = true
     is_offline = false
@@ -1651,11 +1652,12 @@ func _join_host(ip: String) -> void:
         multiplayer.multiplayer_peer.close()
         multiplayer.multiplayer_peer = null
     peer = ENetMultiplayerPeer.new()
-    peer.compression_mode = ENetMultiplayerPeer.COMPRESS_FASTLZ
     var error_code := peer.create_client(cleaned_ip, PORT)
     if error_code != OK:
         ui_status = "Join failed: %s" % error_string(error_code)
         return
+    # Keep client compression identical to the host before multiplayer starts polling it.
+    peer.host.compress(ENetConnection.COMPRESS_FASTLZ)
     multiplayer.multiplayer_peer = peer
     is_host = false
     is_offline = false
