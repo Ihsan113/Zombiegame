@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.11
+# Pixel Zombie LAN — wave defense prototype v0.4.12
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -20,6 +20,12 @@ const ARENA_TOP_CLEARANCE := 22.0 # Clamp character ground point just inside the
 const ARENA_BOTTOM_CLEARANCE := 40.0
 const GRENADE_BLAST_RADIUS := 112.0
 const GRENADE_DAMAGE := 5.0
+const GRENADE_EXPLOSION_EFFECT_DURATION := 1.65
+const AIRDROP_LAND_LIFETIME := 22.0 # Seconds after landing before an unclaimed supply crate fades out.
+const AIRDROP_DESPAWN_EFFECT_DURATION := 1.15
+const PLAYER_DEATH_FADE_DURATION := 1.25
+const PLAYER_REMAINS_FADE_START := 11.0
+const PLAYER_REMAINS_FADE_END := 14.0
 const GRENADE_MAX_CARRY := 5
 const GRENADE_MIN_RANGE_RATIO := 0.065
 const GRENADE_MAX_RANGE_RATIO := 0.30
@@ -111,6 +117,8 @@ var barricade_texture: Texture2D
 var airdrop_crate_texture: Texture2D
 var parachute_texture: Texture2D
 var combat_effects: Array[Dictionary] = []
+# Local-only presentation state. Kept out of snapshots so v0.4.11 LAN packet layout stays unchanged.
+var player_death_visuals: Dictionary = {}
 var wave_number := 1
 var wave_total := WAVE_ZOMBIE_COUNT
 var wave_spawned := 0
@@ -269,6 +277,7 @@ func _process(delta: float) -> void:
         _tick_client_effects(delta)
     if _is_connected_client():
         _update_net_stats(delta)
+    _update_player_death_visuals(delta)
     queue_redraw()
 
 func _setup_sfx() -> void:
@@ -846,7 +855,7 @@ func _encode_snapshot() -> PackedByteArray:
         sp.put_u16(_qpos(float(drop.get("land_y", 0.0))))
         sp.put_float(float(drop.get("elapsed", 0.0)))
         sp.put_float(float(drop.get("fall_duration", 2.6)))
-        sp.put_float(float(drop.get("despawn_timer", 24.0)))
+        sp.put_float(float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)))
         sp.put_u8(1 if bool(drop.get("landed", false)) else 0)
         sp.put_u8(loot_index)
         sp.put_u8(clampi(int(drop.get("quantity", 1)), 0, 255))
@@ -1589,7 +1598,7 @@ func _client_update_render(delta: float) -> void:
             var life := maxf(0.01, float(scheduled["life"]))
             var remaining := life - (render_t - start_t)
             if remaining > 0.0:
-                combat_effects.append({"kind": int(scheduled["kind"]), "x": float(scheduled["x"]) * sx, "y": float(scheduled["y"]) * sy, "x2": float(scheduled["x2"]) * sx, "y2": float(scheduled["y2"]) * sy, "ttl": remaining, "life": life})
+                combat_effects.append({"eid": int(scheduled.get("eid", 0)), "kind": int(scheduled["kind"]), "x": float(scheduled["x"]) * sx, "y": float(scheduled["y"]) * sy, "x2": float(scheduled["x2"]) * sx, "y2": float(scheduled["y2"]) * sy, "ttl": remaining, "life": life})
     if combat_effects.size() > 48:
         combat_effects = combat_effects.slice(combat_effects.size() - 48)
     for index in range(pending_sfx.size() - 1, -1, -1):
@@ -1715,6 +1724,7 @@ func _start_offline(load_saved: bool = false) -> void:
     is_offline = true
     local_player_id = 1
     players.clear()
+    player_death_visuals.clear()
     input_vectors.clear()
     cmd_last_seq.clear()
     cmd_budget.clear()
@@ -2110,7 +2120,7 @@ func _spawn_airdrop() -> void:
         "land_y": drop_y,
         "elapsed": 0.0,
         "fall_duration": 2.6,
-        "despawn_timer": 24.0,
+        "despawn_timer": AIRDROP_LAND_LIFETIME,
         "landed": false,
         "loot_kind": loot_kind,
         "quantity": quantity
@@ -2196,8 +2206,12 @@ func _update_airdrops(delta: float) -> void:
                 drop["y"] = float(drop.get("land_y", _arena_top() + 70.0))
                 _emit_sfx("airdrop")
         else:
-            drop["despawn_timer"] = float(drop.get("despawn_timer", 24.0)) - delta
+            drop["despawn_timer"] = float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)) - delta
             if float(drop["despawn_timer"]) <= 0.0:
+                # The host removes the unclaimed crate and broadcasts a small dust/smoke puff.
+                # Drop expiry is authoritative; clients only render the synchronized effect.
+                var expired_pos := Vector2(float(drop.get("x", 0.0)), float(drop.get("y", 0.0)))
+                _add_combat_effect(8, expired_pos, expired_pos, AIRDROP_DESPAWN_EFFECT_DURATION)
                 airdrops.remove_at(drop_index)
                 continue
             var drop_pos := Vector2(float(drop.get("x", 0.0)), float(drop.get("y", 0.0)))
@@ -2228,7 +2242,7 @@ func _update_grenades(delta: float) -> void:
         grenade["fuse"] = float(grenade.get("fuse", 1.02)) - delta
         if float(grenade["fuse"]) <= 0.0:
             var blast_pos := Vector2(float(grenade.get("x", 0.0)), float(grenade.get("y", 0.0)))
-            _add_combat_effect(6, blast_pos, blast_pos, 0.95)
+            _add_combat_effect(6, blast_pos, blast_pos, GRENADE_EXPLOSION_EFFECT_DURATION)
             _emit_sfx("explosion")
             for zombie_index in range(zombies.size() - 1, -1, -1):
                 var zombie: Dictionary = zombies[zombie_index]
@@ -2261,6 +2275,7 @@ func _restart_run() -> void:
     if not is_host:
         ui_status = "Only the host can restart this run."
         return
+    player_death_visuals.clear()
     zombies.clear()
     airdrops.clear()
     barricades.clear()
@@ -2407,7 +2422,7 @@ func _load_world() -> void:
                     "land_y": clampf(float(drop.get("land_y", screen_size.y * 0.7)), _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE),
                     "elapsed": maxf(0.0, float(drop.get("elapsed", 0.0))),
                     "fall_duration": maxf(0.1, float(drop.get("fall_duration", 2.6))),
-                    "despawn_timer": maxf(0.0, float(drop.get("despawn_timer", 24.0))),
+                    "despawn_timer": clampf(float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)), 0.0, AIRDROP_LAND_LIFETIME),
                     "landed": bool(drop.get("landed", false)),
                     "loot_kind": "grenade" if str(drop.get("loot_kind", "ammo")) == "ammo" else str(drop.get("loot_kind", "grenade")),
                     "quantity": 1 if str(drop.get("loot_kind", "ammo")) == "ammo" else maxi(1, int(drop.get("quantity", 1)))
@@ -2448,6 +2463,7 @@ func _start_host() -> void:
     _cancel_targeting_modes()
     screen_mode = "lobby"
     players.clear()
+    player_death_visuals.clear()
     input_vectors.clear()
     cmd_last_seq.clear()
     cmd_budget.clear()
@@ -2510,6 +2526,7 @@ func _join_host(ip: String) -> void:
     cmd_open_qy = 0
     _reset_client_interpolation()
     players.clear()
+    player_death_visuals.clear()
     zombies.clear()
     combat_effects.clear()
     input_vectors.clear()
@@ -2564,6 +2581,7 @@ func _reset_network_state() -> void:
     fire_repeat_timer = 0.0
     _cancel_targeting_modes()
     players.clear()
+    player_death_visuals.clear()
     input_vectors.clear()
     cmd_last_seq.clear()
     cmd_budget.clear()
@@ -2704,7 +2722,7 @@ func _draw_home() -> void:
     draw_rect(Rect2(signal_rect.position, Vector2(3, signal_rect.size.y)), Color("#9e4146"))
     draw_circle(Vector2(signal_rect.position.x + 17, signal_rect.position.y + 21), 4.0, Color("#dc685b"))
     draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "LOCAL SIGNAL ONLY  /  UDP %d" % PORT, HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
-    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.2  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
+    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.12  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
 
 func _draw_help() -> void:
     _draw_apocalypse_backdrop(true)
@@ -2798,6 +2816,123 @@ func _draw_lobby() -> void:
     _draw_ui_button("lobby_leave", Rect2(rx, panel_y + panel_h - 55, rbw, 38), "LEAVE LOBBY", "", Color("#b94a50"), false)
     draw_string(ui_font, Vector2(36, h - 12), ui_status, HORIZONTAL_ALIGNMENT_LEFT, w - 72, 10, Color("#e0d7bf"))
 
+func _update_player_death_visuals(delta: float) -> void:
+    # This is presentation-only: it records when this device first sees HP reach zero.
+    # No fields are added to the compact LAN snapshots, protecting v0.4.11 networking.
+    for id_variant in players.keys():
+        var id := int(id_variant)
+        var p: Dictionary = players[id]
+        if float(p.get("hp", 0.0)) <= 0.0:
+            if not player_death_visuals.has(id):
+                var death_pos := _player_draw_pos(id, p)
+                player_death_visuals[id] = {
+                    "age": 0.0,
+                    "x": death_pos.x,
+                    "y": death_pos.y,
+                    "face_left": float(p.get("face_x", 1.0)) < 0.0
+                }
+            else:
+                var death_state: Dictionary = player_death_visuals[id]
+                death_state["age"] = minf(PLAYER_REMAINS_FADE_END + 1.0, float(death_state.get("age", 0.0)) + clampf(delta, 0.0, 0.1))
+                player_death_visuals[id] = death_state
+        else:
+            player_death_visuals.erase(id)
+    for id_variant in player_death_visuals.keys():
+        if not players.has(int(id_variant)):
+            player_death_visuals.erase(id_variant)
+
+func _draw_player_death_remains(pos: Vector2, id: int, age: float, facing_left: bool) -> void:
+    var phase := float(id) * 1.37
+    if age < PLAYER_DEATH_FADE_DURATION:
+        var t := clampf(age / PLAYER_DEATH_FADE_DURATION, 0.0, 1.0)
+        var opacity: float = pow(1.0 - t, 1.25)
+        var collapse_pos := pos + Vector2(0.0, t * 8.0)
+        draw_ellipse_shadow(pos + Vector2(0.0, 28.0), 10.0 + 6.0 * t, 3.2 + t * 1.4, 0.28 * opacity)
+        # Fading embers and dust break up the survivor silhouette before the bones appear.
+        for particle_index in range(7):
+            var seed_angle := TAU * float(particle_index) / 7.0 + phase * 0.21
+            var travel := 8.0 + float((particle_index * 5) % 11) * t
+            var particle_pos := collapse_pos + Vector2(cos(seed_angle) * travel, -sin(t * PI * 0.72) * (5.0 + float(particle_index % 3) * 5.0) - t * (6.0 + float(particle_index % 4) * 3.0))
+            var particle_alpha := opacity * (0.45 + 0.4 * absf(sin(seed_angle)))
+            draw_circle(particle_pos, 1.0 + float(particle_index % 2) * 0.55, Color(0.61, 0.57, 0.48, particle_alpha))
+        _draw_atlas_character(collapse_pos, _player_sprite_index(id), false, 1.0 - t * 0.16, facing_left, false, false, false, false, phase, opacity)
+        return
+
+    var remains_fade: float = 1.0
+    if age > PLAYER_REMAINS_FADE_START:
+        remains_fade = clampf((PLAYER_REMAINS_FADE_END - age) / maxf(0.01, PLAYER_REMAINS_FADE_END - PLAYER_REMAINS_FADE_START), 0.0, 1.0)
+    if remains_fade <= 0.0:
+        return
+    var reveal: float = clampf((age - PLAYER_DEATH_FADE_DURATION) / 0.48, 0.0, 1.0)
+    var bone_alpha: float = remains_fade * reveal
+    _draw_death_bones(pos, facing_left, bone_alpha, age)
+
+func _draw_bone_segment(start: Vector2, finish: Vector2, width: float, alpha: float) -> void:
+    if alpha <= 0.01:
+        return
+    draw_line(start, finish, Color(0.055, 0.045, 0.039, alpha), width + 2.2, true)
+    draw_line(start, finish, Color(0.76, 0.70, 0.56, alpha), width, true)
+    draw_line(start + Vector2(0.0, -0.55), finish + Vector2(0.0, -0.55), Color(0.95, 0.87, 0.70, alpha * 0.52), maxf(0.7, width * 0.24), true)
+
+func _draw_death_bones(pos: Vector2, facing_left: bool, alpha: float, age: float) -> void:
+    var face_sign := -1.0 if facing_left else 1.0
+    var base := pos + Vector2(0.0, 16.0)
+    draw_ellipse_shadow(base + Vector2(0.0, 4.0), 19.0, 4.1, 0.22 * alpha)
+    # The remains lie flat on the road: skull, rib cage, spine, pelvis and separated long bones.
+    var skull := base + Vector2(15.0 * face_sign, -3.0)
+    draw_circle(skull + Vector2(0.0, 0.6), 5.0, Color(0.045, 0.035, 0.032, alpha))
+    draw_circle(skull, 4.25, Color(0.79, 0.73, 0.61, alpha))
+    draw_circle(skull + Vector2(1.0 * face_sign, 0.6), 1.2, Color(0.16, 0.13, 0.11, alpha))
+    draw_circle(skull + Vector2(-1.8 * face_sign, -0.6), 0.9, Color(0.16, 0.13, 0.11, alpha))
+    _draw_bone_segment(skull + Vector2(-2.3 * face_sign, 2.2), skull + Vector2(2.1 * face_sign, 2.7), 1.6, alpha)
+
+    var neck := base + Vector2(9.0 * face_sign, -1.0)
+    var shoulder := base + Vector2(5.0 * face_sign, 0.0)
+    var spine_mid := base + Vector2(0.0, 2.0)
+    var pelvis := base + Vector2(-7.0 * face_sign, 4.0)
+    _draw_bone_segment(neck, shoulder, 2.2, alpha)
+    _draw_bone_segment(shoulder, spine_mid, 2.0, alpha)
+    _draw_bone_segment(spine_mid, pelvis, 2.1, alpha)
+    for rib_index in range(4):
+        var rib_y := -1.0 + float(rib_index) * 2.4
+        var rib_a := base + Vector2(6.0 * face_sign, rib_y)
+        var rib_b := base + Vector2(1.0 * face_sign, rib_y + 2.5)
+        var rib_c := base + Vector2(-3.0 * face_sign, rib_y + 1.9)
+        _draw_bone_segment(rib_a, rib_b, 1.25, alpha)
+        _draw_bone_segment(rib_b, rib_c, 1.25, alpha)
+    _draw_bone_segment(base + Vector2(-10.0 * face_sign, 2.0), pelvis, 1.8, alpha)
+    _draw_bone_segment(base + Vector2(-10.0 * face_sign, 2.0), base + Vector2(-4.0 * face_sign, 7.0), 1.8, alpha)
+
+    # Arms sit unevenly beside the ribs, rather than being a rigid symmetrical stick figure.
+    var elbow_a := base + Vector2(0.0 * face_sign, -5.0)
+    var wrist_a := base + Vector2(-4.5 * face_sign, -8.0)
+    var elbow_b := base + Vector2(2.5 * face_sign, 6.0)
+    var wrist_b := base + Vector2(8.0 * face_sign, 7.5)
+    _draw_bone_segment(shoulder + Vector2(0.0, -1.0), elbow_a, 1.8, alpha)
+    _draw_bone_segment(elbow_a, wrist_a, 1.6, alpha)
+    _draw_bone_segment(shoulder + Vector2(-1.0 * face_sign, 2.0), elbow_b, 1.7, alpha)
+    _draw_bone_segment(elbow_b, wrist_b, 1.5, alpha)
+    draw_circle(elbow_a, 1.7, Color(0.82, 0.75, 0.62, alpha))
+    draw_circle(elbow_b, 1.7, Color(0.82, 0.75, 0.62, alpha))
+
+    # Legs trail back from the pelvis with a slight offset, giving the body a fallen pose.
+    var knee_a := base + Vector2(-13.0 * face_sign, 0.0)
+    var ankle_a := base + Vector2(-20.0 * face_sign, 3.0)
+    var knee_b := base + Vector2(-10.0 * face_sign, 9.0)
+    var ankle_b := base + Vector2(-18.0 * face_sign, 12.0)
+    _draw_bone_segment(pelvis + Vector2(-1.0 * face_sign, 1.0), knee_a, 2.4, alpha)
+    _draw_bone_segment(knee_a, ankle_a, 1.9, alpha)
+    _draw_bone_segment(pelvis + Vector2(-2.0 * face_sign, 3.0), knee_b, 2.2, alpha)
+    _draw_bone_segment(knee_b, ankle_b, 1.8, alpha)
+    draw_circle(knee_a, 2.0, Color(0.82, 0.75, 0.62, alpha))
+    draw_circle(knee_b, 2.0, Color(0.82, 0.75, 0.62, alpha))
+
+    # A couple of tiny bone chips drift out during the first second after the collapse.
+    var fragment_alpha: float = alpha * clampf(1.0 - (age - PLAYER_DEATH_FADE_DURATION) / 2.2, 0.0, 1.0)
+    for fragment_index in range(3):
+        var fragment_pos := base + Vector2((float(fragment_index) - 1.0) * 13.0 * face_sign, -5.0 - float(fragment_index % 2) * 4.0)
+        draw_line(fragment_pos, fragment_pos + Vector2(3.5 * face_sign, 1.2), Color(0.82, 0.75, 0.62, fragment_alpha), 1.5, true)
+
 func _draw_game_world() -> void:
     var w := screen_size.x
     var h := screen_size.y
@@ -2843,6 +2978,11 @@ func _draw_game_world() -> void:
             var id := int(entry.id)
             var p: Dictionary = players[id]
             pos = _player_draw_pos(id, p)
+            if float(p.get("hp", 0.0)) <= 0.0 and player_death_visuals.has(id):
+                var death_state: Dictionary = player_death_visuals[id]
+                var death_pos := Vector2(float(death_state.get("x", pos.x)), float(death_state.get("y", pos.y)))
+                _draw_player_death_remains(death_pos, id, float(death_state.get("age", 0.0)), bool(death_state.get("face_left", false)))
+                continue
             var moving := bool(p.get("walking", false))
             var shooting := float(p.get("shoot_timer", 0.0)) > 0.02
             var hurt := float(p.get("hurt_timer", 0.0)) > 0.02
@@ -3037,6 +3177,18 @@ func _draw_airdrop(drop: Dictionary, pos: Vector2) -> void:
     draw_rect(label_rect, Color(0.01, 0.015, 0.016, 0.78))
     draw_rect(Rect2(label_rect.position, Vector2(2.0, label_rect.size.y)), loot_color)
     draw_string(ui_font, Vector2(label_rect.position.x + 3.0, label_rect.position.y + 9.5), loot_tag, HORIZONTAL_ALIGNMENT_CENTER, label_rect.size.x - 6.0, 8, loot_color)
+    if landed:
+        var remaining := clampf(float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)), 0.0, AIRDROP_LAND_LIFETIME)
+        var warning := remaining <= 6.0
+        var pulse: float = (0.42 + 0.58 * absf(sin(animation_clock * 8.5))) if warning else 1.0
+        var expiry_rect := Rect2(pos.x - 34.0, pos.y - 32.0, 68.0, 11.0)
+        var expiry_color := Color(0.95, 0.28, 0.22, pulse) if warning else Color(0.80, 0.75, 0.60, 0.88)
+        draw_rect(expiry_rect, Color(0.008, 0.012, 0.013, 0.88))
+        draw_rect(Rect2(expiry_rect.position, Vector2(expiry_rect.size.x * remaining / AIRDROP_LAND_LIFETIME, 2.0)), expiry_color)
+        var expiry_text: String = ("VANISH %02ds" % ceili(remaining)) if warning else ("EXPIRES %02ds" % ceili(remaining))
+        draw_string(ui_font, Vector2(expiry_rect.position.x + 2.0, expiry_rect.position.y + 9.0), expiry_text, HORIZONTAL_ALIGNMENT_CENTER, expiry_rect.size.x - 4.0, 7, expiry_color)
+        if warning:
+            draw_rect(crate_rect.grow(2.0), Color(0.95, 0.20, 0.16, 0.35 + 0.40 * pulse), false, 1.5)
 
 func _grenade_range_pixels() -> float:
     return screen_size.x * clampf(grenade_aim_range_ratio, GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO)
@@ -3306,10 +3458,13 @@ func _character_visual_position(pos: Vector2, zombie: bool, facing_left: bool, m
     var hurt_shake := -facing_sign * 1.8 * sin(animation_clock * 54.0) if hurt else 0.0
     return pos + Vector2(facing_sign * lunge + hurt_shake, bob)
 
-func _draw_atlas_character(pos: Vector2, kind: int, zombie: bool, scale_value: float = 1.0, facing_left: bool = false, moving: bool = false, attacking: bool = false, hurt: bool = false, shooting: bool = false, phase: float = 0.0) -> void:
+func _draw_atlas_character(pos: Vector2, kind: int, zombie: bool, scale_value: float = 1.0, facing_left: bool = false, moving: bool = false, attacking: bool = false, hurt: bool = false, shooting: bool = false, phase: float = 0.0, opacity: float = 1.0) -> void:
+    var visual_alpha := clampf(opacity, 0.0, 1.0)
     if sprite_atlas == null:
         var fallback_pos := _character_visual_position(pos, zombie, facing_left, moving, attacking, shooting, phase, hurt)
-        draw_rect(Rect2(fallback_pos + Vector2(-8, -9), Vector2(16, 18)), Color("#ac4b4d") if hurt else _player_color(kind + 1))
+        var fallback_color := Color("#ac4b4d") if hurt else _player_color(kind + 1)
+        fallback_color.a = visual_alpha
+        draw_rect(Rect2(fallback_pos + Vector2(-8, -9), Vector2(16, 18)), fallback_color)
         return
     # PNG atlas: 64x80 cells (320x192). SVG fallback: 80x80 cells (320x240).
     var svg_layout := sprite_atlas.get_height() >= 240
@@ -3334,9 +3489,9 @@ func _draw_atlas_character(pos: Vector2, kind: int, zombie: bool, scale_value: f
     elif shooting:
         rotation -= facing_sign * 0.035
         scale_y += 0.014
-    var tint := Color.WHITE
+    var tint := Color(1.0, 1.0, 1.0, visual_alpha)
     if hurt and int(animation_clock * 32.0) % 2 == 0:
-        tint = Color(1.0, 0.57, 0.54, 1.0)
+        tint = Color(1.0, 0.57, 0.54, visual_alpha)
 
     var flip_x := -scale_x if facing_left else scale_x
     draw_set_transform(visual_pos, rotation, Vector2(flip_x, scale_y))
@@ -3389,7 +3544,7 @@ func _draw_zombie_health(zombie: Dictionary, pos: Vector2) -> void:
 
 func _draw_combat_effects() -> void:
     for effect in combat_effects:
-        var kind := clampi(int(effect.get("kind", 0)), 0, 7)
+        var kind := clampi(int(effect.get("kind", 0)), 0, 8)
         var start_pos := Vector2(float(effect.get("x", 0.0)), float(effect.get("y", 0.0)))
         var end_pos := Vector2(float(effect.get("x2", start_pos.x)), float(effect.get("y2", start_pos.y)))
         var life := maxf(0.01, float(effect.get("life", 0.18)))
@@ -3420,35 +3575,89 @@ func _draw_combat_effects() -> void:
                 draw_line(slash_start, slash_end, Color(0.72, 0.12, 0.15, alpha * 0.82), 2.2, true)
                 draw_line(slash_start + Vector2(0, -1), slash_end + Vector2(0, -1), Color(0.98, 0.47, 0.39, alpha * 0.62), 1.0, true)
         elif kind == 6:
-            var blast_fade: float = clampf(1.0 - progress, 0.0, 1.0)
-            var ring_progress: float = clampf(progress * 1.22, 0.0, 1.0)
-            var blast_radius: float = 14.0 + 126.0 * ring_progress
-            # Brief dark scorch and a broad expanding shock ring anchor the explosion to the road.
-            draw_ellipse_shadow(start_pos + Vector2(0.0, 7.0), 12.0 + 42.0 * progress, 4.0 + 8.0 * progress, 0.22 + 0.30 * blast_fade)
-            draw_arc(start_pos, blast_radius, 0.0, TAU, 52, Color(1.0, 0.43, 0.16, blast_fade * 0.86), 3.8 * blast_fade + 0.6)
-            draw_arc(start_pos, blast_radius * 0.70, 0.0, TAU, 44, Color(1.0, 0.78, 0.35, blast_fade * 0.72), 2.2 * blast_fade + 0.5)
-            # Fireball collapses quickly while smoke continues to rise.
-            var fire_radius: float = 31.0 * pow(blast_fade, 1.7) + 1.5
-            draw_circle(start_pos + Vector2(0.0, -3.0), fire_radius, Color(0.92, 0.23, 0.08, blast_fade * 0.80))
-            draw_circle(start_pos + Vector2(-2.0, -5.0), fire_radius * 0.66, Color(1.0, 0.56, 0.13, blast_fade * 0.92))
-            draw_circle(start_pos + Vector2(-3.0, -6.0), fire_radius * 0.34, Color(1.0, 0.86, 0.48, blast_fade * 0.88))
-            for spark_index in range(12):
-                var spark_angle: float = TAU * float(spark_index) / 12.0 + 0.19
+            # A short white-hot flash, a ground-hugging pressure ring, ballistic debris,
+            # orange embers and a rising smoke column. All particles are deterministic per effect id.
+            var blast_seed := int(effect.get("eid", 0))
+            var flash := clampf(1.0 - progress / 0.11, 0.0, 1.0)
+            var fire_fade := clampf(1.0 - progress / 0.36, 0.0, 1.0)
+            var ring_progress := clampf(progress / 0.78, 0.0, 1.0)
+            var ring_alpha := clampf(1.0 - progress / 0.92, 0.0, 1.0)
+            var blast_radius: float = 12.0 + 154.0 * ring_progress
+
+            # Blast soot is grounded on the pavement, with an elliptical shock front.
+            draw_ellipse_shadow(start_pos + Vector2(0.0, 8.0), 18.0 + 78.0 * ring_progress, 5.0 + 13.0 * ring_progress, 0.27 * (1.0 - progress * 0.62))
+            draw_set_transform(start_pos + Vector2(0.0, 6.0), 0.0, Vector2(1.0, 0.43))
+            draw_arc(Vector2.ZERO, blast_radius, 0.0, TAU, 60, Color(1.0, 0.49, 0.22, ring_alpha * 0.80), 3.2 * ring_alpha + 0.4)
+            draw_arc(Vector2.ZERO, blast_radius * 0.68, 0.0, TAU, 52, Color(1.0, 0.77, 0.40, ring_alpha * 0.62), 1.8 * ring_alpha + 0.3)
+            draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+            # Initial flash: pale core surrounded by an orange incandescent envelope.
+            if flash > 0.01:
+                draw_circle(start_pos + Vector2(0.0, -4.0), 18.0 + 34.0 * flash, Color(1.0, 0.88, 0.65, flash * 0.82))
+                draw_circle(start_pos + Vector2(0.0, -5.0), 12.0 + 24.0 * flash, Color(1.0, 0.46, 0.12, flash * 0.90))
+                draw_circle(start_pos + Vector2(-1.0, -6.0), 6.0 + 15.0 * flash, Color(1.0, 0.96, 0.78, flash * 0.92))
+            if fire_fade > 0.01:
+                var fire_radius: float = 29.0 * pow(fire_fade, 1.25) + 1.0
+                draw_circle(start_pos + Vector2(0.0, -3.0), fire_radius, Color(0.77, 0.12, 0.045, fire_fade * 0.78))
+                draw_circle(start_pos + Vector2(-2.0, -6.0), fire_radius * 0.68, Color(1.0, 0.42, 0.09, fire_fade * 0.88))
+                draw_circle(start_pos + Vector2(-3.0, -8.0), fire_radius * 0.32, Color(1.0, 0.82, 0.37, fire_fade * 0.90))
+
+            # Hot fragments shoot outward first, then fall back toward the street.
+            var ember_progress := clampf(progress / 0.78, 0.0, 1.0)
+            for spark_index in range(18):
+                var spark_angle := TAU * float(spark_index) / 18.0 + float(blast_seed % 17) * 0.13
                 var spark_dir := Vector2(cos(spark_angle), sin(spark_angle))
-                var spark_start := start_pos + spark_dir * (fire_radius * 0.58)
-                var spark_length: float = (8.0 + float((spark_index * 7) % 9)) * blast_fade
-                var spark_end := spark_start + spark_dir * spark_length + Vector2(0.0, -5.0 * progress)
-                draw_line(spark_start, spark_end, Color(1.0, 0.66, 0.25, blast_fade * 0.88), 1.5, true)
-            var smoke_alpha: float = clampf(progress * 2.0, 0.0, 1.0) * blast_fade * 0.62
-            for smoke_index in range(6):
-                var smoke_angle: float = TAU * float(smoke_index) / 6.0 + 0.55
-                var smoke_offset := Vector2(cos(smoke_angle) * (7.0 + progress * 24.0), -progress * (10.0 + float(smoke_index % 3) * 8.0))
-                var smoke_radius: float = 5.0 + progress * (5.0 + float(smoke_index % 3) * 2.0)
-                draw_circle(start_pos + smoke_offset, smoke_radius, Color(0.18, 0.20, 0.19, smoke_alpha))
+                var spark_distance: float = (18.0 + float((spark_index * 7 + blast_seed) % 17) * 2.2) * ember_progress
+                var spark_height: float = sin(ember_progress * PI) * (9.0 + float(spark_index % 5) * 5.0)
+                var spark_pos: Vector2 = start_pos + Vector2(spark_dir.x * spark_distance, spark_dir.y * spark_distance * 0.45 - spark_height + ember_progress * ember_progress * 13.0)
+                var spark_alpha := clampf(1.0 - progress / 0.88, 0.0, 1.0)
+                var spark_len: float = (3.5 + float((spark_index * 3) % 6)) * spark_alpha
+                draw_line(spark_pos - spark_dir * spark_len, spark_pos, Color(1.0, 0.74, 0.35, spark_alpha * 0.90), 1.5, true)
+                draw_circle(spark_pos, 1.0 + float(spark_index % 3) * 0.35, Color(1.0, 0.88, 0.60, spark_alpha))
+
+            # Dark stone/metal chips follow separate shallow arcs; deterministic motion avoids jitter on clients.
+            var debris_progress := clampf(progress / 0.98, 0.0, 1.0)
+            var debris_alpha := clampf(1.0 - progress / 1.02, 0.0, 1.0)
+            for debris_index in range(16):
+                var debris_angle := TAU * float(debris_index) / 16.0 + float((blast_seed % 11)) * 0.19
+                var debris_dir := Vector2(cos(debris_angle), sin(debris_angle))
+                var debris_distance: float = (24.0 + float((debris_index * 11 + blast_seed) % 31) * 1.65) * debris_progress
+                var debris_arc: float = sin(debris_progress * PI) * (13.0 + float(debris_index % 4) * 5.0)
+                var debris_pos: Vector2 = start_pos + Vector2(debris_dir.x * debris_distance, debris_dir.y * debris_distance * 0.48 - debris_arc + debris_progress * debris_progress * 22.0)
+                var chip_size: float = 1.6 + float(debris_index % 3) * 0.75
+                draw_line(debris_pos - debris_dir * 3.0, debris_pos, Color(0.10, 0.095, 0.085, debris_alpha * 0.78), 2.2, true)
+                draw_set_transform(debris_pos, debris_angle + float(debris_index) * 0.7, Vector2.ONE)
+                draw_rect(Rect2(-chip_size, -chip_size * 0.55, chip_size * 2.0, chip_size * 1.1), Color(0.20, 0.19, 0.17, debris_alpha * 0.94))
+                draw_rect(Rect2(-chip_size, -chip_size * 0.55, chip_size * 2.0, chip_size * 1.1), Color(0.63, 0.54, 0.41, debris_alpha * 0.72), false, 0.7)
+                draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+            # The plume comes after the fireball: heavy dark smoke at the core, warmer dust at the edges.
+            var smoke_rise := clampf((progress - 0.07) / 0.93, 0.0, 1.0)
+            var smoke_alpha := clampf((progress - 0.06) / 0.20, 0.0, 1.0) * clampf(1.0 - maxf(0.0, progress - 0.28) / 0.78, 0.0, 1.0) * 0.58
+            for smoke_index in range(10):
+                var smoke_angle := TAU * float(smoke_index) / 10.0 + float(blast_seed % 13) * 0.17
+                var smoke_spread: float = 4.0 + smoke_rise * (9.0 + float(smoke_index % 4) * 5.0)
+                var smoke_pos: Vector2 = start_pos + Vector2(cos(smoke_angle) * smoke_spread, -smoke_rise * (12.0 + float(smoke_index % 5) * 9.0) + sin(smoke_angle) * 4.0)
+                var smoke_radius: float = 4.0 + smoke_rise * (6.0 + float(smoke_index % 4) * 2.7)
+                var smoke_color := Color(0.16, 0.15, 0.14, smoke_alpha * (0.74 + float(smoke_index % 3) * 0.09))
+                draw_circle(smoke_pos + Vector2(1.2, 1.8), smoke_radius + 1.5, Color(0.045, 0.045, 0.043, smoke_alpha * 0.76))
+                draw_circle(smoke_pos, smoke_radius, smoke_color)
+                if smoke_index % 3 == 0:
+                    draw_circle(smoke_pos + Vector2(-2.0, -2.2), smoke_radius * 0.55, Color(0.34, 0.29, 0.23, smoke_alpha * 0.44))
         elif kind == 7:
             var pickup_radius := 8.0 + progress * 25.0
             draw_arc(start_pos, pickup_radius, 0, TAU, 24, Color(0.78, 0.89, 0.56, alpha), 2.0)
             draw_circle(start_pos, 3.0 + (1.0 - progress) * 4.0, Color(0.9, 0.96, 0.69, alpha))
+        elif kind == 8:
+            # Supply crate expires into a restrained street-level dust puff instead of vanishing abruptly.
+            var puff_alpha: float = clampf(1.0 - progress, 0.0, 1.0)
+            draw_ellipse_shadow(start_pos + Vector2(0.0, 4.0), 7.0 + progress * 19.0, 2.5 + progress * 4.0, 0.23 * puff_alpha)
+            for puff_index in range(8):
+                var puff_angle := TAU * float(puff_index) / 8.0 + 0.31
+                var puff_offset := Vector2(cos(puff_angle) * (4.0 + progress * (7.0 + float(puff_index % 3) * 4.0)), -progress * (3.0 + float(puff_index % 4) * 3.0))
+                var puff_radius: float = (3.0 + float(puff_index % 3) * 1.5) * (0.65 + progress * 0.5)
+                draw_circle(start_pos + puff_offset + Vector2(0.0, 1.5), puff_radius + 1.0, Color(0.025, 0.028, 0.027, puff_alpha * 0.36))
+                draw_circle(start_pos + puff_offset, puff_radius, Color(0.36, 0.34, 0.30, puff_alpha * 0.48))
         elif sprite_atlas != null:
             var source_x := kind * 32
             var effect_size := Vector2(24, 24) if kind == 0 or kind == 2 or kind == 3 else Vector2(27, 27)

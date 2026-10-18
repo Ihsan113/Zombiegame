@@ -83,3 +83,10 @@ Other changes:
 - Re-rendered barricade art: stands across the lane, A-frame profile toward the viewer, hazard panel receding into the screen (reference angle).
 - Wall geometry updated: `WALL_ATTACK_RANGE` 71 -> 50, `WALL_LANE_TOLERANCE` 34 -> 46, draw rect 60x88 with foot-anchored shadows, new HUD icon aspect, depth sort fixed (`wall.y + 2`), damage tint instead of fixed crack lines.
 - No RPC/network change. Android version code/name: 24 / 0.4.11.
+
+
+## 0.4.12 — cinematic grenade blast, fading death remains, and timed supply drops
+- Reworked grenade impact into a multi-stage flash/fireball, road-level shockwave, deterministic hot fragments, flying dark debris and rising smoke. Effect kind `6` and the compact snapshot format are unchanged.
+- Added client-local survivor death animation: fade/collapse, then skull/rib/spine/limb remains that slowly fade. This adds no network state and does not touch host-authoritative HP.
+- Landed airdrops now last 22 seconds, display remaining time and a final-six-second flashing warning, then dissolve with a synchronized dust puff if not collected.
+- Preserved v0.4.11 ENet settings, input/snapshot rates, binary record sizes and RPC signatures. Android version code/name: 25 / 0.4.12.

@@ -95,6 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
+          if 'version/code=25' not in preset or 'version/name="0.4.12"' not in preset:
+              raise SystemExit('Android export preset must report version code 25 / version 0.4.12')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -130,7 +132,18 @@ jobs:
               'peer.host.compress(ENetConnection.COMPRESS_FASTLZ)',
               'func _predict_local_player(delta: float) -> void:',
               'var wall_rect := Rect2(pos + BARRICADE_RECT_OFFSET, BARRICADE_RECT_SIZE)',
-              'var blast_radius: float = 14.0 + 126.0 * ring_progress',
+              'var blast_radius: float = 12.0 + 154.0 * ring_progress',
+              'const GRENADE_EXPLOSION_EFFECT_DURATION := 1.65',
+              'const AIRDROP_LAND_LIFETIME := 22.0',
+              'const AIRDROP_DESPAWN_EFFECT_DURATION := 1.15',
+              'const PLAYER_DEATH_FADE_DURATION := 1.25',
+              'func _update_player_death_visuals(delta: float) -> void:',
+              'func _draw_player_death_remains(pos: Vector2, id: int, age: float, facing_left: bool) -> void:',
+              'func _draw_death_bones(pos: Vector2, facing_left: bool, alpha: float, age: float) -> void:',
+              'func _draw_bone_segment(start: Vector2, finish: Vector2, width: float, alpha: float) -> void:',
+              '_add_combat_effect(8, expired_pos, expired_pos, AIRDROP_DESPAWN_EFFECT_DURATION)',
+              'elif kind == 8:',
+              'var expiry_rect := Rect2(pos.x - 34.0, pos.y - 32.0, 68.0, 11.0)',
               'draw_ellipse_shadow(grenade_ground_pos + Vector2(0.0, 5.0), 7.0, 2.6, 0.36)',
               'const MAX_BARRICADES := 8',
               'const GRENADE_BLAST_RADIUS := 112.0',
@@ -178,6 +191,10 @@ jobs:
           missing_markers = [marker for marker in required_markers if marker not in script]
           if 'ENetMultiplayerPeer.COMPRESS_FASTLZ' in script or 'peer.compression_mode' in script:
               raise SystemExit('Invalid Godot 4.7 compression API: configure peer.host.compress(ENetConnection.COMPRESS_FASTLZ) after creating the peer.')
+          if 'const SNAPSHOT_HEADER_BYTES := 31' not in script or 'const PLAYER_RECORD_BYTES := 19' not in script or 'const EFFECT_RECORD_BYTES := 16' not in script:
+              raise SystemExit('The v0.4.11 snapshot wire layout must remain unchanged in this visual-effects update.')
+          if 'rpc("receive_world", _encode_snapshot()' not in script:
+              raise SystemExit('Host snapshot broadcast is missing.')
           if script.count('peer.host.compress(ENetConnection.COMPRESS_FASTLZ)') != 2:
               raise SystemExit('Both LAN host and client must configure identical ENetConnection compression.')
           if missing_markers:
@@ -219,7 +236,7 @@ jobs:
               raise SystemExit('Legacy grenade slider still present; v0.4.6 requires hold-drag-release aiming')
           if 'func _update_grenade_target_from_pointer(pointer_pos: Vector2) -> void' not in script or 'HOLD & DRAG GREN' not in script or 'HOLD & DRAG WALL' not in script:
               raise SystemExit('Hold-drag-release interaction markers are missing')
-          print(f'Validated {len(refs)} resource references, landscape settings, infinite ammo, hold-drag grenade/wall controls, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
+          print(f'Validated {len(refs)} resource references, landscape/version settings, infinite ammo, hold-drag controls, death/bone visuals, grenade blast, 22-second airdrop expiry, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
           PYCODE
 
       - name: Import and validate project scripts
@@ -267,7 +284,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.11-APK
+          name: PixelZombieLAN-v0.4.12-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -276,15 +293,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.11-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.12-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.11-source.zip
+          test -s build/PixelZombieLAN-v0.4.12-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.11-source
-          path: build/PixelZombieLAN-v0.4.11-source.zip
+          name: PixelZombieLAN-v0.4.12-source
+          path: build/PixelZombieLAN-v0.4.12-source.zip
           if-no-files-found: error
           retention-days: 14

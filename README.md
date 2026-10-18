@@ -1,6 +1,14 @@
-# Pixel Zombie LAN — v0.4.11
+# Pixel Zombie LAN — v0.4.12
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
+
+## v0.4.12 — grenade blast, survivor death remains, and supply expiry
+- Grenade detonation now has a brief white-hot flash, a flattened expanding shockwave, deterministic radial embers and fragments, then a rising clumped smoke plume. Visual effects stay compatible with the existing effect id and compact snapshot record.
+- A survivor fades and collapses over 1.25 seconds, then leaves a small ground-level skeleton/bone silhouette that gradually fades. This is client-local presentation state only; no player or snapshot fields were added.
+- Landed airdrops expire after 22 seconds if untouched. A countdown/progress strip warns the player during the final six seconds, and expired drops leave a short dust/smoke puff.
+- Host remains authoritative for grenade damage and airdrop removal. No networking cadence, packet field, snapshot byte count, or RPC signature changed.
+- Android version code/name: 25 / 0.4.12.
+
 
 ## v0.4.11 updates — barricade faces the zombies
 - New barricade art: it now stands across the lane with the A-frame profile toward the viewer and its long hazard panel receding into the screen (the angle of the reference), instead of lying side-on. It was re-rendered from a 3D model using textures cut from the previous painted sprite, with a dark outline.
