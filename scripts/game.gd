@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.7
+# Pixel Zombie LAN — wave defense prototype v0.4.8
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -30,8 +30,51 @@ const WALL_KIT_MAX_CARRY := 5
 const MAX_BARRICADES := 8
 const WALL_ATTACK_RANGE := 71.0
 const WALL_LANE_TOLERANCE := 34.0
-const SNAPSHOT_INTERVAL := 0.066 # About 15 world snapshots/second; client interpolation fills frames.
-const INPUT_INTERVAL := 0.033    # About 30 input updates/second for responsive client movement.
+const SNAPSHOT_INTERVAL := 0.0332 # ~30 compact snapshots/second, each one a single UDP datagram.
+const INPUT_INTERVAL := 0.033     # ~30 movement-command packets/second (also keeps Wi-Fi radios awake).
+const SNAP_MAGIC := 0xB7
+const POS_SCALE := 8.0            # wire positions are uint16 in 1/8 px units
+const NO_SOURCE := 255
+const LOOT_KINDS := ["grenade", "wall", "medkit"]
+const MAX_SNAPSHOT_BYTES := 1180  # stays below the ENet fragment size so a snapshot is never split
+const SNAPSHOT_HEADER_BYTES := 31
+const PLAYER_RECORD_BYTES := 19
+const ZOMBIE_RECORD_BYTES := 13
+const WALL_RECORD_BYTES := 10
+const DROP_RECORD_BYTES := 27
+const NADE_RECORD_BYTES := 21
+const EFFECT_RECORD_BYTES := 16
+const MAX_ZOMBIES_PER_SNAPSHOT := 40
+const MAX_AIRDROPS_PER_SNAPSHOT := 4
+const MAX_GRENADES_PER_SNAPSHOT := 8
+const MAX_EFFECTS_PER_SNAPSHOT := 24
+const EFFECT_REDUNDANCY_MS := 220
+const SNAPSHOT_BUFFER_MAX := 40
+const INTERP_DELAY_MIN := 0.075
+const INTERP_DELAY_MAX := 0.30
+const INTERP_ADAPT_RATE := 0.10
+const EXTRAPOLATE_MAX := 0.12
+const TELEPORT_DISTANCE := 150.0
+const CLOCK_DRIFT_RATE := 0.002
+const JITTER_SMOOTHING := 0.08
+const COMMAND_BYTES := 8
+const COMMAND_MAX_PER_PACKET := 8
+const COMMAND_HISTORY_MAX := 240
+const COMMAND_DT_UNIT := 0.0001
+const COMMAND_MAX_DT := 0.1
+const COMMAND_BUDGET_START := 0.25
+const COMMAND_BUDGET_MAX := 0.4
+const COMMAND_BUDGET_RATE := 1.12
+const COMMAND_STALE_MS := 250
+const PRED_SNAP_DISTANCE := 90.0
+const PRED_DEADZONE := 0.35
+const PRED_CORRECTION_RATE := 10.0
+const FIRE_COOLDOWN_MS := 280
+const FIRE_REMOTE_TOLERANCE_MS := 220 # host accepts slightly early remote shots to absorb Wi-Fi jitter
+const ENET_THROTTLE_INTERVAL_MS := 1000
+const ENET_THROTTLE_ACCEL := 32
+const ENET_THROTTLE_DECEL := 0
+const SHOW_NET_STATS := true
 const SAVE_PATH := "user://world_save.json"
 
 var screen_mode := "home" # home, help, lobby, game, pause, game_over
@@ -58,13 +101,11 @@ var peer: ENetMultiplayerPeer
 var players: Dictionary = {}
 var input_vectors: Dictionary = {}
 var zombies: Array[Dictionary] = []
-var target_zombies: Array[Dictionary] = []
 var airdrops: Array[Dictionary] = []
 var barricades: Array[Dictionary] = []
 var active_grenades: Array[Dictionary] = []
 var airdrop_spawn_timer := 28.0
 var airdrop_sequence := 1
-var target_players: Dictionary = {}
 var world_seed: int = 0
 var world_time := 0.0
 var local_player_id := 1
@@ -90,7 +131,48 @@ var wall_place_active := false
 var wall_preview_position := Vector2(480.0, 350.0)
 var wall_place_touch_id := -1
 var client_input_timer := 0.0
-var client_snapshot_age := 0.0
+var snapshot_seq := 0
+var effect_seq := 0
+var cmd_last_seq: Dictionary = {}
+var cmd_budget: Dictionary = {}
+var cmd_last_ms: Dictionary = {}
+var snap_buffer: Array[Dictionary] = []
+var pending_effects: Array = []
+var pending_sfx: Array = []
+var seen_effects: Dictionary = {}
+var zombie_cache: Dictionary = {}
+var clock_offset_ms := 0.0
+var clock_ready := false
+var jitter_ms := 0.0
+var interp_delay := 0.10
+var last_snapshot_seq := -1
+var render_time := 0.0
+var render_starved := false
+var host_world_w := 960.0
+var host_world_h := 540.0
+var pred_pos := Vector2.ZERO
+var pred_corr := Vector2.ZERO
+var pred_ready := false
+var pred_error_px := 0.0
+var pred_unacked: Array = []
+var cmd_seq := 0
+var cmd_open_qx := 0
+var cmd_open_qy := 0
+var cmd_open_dt := 0.0
+var local_face := 1.0
+var local_walking := false
+var local_hp := 100.0
+var local_shoot_timer := 0.0
+var local_fire_ms := 0
+var stat_timer := 0.0
+var stat_snaps := 0
+var stat_lost := 0
+var stat_bytes := 0
+var stat_bad := 0
+var net_snaps_per_s := 0.0
+var net_kbps := 0.0
+var net_loss_pct := 0.0
+var net_rtt_ms := -1
 var snapshot_timer := 0.0
 var fire_cooldowns: Dictionary = {}
 var heal_cooldowns: Dictionary = {}
@@ -145,22 +227,20 @@ func _process(delta: float) -> void:
     if screen_mode == "game":
         if is_host:
             input_vectors[local_player_id] = joystick_vector
-            _host_simulate(delta)
+            _host_simulate(minf(delta, 0.1))
             snapshot_timer += delta
             if snapshot_timer >= SNAPSHOT_INTERVAL:
                 snapshot_timer = fmod(snapshot_timer, SNAPSHOT_INTERVAL)
                 _broadcast_world()
         elif _is_connected_client():
-            client_snapshot_age += delta
-            _predict_local_player(delta)
-            _tick_client_effects(delta)
-            client_input_timer += delta
-            if client_input_timer >= INPUT_INTERVAL:
-                client_input_timer = fmod(client_input_timer, INPUT_INTERVAL)
-                rpc_id(1, "submit_input", joystick_vector.limit_length(1.0))
-            _interpolate_client_state(delta)
+            _client_network_tick(delta)
 
         _process_action_requests(delta)
+    elif (screen_mode == "pause" or screen_mode == "game_over") and _is_connected_client():
+        _client_update_render(delta)
+        _tick_client_effects(delta)
+    if _is_connected_client():
+        _update_net_stats(delta)
     queue_redraw()
 
 func _setup_sfx() -> void:
@@ -241,14 +321,25 @@ func _play_sfx(clip: String) -> void:
     player.stop()
     player.play()
 
-func _emit_sfx(clip: String) -> void:
+func _emit_sfx(clip: String, skip_peer: int = 0) -> void:
     _play_sfx(clip)
-    if is_host and not is_offline and multiplayer.multiplayer_peer != null:
-        rpc("receive_sfx_event", clip)
+    if not is_host or is_offline or multiplayer.multiplayer_peer == null:
+        return
+    var stamp := Time.get_ticks_msec() & 0xFFFFFFFF
+    for peer_id in multiplayer.get_peers():
+        if int(peer_id) == skip_peer:
+            continue # the shooter already played its own shot locally
+        rpc_id(int(peer_id), "receive_sfx_event", clip, stamp)
 
 @rpc("authority", "call_remote", "unreliable")
-func receive_sfx_event(clip: String) -> void:
-    _play_sfx(clip)
+func receive_sfx_event(clip: String, host_ms: int) -> void:
+    if not clock_ready:
+        _play_sfx(clip)
+        return
+    # Play on the interpolated render timeline so sound lines up with what is on screen.
+    pending_sfx.append({"clip": clip, "t": float(host_ms) / 1000.0})
+    if pending_sfx.size() > 48:
+        pending_sfx.pop_front()
 
 func _is_connected_client() -> bool:
     return multiplayer.multiplayer_peer != null and not is_host and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED
@@ -269,7 +360,8 @@ func _request_fire_once() -> void:
     if is_host:
         _host_fire(local_player_id)
     elif _is_connected_client():
-        rpc_id(1, "request_fire")
+        if _predict_local_fire():
+            rpc_id(1, "request_fire")
     else:
         ui_status = "Tap HOST to start a survival world"
 
@@ -324,19 +416,26 @@ func _process_action_requests(delta: float) -> void:
 func _host_simulate(delta: float) -> void:
     world_time += delta
 
-    # Host owns movement state: clients submit a direction, never a claimed position.
+    # Host owns movement state. The host's own survivor follows its joystick; remote survivors are
+    # moved by their sequence-numbered command stream (see submit_input), never by a claimed position.
+    var sim_now_ms := Time.get_ticks_msec()
     for id_variant in players.keys():
         var id := int(id_variant)
         var p: Dictionary = players[id]
-        var movement: Vector2 = input_vectors.get(id, Vector2.ZERO).limit_length(1.0)
         var alive := float(p.get("hp", 0.0)) > 0.0
-        if alive:
-            p["x"] = clampf(float(p.get("x", screen_size.x * 0.5)) + movement.x * PLAYER_SPEED * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
-            p["y"] = clampf(float(p.get("y", screen_size.y * 0.68)) + movement.y * PLAYER_SPEED * delta, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
-            # Side-view shooter: keep left/right facing for perfectly horizontal shots.
-            if absf(movement.x) > 0.14:
-                p["face_x"] = -1.0 if movement.x < 0.0 else 1.0
-        p["walking"] = alive and movement.length() > 0.12
+        if id == local_player_id:
+            var movement: Vector2 = input_vectors.get(id, Vector2.ZERO).limit_length(1.0)
+            if alive:
+                p["x"] = clampf(float(p.get("x", screen_size.x * 0.5)) + movement.x * PLAYER_SPEED * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
+                p["y"] = clampf(float(p.get("y", screen_size.y * 0.68)) + movement.y * PLAYER_SPEED * delta, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+                # Side-view shooter: keep left/right facing for perfectly horizontal shots.
+                if absf(movement.x) > 0.14:
+                    p["face_x"] = -1.0 if movement.x < 0.0 else 1.0
+            p["walking"] = alive and movement.length() > 0.12
+        else:
+            cmd_budget[id] = minf(COMMAND_BUDGET_MAX, float(cmd_budget.get(id, COMMAND_BUDGET_START)) + delta * COMMAND_BUDGET_RATE)
+            if not alive or sim_now_ms - int(cmd_last_ms.get(id, sim_now_ms)) > COMMAND_STALE_MS:
+                p["walking"] = false
         p["shoot_timer"] = maxf(0.0, float(p.get("shoot_timer", 0.0)) - delta)
         p["hurt_timer"] = maxf(0.0, float(p.get("hurt_timer", 0.0)) - delta)
         players[id] = p
@@ -486,7 +585,7 @@ func _host_simulate(delta: float) -> void:
             ui_status = "SQUAD ELIMINATED — restart or return to safehouse"
             _emit_sfx("game_over")
             if not is_offline and multiplayer.multiplayer_peer != null:
-                rpc("receive_game_over_snapshot", players, zombies, world_time, combat_effects, airdrops, barricades, active_grenades, wave_number, wave_spawned, wave_kills, wave_total, wave_break_timer, wave_time_remaining, wave_timed_out)
+                rpc("receive_game_over_snapshot", _encode_snapshot())
             _broadcast_world()
         return
 
@@ -569,6 +668,7 @@ func _on_connected_to_server() -> void:
     local_player_id = multiplayer.get_unique_id()
     screen_mode = "lobby"
     ui_status = "Connected — receiving world state..."
+    _tune_enet_peer(1)
 
 func _on_connection_failed() -> void:
     _reset_network_state()
@@ -588,7 +688,11 @@ func _on_peer_connected(id: int) -> void:
         return
     players[id] = _make_player(id)
     input_vectors[id] = Vector2.ZERO
-    rpc_id(id, "receive_initial_world", players, zombies, world_seed, world_time, combat_effects, airdrops, barricades, active_grenades, wave_number, wave_spawned, wave_kills, wave_total, wave_spawn_timer, wave_break_timer, wave_time_remaining, wave_timed_out, game_over)
+    cmd_last_seq[id] = 0
+    cmd_budget[id] = COMMAND_BUDGET_START
+    cmd_last_ms.erase(id)
+    _tune_enet_peer(id)
+    rpc_id(id, "receive_initial_world", _encode_snapshot())
     if screen_mode == "game":
         rpc_id(id, "begin_game_remote")
     elif screen_mode == "game_over":
@@ -601,124 +705,379 @@ func _on_peer_disconnected(id: int) -> void:
     input_vectors.erase(id)
     fire_cooldowns.erase(id)
     heal_cooldowns.erase(id)
+    cmd_last_seq.erase(id)
+    cmd_budget.erase(id)
+    cmd_last_ms.erase(id)
     if is_host:
         _broadcast_world()
     ui_status = "Player %d disconnected · %d/%d" % [id, players.size(), MAX_PLAYERS]
 
+# ---------------------------------------------------------------------------
+# LAN networking (v0.4.8)
+#   Host -> client : compact binary snapshots, always a single datagram (<= MAX_SNAPSHOT_BYTES).
+#   Client -> host : sequence-numbered movement commands (redundantly resent) for reconciliation.
+#   Client view    : snapshot interpolation buffer, local prediction, local fire feedback.
+# ---------------------------------------------------------------------------
+
+func _qpos(value: float) -> int:
+    return clampi(roundi(value * POS_SCALE), 0, 65535)
+
+func _qcenti(value: float) -> int:
+    return clampi(roundi(value * 100.0), 0, 255)
+
+func _encode_snapshot() -> PackedByteArray:
+    var sp := StreamPeerBuffer.new()
+    var now_ms := Time.get_ticks_msec()
+    snapshot_seq += 1
+    var flags := 0
+    if game_over:
+        flags |= 1
+    if wave_timed_out:
+        flags |= 2
+    sp.put_u8(SNAP_MAGIC)
+    sp.put_u8(flags)
+    sp.put_u32(snapshot_seq & 0xFFFFFFFF)
+    sp.put_u32(now_ms & 0xFFFFFFFF)
+    sp.put_u16(clampi(roundi(screen_size.x), 1, 65535))
+    sp.put_u16(clampi(roundi(screen_size.y), 1, 65535))
+    sp.put_float(world_time)
+    sp.put_u16(clampi(wave_number, 0, 65535))
+    sp.put_u8(clampi(wave_spawned, 0, 255))
+    sp.put_u8(clampi(wave_kills, 0, 255))
+    sp.put_u8(clampi(wave_total, 0, 255))
+    sp.put_float(wave_break_timer)
+    sp.put_float(wave_time_remaining)
+
+    var pids: Array = players.keys()
+    var pcount := mini(pids.size(), MAX_PLAYERS)
+    sp.put_u8(pcount)
+    for i in range(pcount):
+        var pid := int(pids[i])
+        var p: Dictionary = players[pid]
+        var pflags := 0
+        if float(p.get("face_x", 1.0)) < 0.0:
+            pflags |= 1
+        if bool(p.get("walking", false)):
+            pflags |= 2
+        sp.put_u32(pid & 0xFFFFFFFF)
+        sp.put_u16(_qpos(float(p.get("x", 0.0))))
+        sp.put_u16(_qpos(float(p.get("y", 0.0))))
+        sp.put_u8(clampi(roundi(float(p.get("hp", 0.0)) * 2.0), 0, 255))
+        sp.put_u8(pflags)
+        sp.put_u8(clampi(int(p.get("medkits", 0)), 0, 255))
+        sp.put_u8(clampi(int(p.get("grenades", 0)), 0, 255))
+        sp.put_u8(clampi(int(p.get("wall_kits", 0)), 0, 255))
+        sp.put_u8(_qcenti(float(p.get("shoot_timer", 0.0))))
+        sp.put_u8(_qcenti(float(p.get("hurt_timer", 0.0))))
+        sp.put_u32(int(cmd_last_seq.get(pid, 0)) & 0xFFFFFFFF)
+
+    var zcount := mini(zombies.size(), MAX_ZOMBIES_PER_SNAPSHOT)
+    sp.put_u8(zcount)
+    for i in range(zcount):
+        var z: Dictionary = zombies[i]
+        var zflags := 0
+        if float(z.get("face_x", 1.0)) < 0.0:
+            zflags |= 1
+        if bool(z.get("walking", false)):
+            zflags |= 2
+        if bool(z.get("attacking", false)):
+            zflags |= 4
+        sp.put_u32(int(z.get("id", 0)) & 0xFFFFFFFF)
+        sp.put_u8(clampi(int(z.get("kind", 0)), 0, 3))
+        sp.put_u16(_qpos(float(z.get("x", 0.0))))
+        sp.put_u16(_qpos(float(z.get("y", 0.0))))
+        sp.put_u8(clampi(roundi(float(z.get("hp", 0.0)) * 20.0), 0, 255))
+        sp.put_u8(zflags)
+        sp.put_u8(_qcenti(float(z.get("attack_timer", 0.0))))
+        sp.put_u8(_qcenti(float(z.get("hit_timer", 0.0))))
+
+    var wcount := mini(barricades.size(), MAX_BARRICADES)
+    sp.put_u8(wcount)
+    for i in range(wcount):
+        var wall: Dictionary = barricades[i]
+        sp.put_u32(int(wall.get("id", 0)) & 0xFFFFFFFF)
+        sp.put_u16(_qpos(float(wall.get("x", 0.0))))
+        sp.put_u16(_qpos(float(wall.get("y", 0.0))))
+        sp.put_u8(clampi(roundi(float(wall.get("hp", 0.0))), 0, 255))
+        sp.put_u8(clampi(roundi(float(wall.get("max_hp", 125.0))), 1, 255))
+
+    var dcount := mini(airdrops.size(), MAX_AIRDROPS_PER_SNAPSHOT)
+    sp.put_u8(dcount)
+    for i in range(dcount):
+        var drop: Dictionary = airdrops[i]
+        var loot_index := maxi(0, LOOT_KINDS.find(str(drop.get("loot_kind", "grenade"))))
+        sp.put_u32(int(drop.get("id", 0)) & 0xFFFFFFFF)
+        sp.put_u16(_qpos(float(drop.get("x", 0.0))))
+        sp.put_u16(_qpos(float(drop.get("y", 0.0))))
+        sp.put_u16(_qpos(float(drop.get("start_y", 0.0))))
+        sp.put_u16(_qpos(float(drop.get("land_y", 0.0))))
+        sp.put_float(float(drop.get("elapsed", 0.0)))
+        sp.put_float(float(drop.get("fall_duration", 2.6)))
+        sp.put_float(float(drop.get("despawn_timer", 24.0)))
+        sp.put_u8(1 if bool(drop.get("landed", false)) else 0)
+        sp.put_u8(loot_index)
+        sp.put_u8(clampi(int(drop.get("quantity", 1)), 0, 255))
+
+    var gcount := mini(active_grenades.size(), MAX_GRENADES_PER_SNAPSHOT)
+    sp.put_u8(gcount)
+    for i in range(gcount):
+        var grenade: Dictionary = active_grenades[i]
+        sp.put_u32(int(grenade.get("id", 0)) & 0xFFFFFFFF)
+        sp.put_u16(_qpos(float(grenade.get("start_x", 0.0))))
+        sp.put_u16(_qpos(float(grenade.get("start_y", 0.0))))
+        sp.put_u16(_qpos(float(grenade.get("target_x", 0.0))))
+        sp.put_u16(_qpos(float(grenade.get("target_y", 0.0))))
+        sp.put_float(float(grenade.get("elapsed", 0.0)))
+        sp.put_float(float(grenade.get("travel_time", 0.46)))
+        sp.put_u8(clampi(roundi(float(grenade.get("flight_height", 72.0))), 0, 255))
+
+    # Effects are carried redundantly for EFFECT_REDUNDANCY_MS so a single lost datagram never
+    # drops a muzzle flash or explosion; the client de-duplicates them by effect id.
+    var fx_budget := maxi(0, int((MAX_SNAPSHOT_BYTES - sp.get_position() - 1) / EFFECT_RECORD_BYTES))
+    fx_budget = mini(fx_budget, MAX_EFFECTS_PER_SNAPSHOT)
+    var fx_list: Array[Dictionary] = []
+    for index in range(combat_effects.size() - 1, -1, -1):
+        if fx_list.size() >= fx_budget:
+            break
+        var effect: Dictionary = combat_effects[index]
+        if now_ms - int(effect.get("born_ms", now_ms)) <= EFFECT_REDUNDANCY_MS:
+            fx_list.append(effect)
+    sp.put_u8(fx_list.size())
+    for effect in fx_list:
+        var src_index := NO_SOURCE
+        var src_id := int(effect.get("src", 0))
+        if src_id != 0:
+            var found := pids.find(src_id)
+            if found >= 0 and found < pcount:
+                src_index = found
+        sp.put_u16(int(effect.get("eid", 0)) & 0xFFFF)
+        sp.put_u8(clampi(int(effect.get("kind", 0)), 0, 255))
+        sp.put_u16(_qpos(float(effect.get("x", 0.0))))
+        sp.put_u16(_qpos(float(effect.get("y", 0.0))))
+        sp.put_u16(_qpos(float(effect.get("x2", 0.0))))
+        sp.put_u16(_qpos(float(effect.get("y2", 0.0))))
+        sp.put_u8(_qcenti(float(effect.get("ttl", 0.0))))
+        sp.put_u8(_qcenti(float(effect.get("life", 0.0))))
+        sp.put_u8(src_index)
+        sp.put_u16(clampi(now_ms - int(effect.get("born_ms", now_ms)), 0, 65535))
+    return sp.data_array
+
+func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
+    if buf.size() < SNAPSHOT_HEADER_BYTES:
+        return {}
+    var sp := StreamPeerBuffer.new()
+    sp.data_array = buf
+    if sp.get_u8() != SNAP_MAGIC:
+        return {}
+    var snap: Dictionary = {}
+    var flags := sp.get_u8()
+    snap["game_over"] = (flags & 1) != 0
+    snap["timed_out"] = (flags & 2) != 0
+    snap["seq"] = sp.get_u32()
+    var host_ms := sp.get_u32()
+    snap["host_ms"] = host_ms
+    snap["t"] = float(host_ms) / 1000.0
+    snap["w"] = float(sp.get_u16())
+    snap["h"] = float(sp.get_u16())
+    snap["world_time"] = sp.get_float()
+    snap["wave"] = sp.get_u16()
+    snap["spawned"] = sp.get_u8()
+    snap["kills"] = sp.get_u8()
+    snap["total"] = sp.get_u8()
+    snap["break_t"] = sp.get_float()
+    snap["wave_left"] = sp.get_float()
+
+    var pcount := sp.get_u8()
+    if sp.get_available_bytes() < pcount * PLAYER_RECORD_BYTES + 1:
+        return {}
+    var pids: Array[int] = []
+    var pmap: Dictionary = {}
+    for i in range(pcount):
+        var pid := sp.get_u32()
+        var px := float(sp.get_u16()) / POS_SCALE
+        var py := float(sp.get_u16()) / POS_SCALE
+        var php := float(sp.get_u8()) * 0.5
+        var pflags := sp.get_u8()
+        var pmed := sp.get_u8()
+        var pgren := sp.get_u8()
+        var pwall := sp.get_u8()
+        var pshoot := float(sp.get_u8()) * 0.01
+        var phurt := float(sp.get_u8()) * 0.01
+        var pack := sp.get_u32()
+        pids.append(pid)
+        pmap[pid] = {"x": px, "y": py, "hp": php, "fl": pflags, "med": pmed, "gren": pgren, "wall": pwall, "shoot": pshoot, "hurt": phurt, "ack": pack}
+    snap["pids"] = pids
+    snap["players"] = pmap
+
+    var zcount := sp.get_u8()
+    if sp.get_available_bytes() < zcount * ZOMBIE_RECORD_BYTES + 1:
+        return {}
+    var zids: Array[int] = []
+    var zmap: Dictionary = {}
+    for i in range(zcount):
+        var zid := sp.get_u32()
+        var zkind := sp.get_u8()
+        var zx := float(sp.get_u16()) / POS_SCALE
+        var zy := float(sp.get_u16()) / POS_SCALE
+        var zhp := float(sp.get_u8()) / 20.0
+        var zflags := sp.get_u8()
+        var zattack := float(sp.get_u8()) * 0.01
+        var zhit := float(sp.get_u8()) * 0.01
+        zids.append(zid)
+        zmap[zid] = {"x": zx, "y": zy, "kind": zkind, "hp": zhp, "fl": zflags, "atk": zattack, "hit": zhit}
+    snap["zids"] = zids
+    snap["zombies"] = zmap
+
+    var wcount := sp.get_u8()
+    if sp.get_available_bytes() < wcount * WALL_RECORD_BYTES + 1:
+        return {}
+    var walls: Array[Dictionary] = []
+    for i in range(wcount):
+        var wid := sp.get_u32()
+        var wx := float(sp.get_u16()) / POS_SCALE
+        var wy := float(sp.get_u16()) / POS_SCALE
+        var whp := float(sp.get_u8())
+        var wmax := float(sp.get_u8())
+        walls.append({"id": wid, "x": wx, "y": wy, "hp": whp, "max_hp": wmax})
+    snap["walls"] = walls
+
+    var dcount := sp.get_u8()
+    if sp.get_available_bytes() < dcount * DROP_RECORD_BYTES + 1:
+        return {}
+    var drops: Array[Dictionary] = []
+    for i in range(dcount):
+        var did := sp.get_u32()
+        var dx := float(sp.get_u16()) / POS_SCALE
+        var dy := float(sp.get_u16()) / POS_SCALE
+        var dstart := float(sp.get_u16()) / POS_SCALE
+        var dland := float(sp.get_u16()) / POS_SCALE
+        var delapsed := sp.get_float()
+        var dfall := sp.get_float()
+        var ddespawn := sp.get_float()
+        var dlanded := sp.get_u8() != 0
+        var dloot := sp.get_u8()
+        var dqty := sp.get_u8()
+        drops.append({"id": did, "x": dx, "y": dy, "start_y": dstart, "land_y": dland, "elapsed": delapsed, "fall_duration": dfall, "despawn_timer": ddespawn, "landed": dlanded, "loot_kind": str(LOOT_KINDS[clampi(dloot, 0, LOOT_KINDS.size() - 1)]), "quantity": dqty})
+    snap["drops"] = drops
+
+    var gcount := sp.get_u8()
+    if sp.get_available_bytes() < gcount * NADE_RECORD_BYTES + 1:
+        return {}
+    var nades: Array[Dictionary] = []
+    for i in range(gcount):
+        var gid := sp.get_u32()
+        var gsx := float(sp.get_u16()) / POS_SCALE
+        var gsy := float(sp.get_u16()) / POS_SCALE
+        var gtx := float(sp.get_u16()) / POS_SCALE
+        var gty := float(sp.get_u16()) / POS_SCALE
+        var gelapsed := sp.get_float()
+        var gtravel := sp.get_float()
+        var gheight := float(sp.get_u8())
+        nades.append({"id": gid, "start_x": gsx, "start_y": gsy, "target_x": gtx, "target_y": gty, "elapsed": gelapsed, "travel_time": gtravel, "flight_height": gheight})
+    snap["nades"] = nades
+
+    var fcount := sp.get_u8()
+    if sp.get_available_bytes() < fcount * EFFECT_RECORD_BYTES:
+        return {}
+    var effects: Array[Dictionary] = []
+    for i in range(fcount):
+        var eid := sp.get_u16()
+        var ekind := sp.get_u8()
+        var ex := float(sp.get_u16()) / POS_SCALE
+        var ey := float(sp.get_u16()) / POS_SCALE
+        var ex2 := float(sp.get_u16()) / POS_SCALE
+        var ey2 := float(sp.get_u16()) / POS_SCALE
+        var ettl := float(sp.get_u8()) * 0.01
+        var elife := float(sp.get_u8()) * 0.01
+        var esrc := sp.get_u8()
+        var eage := float(sp.get_u16()) * 0.001
+        var src_id := 0
+        if esrc != NO_SOURCE and esrc < pids.size():
+            src_id = pids[esrc]
+        effects.append({"eid": eid, "kind": ekind, "x": ex, "y": ey, "x2": ex2, "y2": ey2, "ttl": ettl, "life": elife, "src": src_id, "age": eage})
+    snap["fx"] = effects
+    return snap
+
+# --- host: remote movement commands ----------------------------------------
+
+func _clamp_to_lane(pos: Vector2, world_w: float, world_h: float) -> Vector2:
+    return Vector2(
+        clampf(pos.x, 30.0, maxf(31.0, world_w - 30.0)),
+        clampf(pos.y, world_h * ARENA_TOP_RATIO + ARENA_TOP_CLEARANCE, world_h * ARENA_BOTTOM_RATIO - ARENA_BOTTOM_CLEARANCE)
+    )
+
+func _command_vector(qx: int, qy: int) -> Vector2:
+    return (Vector2(float(qx), float(qy)) / 127.0).limit_length(1.0)
+
 @rpc("any_peer", "call_remote", "unreliable_ordered")
-func submit_input(movement: Vector2) -> void:
-    if not is_host:
+func submit_input(packed: PackedByteArray) -> void:
+    if not is_host or packed.size() < 1:
         return
     var sender_id := multiplayer.get_remote_sender_id()
     if not players.has(sender_id):
         return
-    # Clamp input vector on the host so client cannot request speed boosts.
-    input_vectors[sender_id] = movement.limit_length(1.0)
+    var sp := StreamPeerBuffer.new()
+    sp.data_array = packed
+    var count := mini(sp.get_u8(), COMMAND_MAX_PER_PACKET)
+    if sp.get_available_bytes() < count * COMMAND_BYTES:
+        return
+    var last_seq := int(cmd_last_seq.get(sender_id, 0))
+    var budget := float(cmd_budget.get(sender_id, COMMAND_BUDGET_START))
+    var p: Dictionary = players[sender_id]
+    var alive := float(p.get("hp", 0.0)) > 0.0
+    var applied := false
+    for i in range(count):
+        var seq := sp.get_u32()
+        var qx := sp.get_8()
+        var qy := sp.get_8()
+        var dt := float(sp.get_u16()) * COMMAND_DT_UNIT
+        if seq <= last_seq:
+            continue
+        last_seq = seq
+        applied = true
+        # Time budget: a client may only spend as much movement time as real time has passed,
+        # so inflated dt values can never become a speed hack.
+        var use := minf(minf(dt, COMMAND_MAX_DT), budget)
+        budget -= use
+        if not alive:
+            continue
+        var move := _command_vector(qx, qy)
+        if use > 0.0:
+            var next_pos := _clamp_to_lane(Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68))) + move * PLAYER_SPEED * use, screen_size.x, screen_size.y)
+            p["x"] = next_pos.x
+            p["y"] = next_pos.y
+        if absf(move.x) > 0.14:
+            p["face_x"] = -1.0 if move.x < 0.0 else 1.0
+        p["walking"] = move.length() > 0.12
+    if applied:
+        cmd_last_seq[sender_id] = last_seq
+        cmd_budget[sender_id] = maxf(0.0, budget)
+        cmd_last_ms[sender_id] = Time.get_ticks_msec()
+        players[sender_id] = p
+
+# --- client: receive and ingest ---------------------------------------------
 
 @rpc("authority", "call_remote", "unreliable_ordered")
-func receive_world(world_players: Dictionary, world_zombies: Array, time_value: float, incoming_effects: Array, incoming_airdrops: Array, incoming_barricades: Array, incoming_grenades: Array, incoming_wave: int, incoming_spawned: int, incoming_kills: int, incoming_total: int, incoming_break_timer: float, incoming_wave_time_remaining: float, incoming_wave_timed_out: bool, incoming_game_over: bool) -> void:
-    var was_game_over := game_over
-    client_snapshot_age = 0.0
-    target_players = world_players.duplicate(true)
-    _apply_zombie_snapshot(world_zombies, false)
-    combat_effects.clear()
-    for effect in incoming_effects:
-        combat_effects.append(effect.duplicate(true))
-    airdrops.clear()
-    for drop in incoming_airdrops:
-        airdrops.append(drop.duplicate(true))
-    barricades.clear()
-    for wall in incoming_barricades:
-        barricades.append(wall.duplicate(true))
-    active_grenades.clear()
-    for grenade in incoming_grenades:
-        active_grenades.append(grenade.duplicate(true))
-    world_time = time_value
-    wave_number = maxi(1, incoming_wave)
-    wave_spawned = maxi(0, incoming_spawned)
-    wave_kills = maxi(0, incoming_kills)
-    wave_total = maxi(1, incoming_total)
-    wave_break_timer = maxf(0.0, incoming_break_timer)
-    wave_time_remaining = maxf(0.0, incoming_wave_time_remaining)
-    wave_timed_out = incoming_wave_timed_out
-    game_over = incoming_game_over
-    if game_over:
-        screen_mode = "game_over"
-        fire_held = false
-        fire_requested = false
-        joystick_vector = Vector2.ZERO
-    elif was_game_over and screen_mode == "game_over":
-        screen_mode = "game"
-    for id_variant in target_players.keys():
-        var id := int(id_variant)
-        if not players.has(id):
-            players[id] = target_players[id].duplicate(true)
+func receive_world(buf: PackedByteArray) -> void:
+    _ingest_snapshot(buf, 0)
 
 @rpc("authority", "call_remote", "reliable")
-func receive_initial_world(world_players: Dictionary, world_zombies: Array, seed_value: int, time_value: float, incoming_effects: Array, incoming_airdrops: Array, incoming_barricades: Array, incoming_grenades: Array, incoming_wave: int, incoming_spawned: int, incoming_kills: int, incoming_total: int, incoming_spawn_timer: float, incoming_break_timer: float, incoming_wave_time_remaining: float, incoming_wave_timed_out: bool, incoming_game_over: bool) -> void:
-    players = world_players.duplicate(true)
-    target_players = world_players.duplicate(true)
-    client_snapshot_age = 0.0
-    _apply_zombie_snapshot(world_zombies, true)
-    combat_effects.clear()
-    for effect in incoming_effects:
-        combat_effects.append(effect.duplicate(true))
-    airdrops.clear()
-    for drop in incoming_airdrops:
-        airdrops.append(drop.duplicate(true))
-    barricades.clear()
-    for wall in incoming_barricades:
-        barricades.append(wall.duplicate(true))
-    active_grenades.clear()
-    for grenade in incoming_grenades:
-        active_grenades.append(grenade.duplicate(true))
-    world_seed = seed_value
-    world_time = time_value
-    wave_number = maxi(1, incoming_wave)
-    wave_spawned = maxi(0, incoming_spawned)
-    wave_kills = maxi(0, incoming_kills)
-    wave_total = maxi(1, incoming_total)
-    wave_spawn_timer = maxf(0.0, incoming_spawn_timer)
-    wave_break_timer = maxf(0.0, incoming_break_timer)
-    wave_time_remaining = maxf(0.0, incoming_wave_time_remaining)
-    wave_timed_out = incoming_wave_timed_out
-    game_over = incoming_game_over
+func receive_initial_world(buf: PackedByteArray) -> void:
+    _ingest_snapshot(buf, 1)
+    ui_status = "Connected — survive together!"
     if game_over:
         screen_mode = "game_over"
-    ui_status = "Connected — survive together!"
 
 @rpc("authority", "call_remote", "reliable")
 func begin_game_remote() -> void:
     game_over = false
     screen_mode = "game"
     ui_status = "Survive together!"
+    _reset_client_interpolation()
 
 @rpc("authority", "call_remote", "reliable")
-func receive_game_over_snapshot(world_players: Dictionary, world_zombies: Array, time_value: float, incoming_effects: Array, incoming_airdrops: Array, incoming_barricades: Array, incoming_grenades: Array, incoming_wave: int, incoming_spawned: int, incoming_kills: int, incoming_total: int, incoming_break_timer: float, incoming_wave_time_remaining: float, incoming_wave_timed_out: bool) -> void:
-    players = world_players.duplicate(true)
-    target_players = world_players.duplicate(true)
-    client_snapshot_age = 0.0
-    _apply_zombie_snapshot(world_zombies, true)
-    combat_effects.clear()
-    for effect in incoming_effects:
-        combat_effects.append(effect.duplicate(true))
-    airdrops.clear()
-    for drop in incoming_airdrops:
-        airdrops.append(drop.duplicate(true))
-    barricades.clear()
-    for wall in incoming_barricades:
-        barricades.append(wall.duplicate(true))
-    active_grenades.clear()
-    for grenade in incoming_grenades:
-        active_grenades.append(grenade.duplicate(true))
-    world_time = time_value
-    wave_number = maxi(1, incoming_wave)
-    wave_spawned = maxi(0, incoming_spawned)
-    wave_kills = maxi(0, incoming_kills)
-    wave_total = maxi(1, incoming_total)
-    wave_break_timer = maxf(0.0, incoming_break_timer)
-    wave_time_remaining = maxf(0.0, incoming_wave_time_remaining)
-    wave_timed_out = incoming_wave_timed_out
+func receive_game_over_snapshot(buf: PackedByteArray) -> void:
+    _ingest_snapshot(buf, 2)
     game_over = true
     screen_mode = "game_over"
     fire_held = false
@@ -728,6 +1087,455 @@ func receive_game_over_snapshot(world_players: Dictionary, world_zombies: Array,
     joystick_active = false
     joystick_vector = Vector2.ZERO
     ui_status = "SQUAD ELIMINATED"
+
+func _reset_client_interpolation() -> void:
+    snap_buffer.clear()
+    pending_effects.clear()
+    pending_sfx.clear()
+    seen_effects.clear()
+    zombie_cache.clear()
+    clock_ready = false
+    last_snapshot_seq = -1
+    pred_ready = false
+    pred_unacked.clear()
+    pred_corr = Vector2.ZERO
+    cmd_open_dt = 0.0
+    local_shoot_timer = 0.0
+
+func _ingest_snapshot(buf: PackedByteArray, mode: int) -> void:
+    # mode 0: periodic (unreliable) · 1: initial world (reliable) · 2: game over (reliable)
+    if is_host:
+        return
+    var snap := _decode_snapshot(buf)
+    if snap.is_empty():
+        stat_bad += 1
+        return
+    var now_ms := Time.get_ticks_msec()
+    var seq := int(snap["seq"])
+    if mode == 1:
+        _reset_client_interpolation()
+    elif mode == 0 and seq <= last_snapshot_seq:
+        return
+    if mode != 2:
+        if last_snapshot_seq >= 0 and seq > last_snapshot_seq + 1 and seq - last_snapshot_seq < 1000 and mode == 0:
+            stat_lost += seq - last_snapshot_seq - 1
+        last_snapshot_seq = seq
+        # Clock alignment: the minimum observed (receive - host) offset is the best-case path;
+        # anything above it counts as jitter and widens the interpolation delay.
+        var sample := float(now_ms) - float(int(snap["host_ms"]))
+        if not clock_ready or mode == 1:
+            clock_offset_ms = sample
+            clock_ready = true
+            jitter_ms = 0.0
+        else:
+            var deviation := sample - clock_offset_ms
+            if deviation < 0.0:
+                clock_offset_ms = sample
+                deviation = 0.0
+            else:
+                clock_offset_ms += deviation * CLOCK_DRIFT_RATE
+            jitter_ms += (deviation - jitter_ms) * JITTER_SMOOTHING
+        snap["recv"] = now_ms
+        snap_buffer.append(snap)
+        while snap_buffer.size() > SNAPSHOT_BUFFER_MAX:
+            snap_buffer.pop_front()
+    stat_snaps += 1
+    stat_bytes += buf.size()
+
+    var was_game_over := game_over
+    host_world_w = maxf(1.0, float(snap["w"]))
+    host_world_h = maxf(1.0, float(snap["h"]))
+    world_time = float(snap["world_time"])
+    wave_number = maxi(1, int(snap["wave"]))
+    wave_spawned = maxi(0, int(snap["spawned"]))
+    wave_kills = maxi(0, int(snap["kills"]))
+    wave_total = maxi(1, int(snap["total"]))
+    wave_break_timer = maxf(0.0, float(snap["break_t"]))
+    wave_time_remaining = maxf(0.0, float(snap["wave_left"]))
+    wave_timed_out = bool(snap["timed_out"])
+    game_over = bool(snap["game_over"])
+    if mode == 0:
+        if game_over:
+            screen_mode = "game_over"
+            fire_held = false
+            fire_requested = false
+            joystick_vector = Vector2.ZERO
+        elif was_game_over and screen_mode == "game_over":
+            screen_mode = "game"
+
+    var snap_players: Dictionary = snap["players"]
+    if snap_players.has(local_player_id):
+        var mine: Dictionary = snap_players[local_player_id]
+        local_hp = float(mine["hp"])
+        if mode != 2:
+            _reconcile_local(mine)
+
+    # Effects: schedule on the host timeline so they line up with interpolated entities.
+    var host_t := float(snap["t"])
+    for effect in snap["fx"]:
+        var eid := int(effect["eid"])
+        if seen_effects.has(eid):
+            continue
+        seen_effects[eid] = now_ms
+        var kind := int(effect["kind"])
+        if (kind == 0 or kind == 1) and int(effect["src"]) == local_player_id:
+            continue # predicted locally the instant the player pressed FIRE
+        var scheduled: Dictionary = effect.duplicate()
+        scheduled["start"] = host_t - float(effect["age"])
+        pending_effects.append(scheduled)
+    if pending_effects.size() > 96:
+        pending_effects = pending_effects.slice(pending_effects.size() - 96)
+    if screen_mode != "game":
+        _client_update_render(0.0)
+
+# --- client: prediction + reconciliation ------------------------------------
+
+func _local_alive() -> bool:
+    return local_hp > 0.0
+
+func _step_command(pos: Vector2, qx: int, qy: int, dt: float) -> Vector2:
+    if dt <= 0.0 or not _local_alive():
+        return pos
+    return _clamp_to_lane(pos + _command_vector(qx, qy) * PLAYER_SPEED * dt, host_world_w, host_world_h)
+
+func _predict_local_player(delta: float) -> void:
+    if not pred_ready or game_over or screen_mode != "game":
+        return
+    var qx := clampi(roundi(joystick_vector.x * 127.0), -127, 127)
+    var qy := clampi(roundi(joystick_vector.y * 127.0), -127, 127)
+    if not _local_alive():
+        qx = 0
+        qy = 0
+    var move := _command_vector(qx, qy)
+    if qx != 0 or qy != 0:
+        pred_pos = _clamp_to_lane(pred_pos + move * PLAYER_SPEED * delta, host_world_w, host_world_h)
+    if absf(move.x) > 0.14:
+        local_face = -1.0 if move.x < 0.0 else 1.0
+    local_walking = move.length() > 0.12
+    if qx != cmd_open_qx or qy != cmd_open_qy or cmd_open_dt >= COMMAND_MAX_DT:
+        _close_open_command()
+        cmd_open_qx = qx
+        cmd_open_qy = qy
+    cmd_open_dt += delta
+    # Bleed any host correction in smoothly instead of teleporting the character.
+    if pred_corr != Vector2.ZERO:
+        var step := pred_corr * minf(1.0, delta * PRED_CORRECTION_RATE)
+        pred_pos += step
+        pred_corr -= step
+        if pred_corr.length() < 0.05:
+            pred_corr = Vector2.ZERO
+    local_shoot_timer = maxf(0.0, local_shoot_timer - delta)
+
+func _close_open_command() -> void:
+    var dtq := clampi(roundi(cmd_open_dt / COMMAND_DT_UNIT), 0, 65535)
+    if dtq > 0:
+        cmd_seq += 1
+        pred_unacked.append({"seq": cmd_seq, "qx": cmd_open_qx, "qy": cmd_open_qy, "dtq": dtq})
+        while pred_unacked.size() > COMMAND_HISTORY_MAX:
+            pred_unacked.pop_front()
+    cmd_open_dt = 0.0
+
+func _send_input_commands() -> void:
+    _close_open_command()
+    var start := maxi(0, pred_unacked.size() - COMMAND_MAX_PER_PACKET)
+    var sp := StreamPeerBuffer.new()
+    sp.put_u8(pred_unacked.size() - start)
+    for i in range(start, pred_unacked.size()):
+        var command: Dictionary = pred_unacked[i]
+        sp.put_u32(int(command["seq"]) & 0xFFFFFFFF)
+        sp.put_8(int(command["qx"]))
+        sp.put_8(int(command["qy"]))
+        sp.put_u16(int(command["dtq"]))
+    rpc_id(1, "submit_input", sp.data_array)
+
+func _reconcile_local(rec: Dictionary) -> void:
+    var host_pos := Vector2(float(rec["x"]), float(rec["y"]))
+    var ack := int(rec["ack"])
+    while not pred_unacked.is_empty() and int(pred_unacked[0]["seq"]) <= ack:
+        pred_unacked.pop_front()
+    if not pred_ready:
+        pred_pos = host_pos
+        pred_corr = Vector2.ZERO
+        pred_ready = true
+        return
+    # Authoritative position + every command the host has not acknowledged yet.
+    var replay := host_pos
+    for command in pred_unacked:
+        replay = _step_command(replay, int(command["qx"]), int(command["qy"]), float(int(command["dtq"])) * COMMAND_DT_UNIT)
+    replay = _step_command(replay, cmd_open_qx, cmd_open_qy, cmd_open_dt)
+    var error := replay - pred_pos
+    pred_error_px = error.length()
+    if pred_error_px > PRED_SNAP_DISTANCE:
+        pred_pos = replay
+        pred_corr = Vector2.ZERO
+    elif pred_error_px < PRED_DEADZONE:
+        pred_corr = Vector2.ZERO
+    else:
+        pred_corr = error
+
+# --- client: local fire feedback --------------------------------------------
+
+func _push_local_effect(kind: int, start_pos: Vector2, end_pos: Vector2, lifetime: float) -> void:
+    combat_effects.append({"kind": kind, "x": start_pos.x, "y": start_pos.y, "x2": end_pos.x, "y2": end_pos.y, "ttl": lifetime, "life": lifetime})
+    if combat_effects.size() > 48:
+        combat_effects.pop_front()
+
+func _predict_local_fire() -> bool:
+    var now := Time.get_ticks_msec()
+    if now - local_fire_ms < FIRE_COOLDOWN_MS or not players.has(local_player_id):
+        return false
+    var p: Dictionary = players[local_player_id]
+    if float(p.get("hp", 0.0)) <= 0.0:
+        return false
+    local_fire_ms = now
+    local_shoot_timer = 0.19
+    _play_sfx("shot")
+    var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+    var facing := Vector2.LEFT if local_face < 0.0 else Vector2.RIGHT
+    var muzzle := player_pos + facing * 24.0 + Vector2(0.0, -5.0)
+    var closest_projection := minf(SHOT_RANGE_MAX, screen_size.x * 0.78)
+    for zombie in zombies:
+        var offset := Vector2(float(zombie.get("x", 0.0)), float(zombie.get("y", 0.0))) - player_pos
+        var projection := offset.dot(facing)
+        if projection > 16.0 and projection <= closest_projection and absf(offset.y) <= SHOT_LANE_TOLERANCE:
+            closest_projection = projection
+    var tracer_end := player_pos + facing * closest_projection + Vector2(0.0, -5.0)
+    _push_local_effect(0, muzzle, muzzle, 0.15)
+    _push_local_effect(1, muzzle, tracer_end, 0.16)
+    return true
+
+# --- client: render-state construction --------------------------------------
+
+func _target_interp_delay() -> float:
+    return clampf(SNAPSHOT_INTERVAL * 2.0 + jitter_ms * 0.002 + 0.015, INTERP_DELAY_MIN, INTERP_DELAY_MAX)
+
+func _find_record(records: Array, record_id: int, fallback: Dictionary) -> Dictionary:
+    for record in records:
+        if int(record["id"]) == record_id:
+            return record
+    return fallback
+
+func _client_update_render(delta: float) -> void:
+    if snap_buffer.is_empty():
+        return
+    var now_ms := Time.get_ticks_msec()
+    interp_delay = move_toward(interp_delay, _target_interp_delay(), delta * INTERP_ADAPT_RATE)
+    var render_t := (float(now_ms) - clock_offset_ms) / 1000.0 - interp_delay
+    var newest: Dictionary = snap_buffer[snap_buffer.size() - 1]
+    var from_snap: Dictionary = snap_buffer[0]
+    var to_snap: Dictionary = snap_buffer[0]
+    var alpha := 0.0
+    var starved := false
+    var older_index := -1
+    for i in range(snap_buffer.size() - 1, -1, -1):
+        if float(snap_buffer[i]["t"]) <= render_t:
+            older_index = i
+            break
+    if older_index >= 0:
+        if older_index == snap_buffer.size() - 1:
+            # Snapshot starvation: extrapolate briefly from the two newest snapshots.
+            starved = true
+            to_snap = snap_buffer[older_index]
+            if older_index > 0:
+                from_snap = snap_buffer[older_index - 1]
+                var span := maxf(0.001, float(to_snap["t"]) - float(from_snap["t"]))
+                alpha = 1.0 + minf(render_t - float(to_snap["t"]), EXTRAPOLATE_MAX) / span
+            else:
+                from_snap = to_snap
+        else:
+            from_snap = snap_buffer[older_index]
+            to_snap = snap_buffer[older_index + 1]
+            alpha = clampf((render_t - float(from_snap["t"])) / maxf(0.001, float(to_snap["t"]) - float(from_snap["t"])), 0.0, 1.0)
+    render_starved = starved
+    render_time = render_t
+    var sx := screen_size.x / host_world_w
+    var sy := screen_size.y / host_world_h
+
+    # Survivors
+    var to_players: Dictionary = to_snap["players"]
+    var from_players: Dictionary = from_snap["players"]
+    var newest_players: Dictionary = newest["players"]
+    for id_variant in to_players.keys():
+        var id := int(id_variant)
+        var rec: Dictionary = to_players[id]
+        var older: Dictionary = from_players.get(id, rec)
+        var pos := Vector2(lerpf(float(older["x"]), float(rec["x"]), alpha), lerpf(float(older["y"]), float(rec["y"]), alpha))
+        if Vector2(float(older["x"]), float(older["y"])).distance_to(Vector2(float(rec["x"]), float(rec["y"]))) > TELEPORT_DISTANCE:
+            pos = Vector2(float(rec["x"]), float(rec["y"]))
+        var stats: Dictionary = rec
+        var shown: Dictionary = players.get(id, {})
+        var face_left := (int(rec["fl"]) & 1) != 0
+        var walking := (int(rec["fl"]) & 2) != 0
+        var shoot_timer := float(rec["shoot"])
+        if id == local_player_id:
+            if newest_players.has(id):
+                stats = newest_players[id]
+            if pred_ready:
+                pos = pred_pos
+            face_left = local_face < 0.0
+            walking = local_walking and _local_alive()
+            shoot_timer = maxf(local_shoot_timer, float(stats["shoot"]))
+        shown["x"] = pos.x * sx
+        shown["y"] = pos.y * sy
+        shown["hp"] = float(stats["hp"])
+        shown["medkits"] = int(stats["med"])
+        shown["ammo"] = -1
+        shown["grenades"] = int(stats["gren"])
+        shown["wall_kits"] = int(stats["wall"])
+        shown["face_x"] = -1.0 if face_left else 1.0
+        shown["walking"] = walking
+        shown["shoot_timer"] = shoot_timer
+        shown["hurt_timer"] = float(stats["hurt"])
+        players[id] = shown
+    for id_variant in players.keys().duplicate():
+        if not newest_players.has(id_variant):
+            players.erase(id_variant)
+
+    # Zombies
+    var to_zombies: Dictionary = to_snap["zombies"]
+    var from_zombies: Dictionary = from_snap["zombies"]
+    zombies.clear()
+    for zid_variant in to_snap["zids"]:
+        var zid := int(zid_variant)
+        zombies.append(_build_zombie(zid, to_zombies[zid], from_zombies.get(zid, to_zombies[zid]), alpha, sx, sy))
+    if not starved and alpha < 0.5:
+        # A zombie that died inside this interval lingers until the interval is half over.
+        for zid_variant in from_snap["zids"]:
+            var gone_id := int(zid_variant)
+            if not to_zombies.has(gone_id):
+                zombies.append(_build_zombie(gone_id, from_zombies[gone_id], from_zombies[gone_id], 0.0, sx, sy))
+    if zombie_cache.size() > zombies.size() + 24:
+        var kept: Dictionary = {}
+        for zombie in zombies:
+            kept[int(zombie["id"])] = zombie
+        zombie_cache = kept
+
+    # Barricades, supply drops and grenades
+    barricades.clear()
+    for wall in to_snap["walls"]:
+        barricades.append({"id": int(wall["id"]), "x": float(wall["x"]) * sx, "y": float(wall["y"]) * sy, "hp": float(wall["hp"]), "max_hp": float(wall["max_hp"])})
+    airdrops.clear()
+    var from_drops: Array = from_snap["drops"]
+    for drop in to_snap["drops"]:
+        var older_drop: Dictionary = _find_record(from_drops, int(drop["id"]), drop)
+        var drop_elapsed := lerpf(float(older_drop["elapsed"]), float(drop["elapsed"]), alpha)
+        var landed := bool(drop["landed"])
+        var drop_y := float(drop["land_y"])
+        if not landed:
+            drop_y = lerpf(float(drop["start_y"]), float(drop["land_y"]), clampf(drop_elapsed / maxf(0.1, float(drop["fall_duration"])), 0.0, 1.0))
+        airdrops.append({"id": int(drop["id"]), "x": float(drop["x"]) * sx, "y": drop_y * sy, "start_y": float(drop["start_y"]) * sy, "land_y": float(drop["land_y"]) * sy, "elapsed": drop_elapsed, "fall_duration": float(drop["fall_duration"]), "despawn_timer": float(drop["despawn_timer"]), "landed": landed, "loot_kind": str(drop["loot_kind"]), "quantity": int(drop["quantity"])})
+    active_grenades.clear()
+    var from_nades: Array = from_snap["nades"]
+    for nade in to_snap["nades"]:
+        var older_nade: Dictionary = _find_record(from_nades, int(nade["id"]), nade)
+        var nade_elapsed := lerpf(float(older_nade["elapsed"]), float(nade["elapsed"]), alpha)
+        var travel := maxf(0.05, float(nade["travel_time"]))
+        var progress := clampf(nade_elapsed / travel, 0.0, 1.0)
+        var launch := Vector2(float(nade["start_x"]) * sx, float(nade["start_y"]) * sy)
+        var landing := Vector2(float(nade["target_x"]) * sx, float(nade["target_y"]) * sy)
+        var ground := launch.lerp(landing, progress)
+        active_grenades.append({"id": int(nade["id"]), "start_x": launch.x, "start_y": launch.y, "target_x": landing.x, "target_y": landing.y, "x": ground.x, "y": ground.y, "elapsed": nade_elapsed, "travel_time": travel, "flight_height": float(nade["flight_height"]), "fuse": 0.0})
+
+    # Scheduled effects and sounds fire when the render clock reaches their host timestamp.
+    for index in range(pending_effects.size() - 1, -1, -1):
+        var scheduled: Dictionary = pending_effects[index]
+        var start_t := float(scheduled["start"])
+        if render_t - start_t > 2.0:
+            pending_effects.remove_at(index)
+        elif render_t >= start_t:
+            pending_effects.remove_at(index)
+            var life := maxf(0.01, float(scheduled["life"]))
+            var remaining := life - (render_t - start_t)
+            if remaining > 0.0:
+                combat_effects.append({"kind": int(scheduled["kind"]), "x": float(scheduled["x"]) * sx, "y": float(scheduled["y"]) * sy, "x2": float(scheduled["x2"]) * sx, "y2": float(scheduled["y2"]) * sy, "ttl": remaining, "life": life})
+    if combat_effects.size() > 48:
+        combat_effects = combat_effects.slice(combat_effects.size() - 48)
+    for index in range(pending_sfx.size() - 1, -1, -1):
+        var cue: Dictionary = pending_sfx[index]
+        var cue_t := float(cue["t"])
+        if render_t - cue_t > 1.0:
+            pending_sfx.remove_at(index)
+        elif render_t >= cue_t:
+            pending_sfx.remove_at(index)
+            _play_sfx(str(cue["clip"]))
+
+func _build_zombie(zid: int, rec: Dictionary, older: Dictionary, alpha: float, sx: float, sy: float) -> Dictionary:
+    var pos := Vector2(lerpf(float(older["x"]), float(rec["x"]), alpha), lerpf(float(older["y"]), float(rec["y"]), alpha))
+    if Vector2(float(older["x"]), float(older["y"])).distance_to(Vector2(float(rec["x"]), float(rec["y"]))) > TELEPORT_DISTANCE:
+        pos = Vector2(float(rec["x"]), float(rec["y"]))
+    var kind := clampi(int(rec["kind"]), 0, ZOMBIE_MAX_HP.size() - 1)
+    var flags := int(rec["fl"])
+    var shown: Dictionary = zombie_cache.get(zid, {})
+    shown["id"] = zid
+    shown["kind"] = kind
+    shown["x"] = pos.x * sx
+    shown["y"] = pos.y * sy
+    shown["face_x"] = -1.0 if (flags & 1) != 0 else 1.0
+    shown["hp"] = float(rec["hp"])
+    shown["max_hp"] = float(ZOMBIE_MAX_HP[kind])
+    shown["walking"] = (flags & 2) != 0
+    shown["attacking"] = (flags & 4) != 0
+    shown["attack_timer"] = float(rec["atk"])
+    shown["hit_timer"] = float(rec["hit"])
+    zombie_cache[zid] = shown
+    return shown
+
+func _tick_client_effects(delta: float) -> void:
+    for effect_index in range(combat_effects.size() - 1, -1, -1):
+        var effect: Dictionary = combat_effects[effect_index]
+        effect["ttl"] = maxf(0.0, float(effect.get("ttl", 0.0)) - delta)
+        if float(effect["ttl"]) <= 0.0:
+            combat_effects.remove_at(effect_index)
+        else:
+            combat_effects[effect_index] = effect
+
+func _client_network_tick(delta: float) -> void:
+    _predict_local_player(delta)
+    client_input_timer += delta
+    if client_input_timer >= INPUT_INTERVAL:
+        client_input_timer = fmod(client_input_timer, INPUT_INTERVAL)
+        if pred_ready:
+            _send_input_commands()
+    _client_update_render(delta)
+    _tick_client_effects(delta)
+
+func _update_net_stats(delta: float) -> void:
+    stat_timer += delta
+    if stat_timer < 1.0:
+        return
+    var total := float(stat_snaps + stat_lost)
+    net_snaps_per_s = float(stat_snaps) / stat_timer
+    net_kbps = float(stat_bytes) / stat_timer / 1024.0
+    net_loss_pct = 100.0 * float(stat_lost) / maxf(1.0, total)
+    stat_snaps = 0
+    stat_lost = 0
+    stat_bytes = 0
+    stat_timer = 0.0
+    net_rtt_ms = -1
+    if peer != null and not is_host:
+        var remote: ENetPacketPeer = peer.get_peer(1)
+        if remote != null:
+            net_rtt_ms = int(remote.get_statistic(ENetPacketPeer.PEER_ROUND_TRIP_TIME))
+    # forget old effect ids
+    var now_ms := Time.get_ticks_msec()
+    for eid in seen_effects.keys():
+        if now_ms - int(seen_effects[eid]) > 3000:
+            seen_effects.erase(eid)
+
+func _tune_enet_peer(remote_id: int) -> void:
+    # Keep ENet from silently dropping unreliable snapshots when Wi-Fi RTT spikes.
+    if peer == null:
+        return
+    var remote: ENetPacketPeer = peer.get_peer(remote_id)
+    if remote != null:
+        remote.throttle_configure(ENET_THROTTLE_INTERVAL_MS, ENET_THROTTLE_ACCEL, ENET_THROTTLE_DECEL)
+
+func _broadcast_world() -> void:
+    if not is_host or is_offline or multiplayer.multiplayer_peer == null:
+        return
+    if multiplayer.get_peers().is_empty():
+        return
+    rpc("receive_world", _encode_snapshot())
 
 @rpc("authority", "call_remote", "reliable")
 func begin_game_over_remote() -> void:
@@ -764,9 +1572,10 @@ func _start_offline(load_saved: bool = false) -> void:
     local_player_id = 1
     players.clear()
     input_vectors.clear()
-    target_players.clear()
+    cmd_last_seq.clear()
+    cmd_budget.clear()
+    cmd_last_ms.clear()
     zombies.clear()
-    target_zombies.clear()
     airdrops.clear()
     barricades.clear()
     active_grenades.clear()
@@ -799,126 +1608,6 @@ func _start_offline(load_saved: bool = false) -> void:
     last_save_time = world_time
     snapshot_timer = 0.0
 
-func _predict_local_player(delta: float) -> void:
-    if game_over or screen_mode != "game" or not players.has(local_player_id):
-        return
-    var p: Dictionary = players[local_player_id]
-    if float(p.get("hp", 0.0)) <= 0.0:
-        p["walking"] = false
-        players[local_player_id] = p
-        return
-    var movement: Vector2 = joystick_vector.limit_length(1.0)
-    p["x"] = clampf(float(p.get("x", screen_size.x * 0.5)) + movement.x * PLAYER_SPEED * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
-    p["y"] = clampf(float(p.get("y", screen_size.y * 0.68)) + movement.y * PLAYER_SPEED * delta, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
-    if absf(movement.x) > 0.14:
-        p["face_x"] = -1.0 if movement.x < 0.0 else 1.0
-    p["walking"] = movement.length() > 0.12
-    players[local_player_id] = p
-
-func _apply_zombie_snapshot(incoming: Array, snap_positions: bool = false) -> void:
-    target_zombies.clear()
-    for value in incoming:
-        if typeof(value) == TYPE_DICTIONARY:
-            target_zombies.append(value.duplicate(true))
-
-    if snap_positions or zombies.is_empty():
-        zombies.clear()
-        for z in target_zombies:
-            zombies.append(z.duplicate(true))
-        return
-
-    var wanted_ids: Dictionary = {}
-    for z in target_zombies:
-        wanted_ids[int(z.get("id", -1))] = true
-    for index in range(zombies.size() - 1, -1, -1):
-        if not wanted_ids.has(int(zombies[index].get("id", -1))):
-            zombies.remove_at(index)
-
-    for target_z in target_zombies:
-        var zombie_id := int(target_z.get("id", -1))
-        var found_index := -1
-        for index in range(zombies.size()):
-            if int(zombies[index].get("id", -2)) == zombie_id:
-                found_index = index
-                break
-        if found_index < 0:
-            zombies.append(target_z.duplicate(true))
-        else:
-            var current: Dictionary = zombies[found_index]
-            var current_x := float(current.get("x", target_z.get("x", 0.0)))
-            var current_y := float(current.get("y", target_z.get("y", 0.0)))
-            var merged: Dictionary = target_z.duplicate(true)
-            merged["x"] = current_x
-            merged["y"] = current_y
-            zombies[found_index] = merged
-
-func _interpolate_client_state(delta: float) -> void:
-    var remote_weight: float = minf(1.0, delta * 15.0)
-    var zombie_weight: float = minf(1.0, delta * 18.0)
-    for id_variant in target_players.keys():
-        var id := int(id_variant)
-        var target: Dictionary = target_players[id]
-        if not players.has(id):
-            players[id] = target.duplicate(true)
-            continue
-        var current: Dictionary = players[id]
-        var current_pos := Vector2(float(current.get("x", target.get("x", 480.0))), float(current.get("y", target.get("y", 270.0))))
-        var target_pos := Vector2(float(target.get("x", 480.0)), float(target.get("y", 270.0)))
-        if id == local_player_id:
-            # Keep local input feeling immediate; gently reconcile predicted position to host authority.
-            if current_pos.distance_to(target_pos) > 112.0:
-                current_pos = target_pos
-            else:
-                current_pos = current_pos.lerp(target_pos, minf(1.0, delta * 3.8))
-        else:
-            current_pos = current_pos.lerp(target_pos, remote_weight)
-        current["x"] = current_pos.x
-        current["y"] = current_pos.y
-        current["hp"] = target.get("hp", 100.0)
-        current["medkits"] = target.get("medkits", 2)
-        current["ammo"] = -1
-        current["grenades"] = target.get("grenades", 3)
-        current["wall_kits"] = target.get("wall_kits", 2)
-        current["face_x"] = joystick_vector.x if id == local_player_id and absf(joystick_vector.x) > 0.14 else target.get("face_x", 1.0)
-        current["walking"] = joystick_vector.length() > 0.12 if id == local_player_id else target.get("walking", false)
-        current["shoot_timer"] = target.get("shoot_timer", 0.0)
-        current["hurt_timer"] = target.get("hurt_timer", 0.0)
-        players[id] = current
-
-    for zombie_index in range(zombies.size()):
-        var current_zombie: Dictionary = zombies[zombie_index]
-        var current_id := int(current_zombie.get("id", -1))
-        for target_zombie in target_zombies:
-            if int(target_zombie.get("id", -2)) != current_id:
-                continue
-            var current_pos := Vector2(float(current_zombie.get("x", 0.0)), float(current_zombie.get("y", 0.0)))
-            var target_pos := Vector2(float(target_zombie.get("x", 0.0)), float(target_zombie.get("y", 0.0)))
-            if current_pos.distance_to(target_pos) > 100.0:
-                current_pos = target_pos
-            else:
-                current_pos = current_pos.lerp(target_pos, zombie_weight)
-            current_zombie["x"] = current_pos.x
-            current_zombie["y"] = current_pos.y
-            zombies[zombie_index] = current_zombie
-            break
-    for id_variant in players.keys().duplicate():
-        if not target_players.has(id_variant):
-            players.erase(id_variant)
-
-func _tick_client_effects(delta: float) -> void:
-    for effect_index in range(combat_effects.size() - 1, -1, -1):
-        var effect: Dictionary = combat_effects[effect_index]
-        effect["ttl"] = maxf(0.0, float(effect.get("ttl", 0.0)) - delta)
-        if float(effect["ttl"]) <= 0.0:
-            combat_effects.remove_at(effect_index)
-        else:
-            combat_effects[effect_index] = effect
-
-func _broadcast_world() -> void:
-    if not is_host or multiplayer.multiplayer_peer == null:
-        return
-    rpc("receive_world", players, zombies, world_time, combat_effects, airdrops, barricades, active_grenades, wave_number, wave_spawned, wave_kills, wave_total, wave_break_timer, wave_time_remaining, wave_timed_out, game_over)
-
 @rpc("any_peer", "call_remote", "reliable", 1)
 func request_fire() -> void:
     if not is_host:
@@ -927,8 +1616,12 @@ func request_fire() -> void:
     if players.has(sender_id):
         _host_fire(sender_id)
 
-func _add_combat_effect(kind: int, start_pos: Vector2, end_pos: Vector2, lifetime: float) -> void:
+func _add_combat_effect(kind: int, start_pos: Vector2, end_pos: Vector2, lifetime: float, src_id: int = 0) -> void:
+    effect_seq += 1
     combat_effects.append({
+        "eid": effect_seq & 0xFFFF,
+        "born_ms": Time.get_ticks_msec(),
+        "src": src_id,
         "kind": kind,
         "x": start_pos.x,
         "y": start_pos.y,
@@ -944,7 +1637,8 @@ func _host_fire(id: int) -> void:
     if game_over or not players.has(id):
         return
     var now := Time.get_ticks_msec()
-    if now - int(fire_cooldowns.get(id, 0)) < 280:
+    var cooldown_ms := FIRE_COOLDOWN_MS if id == local_player_id else FIRE_REMOTE_TOLERANCE_MS
+    if now - int(fire_cooldowns.get(id, 0)) < cooldown_ms:
         return
     var p: Dictionary = players[id]
     if float(p.get("hp", 0.0)) <= 0.0:
@@ -953,7 +1647,7 @@ func _host_fire(id: int) -> void:
     p["ammo"] = -1 # Unlimited ammunition; -1 is the canonical infinite-ammo sentinel.
     p["shoot_timer"] = 0.19
     players[id] = p
-    _emit_sfx("shot")
+    _emit_sfx("shot", id)
 
     # Straight horizontal shot: aim is fixed by the last left/right movement, never auto-aimed at a zombie.
     var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.5)))
@@ -974,8 +1668,8 @@ func _host_fire(id: int) -> void:
             closest_index = zi
 
     var tracer_end := player_pos + facing * closest_projection + Vector2(0.0, -5.0)
-    _add_combat_effect(0, muzzle, muzzle, 0.15)
-    _add_combat_effect(1, muzzle, tracer_end, 0.16)
+    _add_combat_effect(0, muzzle, muzzle, 0.15, id)
+    _add_combat_effect(1, muzzle, tracer_end, 0.16, id)
     if closest_index >= 0:
         var zombie: Dictionary = zombies[closest_index]
         var impact_pos := Vector2(float(zombie.get("x", tracer_end.x)), player_pos.y - 5.0)
@@ -1421,7 +2115,6 @@ func _restart_run() -> void:
     if not is_host:
         ui_status = "Only the host can restart this run."
         return
-    target_zombies.clear()
     zombies.clear()
     airdrops.clear()
     barricades.clear()
@@ -1532,7 +2225,6 @@ func _load_world() -> void:
     wave_timed_out = bool(parsed.get("wave_timed_out", false))
     game_over = false
     airdrop_spawn_timer = maxf(2.0, float(parsed.get("airdrop_spawn_timer", 28.0)))
-    target_zombies.clear()
     zombies.clear()
     airdrops.clear()
     barricades.clear()
@@ -1611,9 +2303,10 @@ func _start_host() -> void:
     screen_mode = "lobby"
     players.clear()
     input_vectors.clear()
-    target_players.clear()
+    cmd_last_seq.clear()
+    cmd_budget.clear()
+    cmd_last_ms.clear()
     zombies.clear()
-    target_zombies.clear()
     airdrops.clear()
     barricades.clear()
     active_grenades.clear()
@@ -1664,9 +2357,11 @@ func _join_host(ip: String) -> void:
     _cancel_targeting_modes()
     screen_mode = "lobby"
     host_ip = cleaned_ip
+    cmd_seq = 0
+    cmd_open_qx = 0
+    cmd_open_qy = 0
+    _reset_client_interpolation()
     players.clear()
-    target_players.clear()
-    target_zombies.clear()
     zombies.clear()
     combat_effects.clear()
     input_vectors.clear()
@@ -1716,14 +2411,15 @@ func _reset_network_state() -> void:
     fire_held = false
     fire_touch_id = -1
     fire_requested = false
-    target_zombies.clear()
     grenade_requested = false
     build_requested = false
     fire_repeat_timer = 0.0
     _cancel_targeting_modes()
     players.clear()
     input_vectors.clear()
-    target_players.clear()
+    cmd_last_seq.clear()
+    cmd_budget.clear()
+    cmd_last_ms.clear()
     zombies.clear()
     airdrops.clear()
     barricades.clear()
@@ -1752,6 +2448,13 @@ func _reset_network_state() -> void:
     joystick_active = false
     joystick_touch_id = -1
     local_player_id = 1
+    cmd_seq = 0
+    cmd_open_qx = 0
+    cmd_open_qy = 0
+    cmd_last_seq.clear()
+    cmd_budget.clear()
+    cmd_last_ms.clear()
+    _reset_client_interpolation()
 
 func _leave_world() -> void:
     # Leaving is not an implicit save. New games start empty; Continue Saved Run is explicit.
@@ -2041,8 +2744,6 @@ func _draw_game_world() -> void:
             pos = Vector2(float(grenade.get("x", 0.0)), float(grenade.get("y", h * 0.68)))
             var travel_time: float = maxf(0.05, float(grenade.get("travel_time", 0.46)))
             var render_elapsed: float = float(grenade.get("elapsed", 0.0))
-            if _is_connected_client():
-                render_elapsed += client_snapshot_age
             var flight_progress := clampf(render_elapsed / travel_time, 0.0, 1.0)
             var flight_height: float = float(grenade.get("flight_height", 72.0))
             var launch_pos := Vector2(float(grenade.get("start_x", pos.x)), float(grenade.get("start_y", pos.y)))
@@ -2298,6 +2999,16 @@ func _draw_game_hud() -> void:
     _draw_action_button("game_grenade", grenade_pos, 29.0 * control_scale, grenade_label, Color("#d0a14b") if grenade_aim_active else Color("#8b7850"))
     _draw_action_button("game_build", wall_pos, 29.0 * control_scale, wall_label, Color("#8bb775") if wall_place_active else Color("#69756b"))
     _draw_ui_button("game_pause", Rect2(w - 65.0, 72.0, 49.0, 41.0), "Ⅱ", "", Color("#c19a68"), false)
+    if SHOW_NET_STATS and _is_connected_client():
+        _draw_net_stats()
+
+func _draw_net_stats() -> void:
+    var rtt_text := "%d ms" % net_rtt_ms if net_rtt_ms >= 0 else "--"
+    var hold_text := "  HOLD" if render_starved else ""
+    var stats_text := "NET  RTT %s  ·  LOSS %.1f%%  ·  %.0f snap/s  ·  %.1f KB/s  ·  BUF %d ms  ·  ERR %.1f px%s" % [rtt_text, net_loss_pct, net_snaps_per_s, net_kbps, int(interp_delay * 1000.0), pred_error_px, hold_text]
+    var box := Rect2(screen_size.x * 0.5 - 215.0, screen_size.y - 20.0, 430.0, 15.0)
+    draw_rect(box, Color(0.0, 0.0, 0.0, 0.38))
+    draw_string(ui_font, Vector2(box.position.x + 6.0, box.position.y + 11.0), stats_text, HORIZONTAL_ALIGNMENT_CENTER, box.size.x - 12.0, 9, Color(0.72, 0.86, 0.74, 0.9))
 
 func _draw_pause_menu() -> void:
     var w := screen_size.x

@@ -44,3 +44,21 @@
 - Replaced the invalid `ENetMultiplayerPeer.COMPRESS_FASTLZ` reference with `ENetConnection.COMPRESS_FASTLZ`.
 - Set compression via the created peer's `host.compress(...)` for both host and client, before attaching the peer to the MultiplayerAPI.
 - Added a CI guard against the invalid API spelling; bumped Android version code/name to 20 / 0.4.7.
+
+
+## 0.4.8 — LAN client responsiveness (compact snapshots, interpolation, reconciliation)
+Root causes fixed (client felt delayed while the host felt instant):
+- **Own survivor was pulled back to stale host positions.** Prediction is now real client-side prediction with server reconciliation: the client sends sequence-numbered movement commands (redundantly resent), the host acknowledges the last applied command in each snapshot, and the client replays unacknowledged commands on top of the authoritative position. Only genuine disagreement is corrected, smoothly.
+- **World snapshot was a large Dictionary RPC (several KB, split into many fragments).** One lost fragment dropped the whole snapshot. Snapshots are now a packed binary format (positions as 1/8 px uint16, no repeated key strings) of at most 1180 bytes (typically 150–600 B), always a single datagram, sent at ~30 Hz.
+- **Remote survivors and zombies were chased with `lerp` toward the newest snapshot.** The client now keeps a timestamped snapshot buffer and renders slightly in the past (adaptive 75–300 ms from measured jitter), interpolating between two snapshots, with up to 120 ms extrapolation if snapshots starve.
+- **Shots had no local feedback.** Muzzle flash, tracer, shot sound and gun animation are predicted instantly on the shooter's device. Effects and sounds from the host are carried redundantly (loss-tolerant, de-duplicated by id) and scheduled on the render timeline so they line up with interpolated entities.
+Other changes:
+- Host rejects inflated movement time (per-player time budget), so a modified client cannot speed-hack.
+- ENet unreliable-packet throttling is disabled so Wi-Fi RTT spikes do not make ENet drop snapshots.
+- Clients with a different screen aspect ratio than the host now see the host world scaled consistently (host world size is sent in every snapshot).
+- Pausing no longer leaves a remote survivor walking on the host (movement is time-bounded commands, not a sticky vector).
+- Remote fire cooldown tolerance (220 ms vs 280 ms) absorbs Wi-Fi jitter so valid shots are not rejected.
+- On-screen network readout for clients (RTT, snapshot loss, snapshots/s, KB/s, interpolation buffer, prediction error); set `SHOW_NET_STATS := false` to hide it.
+- Added `tests/codec_test.gd` (CI) and `tools/net_test/` (loopback host+client test with delay/jitter/loss proxy).
+- RPC signatures changed: **all devices must install v0.4.8 together** (older builds cannot join).
+- Android version code/name: 21 / 0.4.8.
