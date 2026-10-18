@@ -62,3 +62,12 @@ Other changes:
 - Added `tests/codec_test.gd` (CI) and `tools/net_test/` (loopback host+client test with delay/jitter/loss proxy).
 - RPC signatures changed: **all devices must install v0.4.8 together** (older builds cannot join).
 - Android version code/name: 21 / 0.4.8.
+
+
+## 0.4.9 — smooth movement on both sides (host view of clients)
+- **Host saw client survivors stutter.** Remote survivors only moved when a command packet arrived, and the host drew that position directly (a staircase, uneven with Wi-Fi jitter). The host now draws them from a jitter-adaptive track built from the commands' own durations (virtual time), interpolated slightly in the past. Measured: frozen frames 50-57 % -> 2-3 %, speed variation 1.0-1.3 -> ~0.2 (clean, 15+-10 ms/2 % loss and 30+-20 ms/6 % bursty loss links).
+- Movement commands and world snapshots now run at up to 60 Hz (~11 KB/s total); client interpolation floor lowered to 50 ms, so remote survivors/zombies are drawn ~35-40 ms closer to real time.
+- Send timers tolerate half a frame and no longer alternate 33/50 ms.
+- Gameplay stays host-authoritative: zombie targeting, hits, speed-hack budget and snapshots use the exact position; only drawing is smoothed.
+- CI markers updated (60 Hz constants, host-view functions).
+- **All devices must install v0.4.9 together.** Android version code/name: 22 / 0.4.9.

@@ -9,7 +9,7 @@ def load(path):
     with open(path) as f:
         for line in f:
             p = line.strip().split(",")
-            if p[0] in ("H", "C", "Z", "Y"):
+            if p[0] in ("H", "C", "Z", "Y", "V"):
                 rows[(p[0], int(p[2]))].append((float(p[1]), float(p[3]), float(p[4])))
             elif p[0] == "I":
                 rows[("I", 0)].append((float(p[1]), float(p[2]), float(p[3])))
@@ -70,6 +70,25 @@ def analyse(folder):
     ht, hxy = series(host[("H", 1)])
     d_rem, e_rem = best_lag(rt, rxy, ht, hxy)
     res["remote_lag_ms"], res["remote_rmse_px"] = d_rem, e_rem
+    # 2b) the OTHER direction: how the HOST draws the client's survivor
+    #     truth = the client's own zero-latency integration (I); shown = host's drawn position (V)
+    vkeys = [k for k in host if k[0] == "V" and k[1] != 1]
+    if vkeys:
+        vt_, vxy = series(host[vkeys[0]])
+        d_hv, e_hv = best_lag(vt_, vxy, it, ixy)
+        res["hostview_lag_ms"], res["hostview_rmse_px"] = d_hv, e_hv
+        dtv = np.diff(vt_)
+        spv = np.hypot(np.diff(vxy[:, 0]), np.diff(vxy[:, 1])) / np.maximum(dtv, 1e-4)
+        idl = np.interp(vt_[1:], it, ixy[:, 0]) - np.interp(vt_[:-1] , it, ixy[:, 0])
+        mv = (np.abs(idl) > 0.05) & (vt_[1:] > vt_[0] + 2.0) & (vt_[1:] < it[-1]) & (dtv >= 0.008)
+        if mv.sum() > 20:
+            s2 = spv[mv]
+            res["hostview_speed_cv"] = float(np.std(s2) / max(np.mean(s2), 1e-6))
+            res["hostview_stall_pct"] = float(100.0 * np.mean(s2 < 5.0))
+            # 'hitchiness': worst frame-to-frame speed jump, in px/s, p95
+            res["hostview_jerk_p95"] = float(np.percentile(np.abs(np.diff(s2)), 95))
+            res["hostview_speed_p99"] = float(np.percentile(s2, 99))
+            res["hostview_speed_max"] = float(np.max(s2))
     # smoothness: per-frame speed variation while the remote is moving
     dt = np.diff(rt)
     sp = np.hypot(np.diff(rxy[:, 0]), np.diff(rxy[:, 1])) / np.maximum(dt, 1e-4)
@@ -77,10 +96,13 @@ def analyse(folder):
     htm_prev = np.interp(rt[:-1], ht, hxy[:, 0])
     moving = np.abs(htm - htm_prev) > 0.05
     moving &= rt[1:] > rt[0] + 2.0
+    moving &= dt >= 0.008  # ignore back-to-back log lines after a stalled frame (harness artefact)
     if moving.sum() > 20:
         s = sp[moving]
         res["remote_speed_cv"] = float(np.std(s) / max(np.mean(s), 1e-6))
         res["remote_stall_pct"] = float(100.0 * np.mean(s < 5.0))
+        res["remote_speed_p99"] = float(np.percentile(s, 99))
+        res["remote_speed_max"] = float(np.max(s))
     # 3) zombies
     per_lag = []
     sq = []

@@ -10,6 +10,8 @@ Both processes follow scripted joystick/fire input and write CSV logs; `analyze.
 | `remote_lag_ms` / `remote_rmse_px` | delay and smoothness of the other survivor as seen on the client |
 | `zombie_lag_ms` / `zombie_rmse_px` | same for zombies |
 | `remote_speed_cv` | speed variation of the remote survivor (lower = smoother) |
+| `hostview_lag_ms` / `hostview_rmse_px` | how the HOST draws the client's survivor vs the client's own ideal path (the net_test host logs `V` = drawn position) |
+| `hostview_speed_cv` / `hostview_stall_pct` / `hostview_jerk_p95` | smoothness of that drawn motion: speed variation, % of moving frames where it is frozen, 95th percentile frame-to-frame speed change |
 | `wire_KBps` | bytes per second the client receives on the wire |
 
 Example: `GODOT=./godot tools/net_test/run_loopback.sh wifi 15 10 2` (15 ms ± 10 ms, 2 % loss).

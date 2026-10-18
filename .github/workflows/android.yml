@@ -112,8 +112,8 @@ jobs:
               'const GRENADE_MIN_RANGE_RATIO := 0.065',
               'const GRENADE_MAX_RANGE_RATIO := 0.30',
               'const WALL_PLACE_RANGE_RATIO := 0.145',
-              'const SNAPSHOT_INTERVAL := 0.0332',
-              'const INPUT_INTERVAL := 0.033',
+              'const SNAPSHOT_INTERVAL := 0.0166',
+              'const INPUT_INTERVAL := 0.0166',
               'const MAX_SNAPSHOT_BYTES := 1180',
               'func _encode_snapshot() -> PackedByteArray:',
               'func _decode_snapshot(buf: PackedByteArray) -> Dictionary:',
@@ -122,6 +122,9 @@ jobs:
               'func _client_update_render(delta: float) -> void:',
               'func _predict_local_fire() -> bool:',
               'func _tune_enet_peer(remote_id: int) -> void:',
+              'func _update_host_view() -> void:',
+              'func _host_track_arrival(track: Dictionary, vt_before: float) -> void:',
+              'func _player_draw_pos(id: int, p: Dictionary) -> Vector2:',
               'peer.host.compress(ENetConnection.COMPRESS_FASTLZ)',
               'func _predict_local_player(delta: float) -> void:',
               'var wall_rect := Rect2(pos.x - 60.0, pos.y - 36.0, 120.0, 72.0)',
@@ -262,7 +265,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.8-APK
+          name: PixelZombieLAN-v0.4.9-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -271,15 +274,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.8-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.9-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.8-source.zip
+          test -s build/PixelZombieLAN-v0.4.9-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.8-source
-          path: build/PixelZombieLAN-v0.4.8-source.zip
+          name: PixelZombieLAN-v0.4.9-source
+          path: build/PixelZombieLAN-v0.4.9-source.zip
           if-no-files-found: error
           retention-days: 14

@@ -108,6 +108,14 @@ func _process(delta: float) -> bool:
         for pid in game.players.keys():
             var p: Dictionary = game.players[pid]
             out.store_line("H,%.4f,%d,%.3f,%.3f" % [now, pid, float(p.x), float(p.y)])
+            # V = what the host actually DRAWS for this survivor (smoothed view if the build has one).
+            var vx := float(p.x)
+            var vy := float(p.y)
+            var hv = game.get("host_view")
+            if hv != null and hv.has(pid):
+                vx = float(hv[pid].x)
+                vy = float(hv[pid].y)
+            out.store_line("V,%.4f,%d,%.3f,%.3f" % [now, pid, vx, vy])
         for z in game.zombies:
             out.store_line("Z,%.4f,%d,%.3f,%.3f" % [now, int(z.id), float(z.x), float(z.y)])
     else:

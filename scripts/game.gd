@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.8
+# Pixel Zombie LAN — wave defense prototype v0.4.9
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -30,8 +30,8 @@ const WALL_KIT_MAX_CARRY := 5
 const MAX_BARRICADES := 8
 const WALL_ATTACK_RANGE := 71.0
 const WALL_LANE_TOLERANCE := 34.0
-const SNAPSHOT_INTERVAL := 0.0332 # ~30 compact snapshots/second, each one a single UDP datagram.
-const INPUT_INTERVAL := 0.033     # ~30 movement-command packets/second (also keeps Wi-Fi radios awake).
+const SNAPSHOT_INTERVAL := 0.0166 # 60 compact snapshots/second at most (one UDP datagram each, ~11 KB/s total).
+const INPUT_INTERVAL := 0.0166   # 60 movement-command packets/second at most (also keeps Wi-Fi radios awake).
 const SNAP_MAGIC := 0xB7
 const POS_SCALE := 8.0            # wire positions are uint16 in 1/8 px units
 const NO_SOURCE := 255
@@ -50,7 +50,7 @@ const MAX_GRENADES_PER_SNAPSHOT := 8
 const MAX_EFFECTS_PER_SNAPSHOT := 24
 const EFFECT_REDUNDANCY_MS := 220
 const SNAPSHOT_BUFFER_MAX := 40
-const INTERP_DELAY_MIN := 0.075
+const INTERP_DELAY_MIN := 0.050
 const INTERP_DELAY_MAX := 0.30
 const INTERP_ADAPT_RATE := 0.10
 const EXTRAPOLATE_MAX := 0.12
@@ -69,6 +69,18 @@ const COMMAND_STALE_MS := 250
 const PRED_SNAP_DISTANCE := 90.0
 const PRED_DEADZONE := 0.35
 const PRED_CORRECTION_RATE := 10.0
+# Host-side smooth view of remote survivors (what the host DRAWS; gameplay keeps the exact position).
+const HOST_VIEW_DELAY_MIN := 0.030
+const HOST_VIEW_DELAY_MAX := 0.200
+const HOST_VIEW_DELAY_PAD := 0.012
+const HOST_VIEW_EXTRAPOLATE_MAX := 0.10
+const HOST_VIEW_SNAP_DISTANCE := 70.0
+const HOST_VIEW_RESYNC_S := 0.25
+const HOST_VIEW_PLL_GAIN := 2.0
+const HOST_VIEW_PLL_MAX := 0.10
+const HOST_VIEW_OFFSET_LEAK := 0.01
+const HOST_VIEW_JITTER_DECAY := 0.97
+const HOST_VIEW_SAMPLES_MAX := 90
 const FIRE_COOLDOWN_MS := 280
 const FIRE_REMOTE_TOLERANCE_MS := 220 # host accepts slightly early remote shots to absorb Wi-Fi jitter
 const ENET_THROTTLE_INTERVAL_MS := 1000
@@ -136,6 +148,8 @@ var effect_seq := 0
 var cmd_last_seq: Dictionary = {}
 var cmd_budget: Dictionary = {}
 var cmd_last_ms: Dictionary = {}
+var host_track: Dictionary = {}
+var host_view: Dictionary = {}
 var snap_buffer: Array[Dictionary] = []
 var pending_effects: Array = []
 var pending_sfx: Array = []
@@ -229,8 +243,10 @@ func _process(delta: float) -> void:
             input_vectors[local_player_id] = joystick_vector
             _host_simulate(minf(delta, 0.1))
             snapshot_timer += delta
-            if snapshot_timer >= SNAPSHOT_INTERVAL:
-                snapshot_timer = fmod(snapshot_timer, SNAPSHOT_INTERVAL)
+            if snapshot_timer >= SNAPSHOT_INTERVAL - delta * 0.5:
+                snapshot_timer -= SNAPSHOT_INTERVAL
+                if snapshot_timer > SNAPSHOT_INTERVAL or snapshot_timer < -SNAPSHOT_INTERVAL:
+                    snapshot_timer = 0.0
                 _broadcast_world()
         elif _is_connected_client():
             _client_network_tick(delta)
@@ -439,6 +455,7 @@ func _host_simulate(delta: float) -> void:
         p["shoot_timer"] = maxf(0.0, float(p.get("shoot_timer", 0.0)) - delta)
         p["hurt_timer"] = maxf(0.0, float(p.get("hurt_timer", 0.0)) - delta)
         players[id] = p
+    _update_host_view()
 
     for effect_index in range(combat_effects.size() - 1, -1, -1):
         var active_effect: Dictionary = combat_effects[effect_index]
@@ -691,6 +708,8 @@ func _on_peer_connected(id: int) -> void:
     cmd_last_seq[id] = 0
     cmd_budget[id] = COMMAND_BUDGET_START
     cmd_last_ms.erase(id)
+    host_track.erase(id)
+    host_view.erase(id)
     _tune_enet_peer(id)
     rpc_id(id, "receive_initial_world", _encode_snapshot())
     if screen_mode == "game":
@@ -708,12 +727,14 @@ func _on_peer_disconnected(id: int) -> void:
     cmd_last_seq.erase(id)
     cmd_budget.erase(id)
     cmd_last_ms.erase(id)
+    host_track.erase(id)
+    host_view.erase(id)
     if is_host:
         _broadcast_world()
     ui_status = "Player %d disconnected · %d/%d" % [id, players.size(), MAX_PLAYERS]
 
 # ---------------------------------------------------------------------------
-# LAN networking (v0.4.8)
+# LAN networking (v0.4.9)
 #   Host -> client : compact binary snapshots, always a single datagram (<= MAX_SNAPSHOT_BYTES).
 #   Client -> host : sequence-numbered movement commands (redundantly resent) for reconciliation.
 #   Client view    : snapshot interpolation buffer, local prediction, local fire feedback.
@@ -1026,6 +1047,8 @@ func submit_input(packed: PackedByteArray) -> void:
     var p: Dictionary = players[sender_id]
     var alive := float(p.get("hp", 0.0)) > 0.0
     var applied := false
+    var track: Dictionary = _host_track_get(sender_id, p)
+    var vt_before := float(track["vt"])
     for i in range(count):
         var seq := sp.get_u32()
         var qx := sp.get_8()
@@ -1039,21 +1062,128 @@ func submit_input(packed: PackedByteArray) -> void:
         # so inflated dt values can never become a speed hack.
         var use := minf(minf(dt, COMMAND_MAX_DT), budget)
         budget -= use
-        if not alive:
-            continue
         var move := _command_vector(qx, qy)
+        if alive:
+            if use > 0.0:
+                var next_pos := _clamp_to_lane(Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68))) + move * PLAYER_SPEED * use, screen_size.x, screen_size.y)
+                p["x"] = next_pos.x
+                p["y"] = next_pos.y
+            if absf(move.x) > 0.14:
+                p["face_x"] = -1.0 if move.x < 0.0 else 1.0
+            p["walking"] = move.length() > 0.12
         if use > 0.0:
-            var next_pos := _clamp_to_lane(Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68))) + move * PLAYER_SPEED * use, screen_size.x, screen_size.y)
-            p["x"] = next_pos.x
-            p["y"] = next_pos.y
-        if absf(move.x) > 0.14:
-            p["face_x"] = -1.0 if move.x < 0.0 else 1.0
-        p["walking"] = move.length() > 0.12
+            _host_track_push(track, use, p)
     if applied:
+        _host_track_arrival(track, vt_before)
         cmd_last_seq[sender_id] = last_seq
         cmd_budget[sender_id] = maxf(0.0, budget)
         cmd_last_ms[sender_id] = Time.get_ticks_msec()
         players[sender_id] = p
+
+# --- host: smooth view of remote survivors ----------------------------------
+# A remote survivor only moves when a command packet arrives (about every second frame, unevenly when
+# Wi-Fi jitters), so drawing players[id] directly looks like a staircase on the host. The host therefore
+# keeps a short track of (virtual time, position) per remote survivor. Virtual time is the running sum
+# of command durations, i.e. the client's own clock, so network jitter cancels out; the host draws the
+# track slightly in the past (jitter-adaptive). Zombies, hits and snapshots keep using the exact position.
+
+func _host_track_get(id: int, p: Dictionary) -> Dictionary:
+    if not host_track.has(id):
+        host_track[id] = {
+            "s": [Vector3(0.0, float(p.get("x", 0.0)), float(p.get("y", 0.0)))],
+            "vt": 0.0, "off": 0.0, "ready": false, "rt": 0.0, "rt_ready": false,
+            "jit": 0.0, "span": INPUT_INTERVAL, "last_s": 0.0,
+        }
+    return host_track[id]
+
+func _host_track_push(track: Dictionary, use: float, p: Dictionary) -> void:
+    track["vt"] = float(track["vt"]) + use
+    var samples: Array = track["s"]
+    samples.append(Vector3(float(track["vt"]), float(p.get("x", 0.0)), float(p.get("y", 0.0))))
+    while samples.size() > HOST_VIEW_SAMPLES_MAX:
+        samples.pop_front()
+
+func _host_track_arrival(track: Dictionary, vt_before: float) -> void:
+    var now_s := float(Time.get_ticks_usec()) / 1000000.0
+    var vt_end := float(track["vt"])
+    var off_i := now_s - vt_end
+    if not bool(track["ready"]):
+        track["off"] = off_i
+        track["ready"] = true
+    elif off_i < float(track["off"]):
+        track["off"] = off_i
+    else:
+        track["off"] = float(track["off"]) + (off_i - float(track["off"])) * HOST_VIEW_OFFSET_LEAK
+    var excess := maxf(0.0, off_i - float(track["off"]))
+    track["jit"] = maxf(excess, float(track["jit"]) * HOST_VIEW_JITTER_DECAY)
+    var span := vt_end - vt_before
+    if span > 0.0:
+        track["span"] = lerpf(float(track["span"]), clampf(span, 0.005, 0.12), 0.1)
+
+func _update_host_view() -> void:
+    var now_s := float(Time.get_ticks_usec()) / 1000000.0
+    var now_ms := Time.get_ticks_msec()
+    for id_variant in players.keys():
+        var id := int(id_variant)
+        if id == local_player_id:
+            continue
+        var p: Dictionary = players[id]
+        var auth := Vector2(float(p.get("x", 0.0)), float(p.get("y", 0.0)))
+        var alive := float(p.get("hp", 0.0)) > 0.0
+        if not host_track.has(id):
+            host_view[id] = auth
+            continue
+        var track: Dictionary = host_track[id]
+        var frame_dt := clampf(now_s - float(track["last_s"]), 0.0, 0.25)
+        track["last_s"] = now_s
+        if not alive or not bool(track["ready"]) or now_ms - int(cmd_last_ms.get(id, 0)) > COMMAND_STALE_MS:
+            host_view[id] = auth
+            track["rt_ready"] = false
+            continue
+        var delay := clampf(float(track["span"]) + float(track["jit"]) + HOST_VIEW_DELAY_PAD, HOST_VIEW_DELAY_MIN, HOST_VIEW_DELAY_MAX)
+        var target_rt := now_s - float(track["off"]) - delay
+        if not bool(track["rt_ready"]) or absf(target_rt - float(track["rt"])) > HOST_VIEW_RESYNC_S:
+            track["rt"] = target_rt
+            track["rt_ready"] = true
+        else:
+            var err := target_rt - float(track["rt"])
+            track["rt"] = float(track["rt"]) + frame_dt * (1.0 + clampf(err * HOST_VIEW_PLL_GAIN, -HOST_VIEW_PLL_MAX, HOST_VIEW_PLL_MAX))
+        var rt := float(track["rt"])
+        var samples: Array = track["s"]
+        while samples.size() > 2:
+            var second: Vector3 = samples[1]
+            if second.x > rt:
+                break
+            samples.pop_front()
+        var count := samples.size()
+        var last: Vector3 = samples[count - 1]
+        var view := Vector2(last.y, last.z)
+        if count >= 2 and rt < last.x:
+            var a: Vector3 = samples[0]
+            var b: Vector3 = samples[1]
+            var seg := b.x - a.x
+            if rt <= a.x or seg <= 0.00001:
+                view = Vector2(a.y, a.z)
+            else:
+                var f := clampf((rt - a.x) / seg, 0.0, 1.0)
+                view = Vector2(lerpf(a.y, b.y, f), lerpf(a.z, b.z, f))
+        elif count >= 2:
+            # Track ran dry (loss burst): coast on the last segment's velocity, then hold.
+            var prev: Vector3 = samples[count - 2]
+            var last_seg := last.x - prev.x
+            if last_seg > 0.0005:
+                var ahead := minf(rt - last.x, HOST_VIEW_EXTRAPOLATE_MAX)
+                view += Vector2(last.y - prev.y, last.z - prev.z) / last_seg * ahead
+        if view.distance_to(auth) > HOST_VIEW_SNAP_DISTANCE:
+            view = auth
+            track["s"] = [Vector3(float(track["vt"]), auth.x, auth.y)]
+            track["rt_ready"] = false
+        host_view[id] = view
+
+func _player_draw_pos(id: int, p: Dictionary) -> Vector2:
+    if is_host and id != local_player_id and screen_mode == "game" and not game_over and host_view.has(id):
+        return host_view[id]
+    return Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
 
 # --- client: receive and ingest ---------------------------------------------
 
@@ -1492,8 +1622,10 @@ func _tick_client_effects(delta: float) -> void:
 func _client_network_tick(delta: float) -> void:
     _predict_local_player(delta)
     client_input_timer += delta
-    if client_input_timer >= INPUT_INTERVAL:
-        client_input_timer = fmod(client_input_timer, INPUT_INTERVAL)
+    if client_input_timer >= INPUT_INTERVAL - delta * 0.5:
+        client_input_timer -= INPUT_INTERVAL
+        if client_input_timer > INPUT_INTERVAL or client_input_timer < -INPUT_INTERVAL:
+            client_input_timer = 0.0
         if pred_ready:
             _send_input_commands()
     _client_update_render(delta)
@@ -1575,6 +1707,8 @@ func _start_offline(load_saved: bool = false) -> void:
     cmd_last_seq.clear()
     cmd_budget.clear()
     cmd_last_ms.clear()
+    host_track.clear()
+    host_view.clear()
     zombies.clear()
     airdrops.clear()
     barricades.clear()
@@ -2306,6 +2440,8 @@ func _start_host() -> void:
     cmd_last_seq.clear()
     cmd_budget.clear()
     cmd_last_ms.clear()
+    host_track.clear()
+    host_view.clear()
     zombies.clear()
     airdrops.clear()
     barricades.clear()
@@ -2420,6 +2556,8 @@ func _reset_network_state() -> void:
     cmd_last_seq.clear()
     cmd_budget.clear()
     cmd_last_ms.clear()
+    host_track.clear()
+    host_view.clear()
     zombies.clear()
     airdrops.clear()
     barricades.clear()
@@ -2454,6 +2592,8 @@ func _reset_network_state() -> void:
     cmd_last_seq.clear()
     cmd_budget.clear()
     cmd_last_ms.clear()
+    host_track.clear()
+    host_view.clear()
     _reset_client_interpolation()
 
 func _leave_world() -> void:
@@ -2673,7 +2813,7 @@ func _draw_game_world() -> void:
     var render_entries: Array[Dictionary] = []
     for id_variant in players.keys():
         var pid := int(id_variant)
-        render_entries.append({"y": float(players[pid].get("y", h * 0.68)), "type": "player", "id": pid})
+        render_entries.append({"y": _player_draw_pos(pid, players[pid]).y, "type": "player", "id": pid})
     for zi in range(zombies.size()):
         render_entries.append({"y": float(zombies[zi].get("y", h * 0.68)), "type": "zombie", "index": zi})
     for wi in range(barricades.size()):
@@ -2690,7 +2830,7 @@ func _draw_game_world() -> void:
         if entry_type == "player":
             var id := int(entry.id)
             var p: Dictionary = players[id]
-            pos = Vector2(float(p.get("x", w * 0.5)), float(p.get("y", h * 0.68)))
+            pos = _player_draw_pos(id, p)
             var moving := bool(p.get("walking", false))
             var shooting := float(p.get("shoot_timer", 0.0)) > 0.02
             var hurt := float(p.get("hurt_timer", 0.0)) > 0.02
