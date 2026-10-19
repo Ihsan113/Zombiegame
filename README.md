@@ -1,12 +1,12 @@
-# Pixel Zombie LAN v0.4.30
+# Pixel Zombie LAN v0.4.31
 
-## v0.4.30 — first-tap turret aim controls and input regression fix
+## v0.4.31 — turret destruction assertion fix and test cleanup
 - Added shared `_turret_facing_button_rects()` geometry for drawing, touch hit-testing, and Android coordinate fallback. First tap on AIM LEFT/RIGHT now registers before the first draw pass, and selection remains independent of the chosen ground point.
 - Re-aligned the turret yaw joint to the base bearing and moved the simulated muzzle origin to match the visible barrel bore.
 - Added active-control hit testing that tolerates Android viewport/window coordinate differences for AIM settings and first-tap weapon replacement.
 - The in-game placement workflow reserves arena touches for choosing a turret position while placement is active; players continue to pass through turret scenery.
 - Added regressions for first-tap AIM LEFT hit testing, both facing choices, turret pivot/muzzle alignment, transformed AIM taps, and the first replacement-slot tap.
-- Android version code/name: 42 / 0.4.30. Player/turret/drop snapshot record sizes and save schema unchanged.
+- Android version code/name: 43 / 0.4.31. Player/turret/drop snapshot record sizes and save schema unchanged.
 
 # Pixel Zombie LAN v0.4.28
 

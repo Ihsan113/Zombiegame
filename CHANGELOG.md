@@ -1,3 +1,10 @@
+# Pixel Zombie LAN v0.4.31
+
+## v0.4.31 — turret destruction assertion fix and test cleanup
+- Corrected the turret melee regression test to verify the specific attacked turret is removed while an unrelated turret remains intact; the old `turrets.is_empty()` assertion incorrectly failed with two deployed turrets.
+- Release test-owned runtime nodes and clear simulation state before exiting the codec test to reduce ObjectDB leak warnings.
+- Android version code/name: 43 / 0.4.31. Gameplay snapshot protocol unchanged.
+
 # Pixel Zombie LAN v0.4.30
 
 ## v0.4.30 — first-tap turret aim controls and input regression fix

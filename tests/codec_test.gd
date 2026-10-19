@@ -407,7 +407,9 @@ func _initialize() -> void:
         var muzzle_left: Vector2 = game._turret_muzzle_position(turret_spot, -1.0, 0.0)
         check(muzzle_right.x > turret_spot.x + 35.0 and muzzle_left.x < turret_spot.x - 35.0, "turret bullet origin follows the real barrel muzzle for both facings")
         check(absf(muzzle_right.y - (turret_spot.y - 9.5)) < 2.0 and absf(muzzle_left.y - (turret_spot.y - 9.5)) < 2.0, "turret muzzle vertical origin aligns with the barrel bore, not the old floating-head pivot")
-        # A zombie closer to a turret than any survivor must attack and be able to destroy it.
+        # A zombie closer to one turret than any survivor must destroy that target turret only.
+        # Another turret remains elsewhere in the test scene, so checking turrets.is_empty() is
+        # incorrect: it would report a failure even when the intended turret was removed.
         game.players[1]["x"] = 850.0
         game.turrets[0]["x"] = 450.0
         game.turrets[0]["y"] = 390.0
@@ -415,6 +417,8 @@ func _initialize() -> void:
         game.turrets[0]["angle"] = 0.0
         game.turrets[0]["face_x"] = 1.0
         game.turrets[0]["fire_timer"] = 4.0
+        var attacked_turret_id: int = int(game.turrets[0].get("id", -1))
+        var unrelated_turret_id: int = int(game.turrets[1].get("id", -1))
         game.zombies.clear()
         game.zombies.append({"id": 80809, "kind": 0, "x": 455.0, "y": 390.0, "face_x": 1.0, "hp": 20.0, "max_hp": 20.0, "walking": true, "attacking": false, "attack_timer": 0.0, "attack_cooldown": 0.0, "attack_type": game.BOSS_ATTACK_SLASH, "attack_hit_applied": false, "hit_timer": 0.0})
         game.wave_number = 3
@@ -433,14 +437,24 @@ func _initialize() -> void:
         print("[codec checkpoint] BEFORE: _host_simulate turret-destruction test")
         game._host_simulate(0.016)
         print("[codec checkpoint] AFTER: _host_simulate turret-destruction test")
-        check(game.turrets.is_empty(), "zombie melee can destroy a turret")
+        var attacked_turret_still_exists := false
+        var unrelated_turret_survives := false
+        for turret_variant in game.turrets:
+            var turret_record: Dictionary = turret_variant
+            var turret_id := int(turret_record.get("id", -1))
+            if turret_id == attacked_turret_id:
+                attacked_turret_still_exists = true
+            if turret_id == unrelated_turret_id:
+                unrelated_turret_survives = true
+        check(not attacked_turret_still_exists, "zombie melee removes the turret it attacked")
+        check(unrelated_turret_survives, "zombie melee preserves an unrelated turret")
     game.players.clear()
     game.zombies.clear()
     game.turrets.clear()
     game.barricades.clear()
     game.combat_effects.clear()
 
-    print("[codec checkpoint] PASS: turret placement, firing, and destruction")
+    print("[codec checkpoint] COMPLETED: turret placement, firing, and destruction checks")
     # Truncation / garbage must never crash and must be rejected.
     var good: PackedByteArray = game._encode_snapshot()
     check(game._decode_snapshot(good.slice(0, 20)).is_empty(), "truncated header rejected")
@@ -463,5 +477,19 @@ func _initialize() -> void:
     print("[codec checkpoint] AFTER: 2000 snapshot decodes")
     print("worst-case encode %.0f us, decode %.0f us per snapshot (this machine)" % [float(t1 - t0) / 2000.0, float(t2 - t1) / 2000.0])
     print("largest snapshot: %d bytes (cap %d)" % [max_bytes, game.MAX_SNAPSHOT_BYTES])
+    # Clear test-owned state and free Main.tscn before exiting to avoid ObjectDB leaks from
+    # runtime audio players, timers, and other child nodes created during _ready().
+    game.players.clear()
+    game.zombies.clear()
+    game.turrets.clear()
+    game.barricades.clear()
+    game.airdrops.clear()
+    game.active_projectiles.clear()
+    game.active_grenades.clear()
+    game.combat_effects.clear()
+    turret_base_resource = null
+    turret_head_resource = null
+    game.queue_free()
+    await process_frame
     print("CODEC TEST: ", "PASS" if failures == 0 else "FAILED (%d)" % failures)
     quit(0 if failures == 0 else 1)

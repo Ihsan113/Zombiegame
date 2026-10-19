@@ -95,8 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=42' not in preset or 'version/name="0.4.30"' not in preset:
-              raise SystemExit('Android export preset must report version code 42 / version 0.4.30')
+          if 'version/code=43' not in preset or 'version/name="0.4.31"' not in preset:
+              raise SystemExit('Android export preset must report version code 43 / version 0.4.31')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -326,9 +326,14 @@ jobs:
           for pickup_test_marker in ['host pickup resolver replaces only selected slot', 'cancel releases weapon crate instead of consuming it']:
               if pickup_test_marker not in codec_test:
                   raise SystemExit('Missing weapon replacement regression test: ' + pickup_test_marker)
-          for turret_test_marker in ['turret spot inside placement ring is valid', 'auto-turret tracks and damages a zombie in range', 'turret cannot fire into rear hemisphere', 'left-facing turret can track and fire inside its forward hemisphere', 'legacy world save migrates global turret yaw to left-facing half-arc', 'legacy turret without facing field infers and migrates left-facing yaw', 'current turret save preserves relative angle and facing', 'AIM Settings toggle responds to first touch at switch-row edge', 'AIM Settings tap outside switch does not toggle', 'AIM Settings switch track toggles back on tap', 'AIM toggle maps transformed viewport touch to the same visible row', 'survivor passes through turret body from the left', 'survivor passes through turret body from the opposite direction', 'turret bullet origin follows the real barrel muzzle for both facings', 'turret muzzle vertical origin aligns with the barrel bore, not the old floating-head pivot', 'TUR button enters placement mode without instantly deploying on button release', 'first AIM LEFT placement tap works before draw registers selector hitboxes', 'explicit AIM LEFT selector stays left even when placement point is on the right', 'explicit AIM RIGHT selector stays right even when placement point is on the left', 'host snapshot stores the explicit left-facing choice regardless of placement side', 'first weapon replacement touch works even before draw registers modal hitboxes', 'zombie melee can destroy a turret']:
+          for turret_test_marker in ['turret spot inside placement ring is valid', 'auto-turret tracks and damages a zombie in range', 'turret cannot fire into rear hemisphere', 'left-facing turret can track and fire inside its forward hemisphere', 'legacy world save migrates global turret yaw to left-facing half-arc', 'legacy turret without facing field infers and migrates left-facing yaw', 'current turret save preserves relative angle and facing', 'AIM Settings toggle responds to first touch at switch-row edge', 'AIM Settings tap outside switch does not toggle', 'AIM Settings switch track toggles back on tap', 'AIM toggle maps transformed viewport touch to the same visible row', 'survivor passes through turret body from the left', 'survivor passes through turret body from the opposite direction', 'turret bullet origin follows the real barrel muzzle for both facings', 'turret muzzle vertical origin aligns with the barrel bore, not the old floating-head pivot', 'TUR button enters placement mode without instantly deploying on button release', 'first AIM LEFT placement tap works before draw registers selector hitboxes', 'explicit AIM LEFT selector stays left even when placement point is on the right', 'explicit AIM RIGHT selector stays right even when placement point is on the left', 'host snapshot stores the explicit left-facing choice regardless of placement side', 'first weapon replacement touch works even before draw registers modal hitboxes', 'zombie melee removes the turret it attacked', 'zombie melee preserves an unrelated turret']:
               if turret_test_marker not in codec_test:
                   raise SystemExit('Missing turret regression test: ' + turret_test_marker)
+          for turret_destruction_marker in ['var attacked_turret_id: int = int(game.turrets[0].get("id", -1))', 'check(not attacked_turret_still_exists, "zombie melee removes the turret it attacked")', 'check(unrelated_turret_survives, "zombie melee preserves an unrelated turret")']:
+              if turret_destruction_marker not in codec_test:
+                  raise SystemExit('Turret destruction test must target the attacked turret by ID: ' + turret_destruction_marker)
+          if 'check(game.turrets.is_empty(), "zombie melee can destroy a turret")' in codec_test:
+              raise SystemExit('Invalid global-empty turret assertion returned; the test intentionally has an unrelated turret.')
           for explicit_type_marker in ['var collision_result: Vector2 = game._resolve_prediction_turret_collision(', 'var collision_result_right: Vector2 = game._resolve_prediction_turret_collision(']:
               if explicit_type_marker not in codec_test:
                   raise SystemExit('Turret collision tests must explicitly type values returned through a dynamic Node: ' + explicit_type_marker)
@@ -358,7 +363,7 @@ jobs:
           script = (root / 'scripts/game.gd').read_text()
           for marker in ['func _setup_music() -> void:', 'AudioStreamWAV.LOOP_FORWARD', 'AudioStreamMP3', 'mp3_stream.loop = true', 'func _sync_music_state() -> void:', 'AIRDROP_INTERVAL_MIN := 24.0', 'AIRDROP_INTERVAL_MAX := 34.0', '_emit_sfx("boss_roar")', '_emit_sfx("boss_attack")', 'func _input_canvas_position(viewport_position: Vector2) -> Vector2:', 'func _active_ui_hit_id(pos: Vector2) -> String:', 'func _turret_facing_button_rects() -> Dictionary:', 'func _settings_aim_toggle_rect() -> Rect2:', 'func _weapon_replace_hitboxes() -> Dictionary:', 'func _turret_muzzle_position(turret_pos: Vector2, face_x: float, angle_offset: float) -> Vector2:', '_add_combat_effect(13, muzzle, target_pos, 0.17)', 'var pivot := pos + Vector2(0.0, -1.2)', 'Rect2(Vector2(-head_size.x * 0.39 - kick, -head_size.y * 0.84), head_size)', 'func request_build_turret(x_ratio: float, y_ratio: float, face_x: float = 1.0) -> void:', 'turret_face_left', 'turret_face_right', 'The rotating head ring overlaps the foot assembly instead of floating 20+ px above it.']:
               if marker not in script:
-                  raise SystemExit('Missing v0.4.30 turret/input/animation/audio/airdrop feature marker: ' + marker)
+                  raise SystemExit('Missing v0.4.31 turret/input/animation/audio/airdrop feature marker: ' + marker)
           print(f'Validated {len(refs)} resource references, landscape/version settings, clean RGBA survivor atlas, five RGBA firearm sprites, destructible deployable auto-turrets with PNG layers/SFX, settings-based aim marker toggle, explicit airdrop slot replacement, finite firearm ammo with infinite sidearm fallback, compatible ammo pickup, hold-drag controls, death/bone visuals, grenade blast, more frequent airdrops, gameplay music, boss/airdrop SFX, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
           PYCODE
 
@@ -419,7 +424,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.30-APK
+          name: PixelZombieLAN-v0.4.31-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -428,15 +433,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.30-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.31-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.30-source.zip
+          test -s build/PixelZombieLAN-v0.4.31-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.30-source
-          path: build/PixelZombieLAN-v0.4.30-source.zip
+          name: PixelZombieLAN-v0.4.31-source
+          path: build/PixelZombieLAN-v0.4.31-source.zip
           if-no-files-found: error
           retention-days: 14

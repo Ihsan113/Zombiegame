@@ -1,11 +1,16 @@
-# Implementation notes — v0.4.30
+## v0.4.31 test fix
+- Failure was a test assertion bug, not evidence of a turret combat bug: the fixture has two turrets, and melee is expected to remove only the nearby low-HP turret. The test previously incorrectly required the entire turret array to be empty.
+- Assert removal by target turret ID and survival of the unrelated turret ID.
+- Codec test frees the instantiated Main scene and clears test-owned game arrays before `quit()` to reduce shutdown leak diagnostics.
 
-### v0.4.30 validation notes
+# Implementation notes — v0.4.31
+
+### v0.4.31 validation notes
 - Turret facing is a user-selectable half-arc, transmitted with the deployment request.
 - Head yaw ring and muzzle coordinates now align with the base bearing.
 - Shared turret-facing control geometry is used by render, first-touch, and coordinate-space hit testing. Input mapping falls back to a raw hit on a live visible button when Android reports an alternate coordinate space; otherwise it uses the inverse canvas transform.
 - Tests added for first-touch AIM LEFT registration before drawing, explicit left/right deployment, input-mapping fallback, and first-tap weapon replacement.
-- Android version code/name: 42 / 0.4.30.
+- Android version code/name: 43 / 0.4.31.
 
 # Implementation notes — v0.4.28
 
