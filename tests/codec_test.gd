@@ -382,6 +382,10 @@ func _initialize() -> void:
     game._touch_start(21, placement_cancel_rect.position + placement_cancel_rect.size * 0.5)
     check(not game.turret_place_active and not game.turret_requested, "first touch on visible turret Cancel exits without deploying")
     game._begin_turret_placement()
+    # Re-entering placement intentionally seeds facing from the survivor's current heading.
+    # Select LEFT again in this new placement session, then move the preview to the right.
+    game._handle_ui_button("turret_face_left")
+    check(float(game.turret_preview_face_x) < 0.0, "AIM LEFT can be explicitly selected after re-entering turret placement")
     game._set_turret_preview_from_pointer(Vector2(420.0, 390.0))
     check(float(game.turret_preview_face_x) < 0.0, "explicit AIM LEFT selector stays left even when placement point is on the right")
     game._handle_ui_button("turret_face_right")
@@ -402,9 +406,9 @@ func _initialize() -> void:
     check(int(game.players[1].get("turret_kits", 0)) == 0, "successful turret deploy consumes one kit")
     game.players[1]["turret_kits"] = 1
     game.build_cooldowns[1] = Time.get_ticks_msec() - 1000
-    var left_turret_spot := Vector2(220.0, 390.0)
+    var left_turret_spot := Vector2(560.0, 390.0)
     game._host_build_turret(1, left_turret_spot.x / game.screen_size.x, left_turret_spot.y / game.screen_size.y, -1.0)
-    check(game.turrets.size() == 2 and float(game.turrets[1].get("face_x", 1.0)) < 0.0, "host snapshot stores the explicit left-facing choice regardless of placement side")
+    check(game.turrets.size() == 2 and float(game.turrets[1].get("x", 0.0)) > float(game.players[1].get("x", 0.0)) and float(game.turrets[1].get("face_x", 1.0)) < 0.0, "host preserves left-facing choice for a turret placed to the right of its owner")
     if game.turrets.size() >= 1:
         var test_target_pos := Vector2(452.0, 390.0)
         var turret_pivot := turret_spot + Vector2(0.0, -1.2)

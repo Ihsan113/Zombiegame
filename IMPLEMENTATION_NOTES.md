@@ -1,11 +1,9 @@
-## v0.4.32 input/placement reliability notes
+## v0.4.33 facing-regression correction
 
-- Weapon replacement Cancel now uses a 40 px hit target; a LAN client dismisses the local modal immediately after sending the reliable host request while the server remains authoritative for reservation release.
-- AIM toggle centralizes persistence and redraw, with a short debounce to collapse duplicate Android touch/emulated-mouse activation for one tap.
-- Turret placement preview stays active after a positioning touch releases. The preview can be repositioned repeatedly and requires explicit DEPLOY; CANCEL returns to normal gameplay. Host-local invalid attempts keep placement active for correction.
-- Regression tests exercise the visible modal Cancel hitbox, duplicate AIM taps, and explicit turret confirm/cancel behavior.
-- Android version code/name: 44 / 0.4.32. Player/turret/drop snapshot records and save schema remain unchanged.
-- This workspace has no Godot executable installed, so GDScript parse, codec runtime tests and APK export must be verified by the configured Godot 4.7.2 CI runner or on a device.
+- The failed assertion was a test setup bug: `_begin_turret_placement()` intentionally initializes facing from the player, but the test re-entered placement after cancel without selecting AIM LEFT again. The test now re-selects left before moving the preview to the right.
+- The host-deployment regression places a left-facing turret on the right side of its owner so facing and placement side are genuinely tested independently.
+- Complete Godot 4.7.2 runtime/codec pass must still be confirmed by GitHub Actions; this environment has no Godot executable.
+- Android version code/name: 45 / 0.4.33.
 
 ## v0.4.31 test fix
 - Failure was a test assertion bug, not evidence of a turret combat bug: the fixture has two turrets, and melee is expected to remove only the nearby low-HP turret. The test previously incorrectly required the entire turret array to be empty.

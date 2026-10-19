@@ -1,4 +1,10 @@
-# Pixel Zombie LAN v0.4.32
+# Pixel Zombie LAN v0.4.33
+
+## v0.4.33 — AIM-facing test setup correction
+- Fixed the turret-facing regression test: entering placement mode deliberately initializes the preview from the survivor's current facing, so the test now explicitly selects AIM LEFT again before asserting the preview keeps left-facing while moving to the right.
+- Strengthened deployment coverage by placing a left-facing turret to the right of its owner and asserting the host preserves the explicit facing choice independently of placement side.
+- Preserves v0.4.32's explicit DEPLOY/CANCEL turret placement, 40 px weapon replacement Cancel hit target, and debounced AIM settings.
+- Android version code/name: 45 / 0.4.33. Snapshot records and save schema unchanged.
 
 ## v0.4.32 — reliable cancel, AIM toggle and easier turret placement
 - Enlarged the weapon replacement Cancel button hitbox and added immediate local client dismissal while the reliable host cancellation is processed.
@@ -6,6 +12,7 @@
 - Changed turret placement to a persistent preview controlled by tap/drag plus explicit DEPLOY and CANCEL actions. Invalid host-side placement leaves placement mode open for another attempt.
 - Added regressions for the Cancel touch hitbox, AIM duplicate events, and two-step turret placement. LAN snapshot and save schemas are unchanged.
 - Android version code/name: 44 / 0.4.32.
+
 
 ## v0.4.31 — turret destruction assertion fix and test cleanup
 - Corrected the turret melee regression test to verify the specific attacked turret is removed while an unrelated turret remains intact; the old `turrets.is_empty()` assertion incorrectly failed with two deployed turrets.
