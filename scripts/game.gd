@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.20
+# Pixel Zombie LAN — wave defense prototype v0.4.21
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -72,7 +72,20 @@ const BARRICADE_TINT := Color(0.92, 0.89, 0.87, 1.0) # pulls the sprite into the
 const WALL_MIN_PLAYER_DISTANCE := 82.0
 const MEDKIT_MAX_CARRY := 5
 const WALL_KIT_MAX_CARRY := 5
+const TURRET_KIT_MAX_CARRY := 2
 const MAX_BARRICADES := 8
+const MAX_TURRETS := 4
+const TURRET_MAX_HP := 180.0
+const TURRET_RANGE := 270.0
+const TURRET_PLACE_RANGE_RATIO := 0.22
+const TURRET_MIN_PLAYER_DISTANCE := 48.0
+const TURRET_BASE_SPACING := 54.0
+const TURRET_WALL_SPACING := 44.0
+const TURRET_AGGRO_RADIUS := 132.0
+const TURRET_ATTACK_RANGE := 46.0
+const TURRET_DAMAGE := 1.35
+const TURRET_FIRE_INTERVAL := 0.20
+const TURRET_TURN_SPEED := 3.8
 const WALL_ATTACK_RANGE := 50.0
 const WALL_LANE_TOLERANCE := 46.0
 const SNAPSHOT_INTERVAL := 0.0166 # 60 compact snapshots/second at most (one UDP datagram each, ~11 KB/s total).
@@ -80,12 +93,13 @@ const INPUT_INTERVAL := 0.0166   # 60 movement-command packets/second at most (a
 const SNAP_MAGIC := 0xB7
 const POS_SCALE := 8.0            # wire positions are uint16 in 1/8 px units
 const NO_SOURCE := 255
-const LOOT_KINDS := ["grenade", "wall", "medkit", "weapon", "ammo"]
+const LOOT_KINDS := ["grenade", "wall", "medkit", "weapon", "ammo", "turret"]
 const MAX_SNAPSHOT_BYTES := 1180  # stays below the ENet fragment size so a snapshot is never split
 const SNAPSHOT_HEADER_BYTES := 31
-const PLAYER_RECORD_BYTES := 29
+const PLAYER_RECORD_BYTES := 30
 const ZOMBIE_RECORD_BYTES := 13
 const WALL_RECORD_BYTES := 10
+const TURRET_RECORD_BYTES := 8
 const DROP_RECORD_BYTES := 27
 const NADE_RECORD_BYTES := 21
 const EFFECT_RECORD_BYTES := 16
@@ -168,6 +182,8 @@ var input_vectors: Dictionary = {}
 var zombies: Array[Dictionary] = []
 var airdrops: Array[Dictionary] = []
 var barricades: Array[Dictionary] = []
+var turrets: Array[Dictionary] = []
+var turret_sequence := 1
 var active_grenades: Array[Dictionary] = []
 const AIRDROP_FIRST_DELAY := 10.0
 const AIRDROP_INTERVAL_MIN := 24.0
@@ -199,6 +215,11 @@ var grenade_aim_target_position := Vector2(620.0, 350.0)
 var wall_place_active := false
 var wall_preview_position := Vector2(480.0, 350.0)
 var wall_place_touch_id := -1
+var turret_place_active := false
+var turret_preview_position := Vector2(480.0, 350.0)
+var turret_place_touch_id := -1
+var turret_requested := false
+var aim_marker_enabled := true
 var client_input_timer := 0.0
 var snapshot_seq := 0
 var effect_seq := 0
@@ -267,10 +288,15 @@ func _ready() -> void:
     ui_font = ThemeDB.fallback_font
     _setup_sfx()
     _setup_music()
+    var control_settings := ConfigFile.new()
+    if control_settings.load("user://settings.cfg") == OK:
+        aim_marker_enabled = bool(control_settings.get_value("controls", "aim_marker_enabled", true))
     if ui_font == null:
         push_warning("Pixel Zombie LAN: theme fallback font was not available at startup.")
     # Prefer detailed raster assets. Draw functions retain a visible fallback if a texture is missing.
-    sprite_atlas = load("res://assets/sprite_atlas.png") as Texture2D
+    sprite_atlas = load("res://assets/sprite_atlas_player_clean.png") as Texture2D
+    if sprite_atlas == null:
+        sprite_atlas = load("res://assets/sprite_atlas.png") as Texture2D
     if sprite_atlas == null:
         sprite_atlas = load("res://assets/sprite_atlas.svg") as Texture2D
     background_texture = load("res://assets/arena_bg.jpg") as Texture2D
@@ -565,6 +591,19 @@ func _process_action_requests(delta: float) -> void:
         else:
             ui_status = "Barricades are available during a world session"
 
+    if turret_requested:
+        turret_requested = false
+        var turret_x_ratio: float = clampf(turret_preview_position.x / maxf(1.0, screen_size.x), 0.0, 1.0)
+        var turret_y_ratio: float = clampf(turret_preview_position.y / maxf(1.0, screen_size.y), 0.0, 1.0)
+        turret_place_active = false
+        turret_place_touch_id = -1
+        if is_host:
+            _host_build_turret(local_player_id, turret_x_ratio, turret_y_ratio)
+        elif _is_connected_client():
+            rpc_id(1, "request_build_turret", turret_x_ratio, turret_y_ratio)
+        else:
+            ui_status = "Auto turrets are available during a world session"
+
 func _host_simulate(delta: float) -> void:
     world_time += delta
 
@@ -660,6 +699,83 @@ func _host_simulate(delta: float) -> void:
             if distance < nearest_distance:
                 nearest_distance = distance
                 target_id = id
+
+        var turret_target_index := -1
+        var nearest_turret_distance: float = INF
+        for turret_index in range(turrets.size()):
+            var nearby_turret: Dictionary = turrets[turret_index]
+            var nearby_turret_pos := Vector2(float(nearby_turret.get("x", 0.0)), float(nearby_turret.get("y", 0.0)))
+            var turret_distance := zombie_pos.distance_to(nearby_turret_pos)
+            if turret_distance <= TURRET_AGGRO_RADIUS and turret_distance < nearest_turret_distance:
+                nearest_turret_distance = turret_distance
+                turret_target_index = turret_index
+
+        # Turrets are destructible defenses. An infected turns on the nearest turret only when
+        # it is a more immediate obstacle than a survivor, so the squad can still kite enemies.
+        if turret_target_index >= 0 and (target_id == -1 or nearest_turret_distance < nearest_distance):
+            var turret_target: Dictionary = turrets[turret_target_index]
+            var turret_pos := Vector2(float(turret_target.get("x", 0.0)), float(turret_target.get("y", 0.0)))
+            var turret_direction := (turret_pos - zombie_pos).normalized()
+            var turret_kind := clampi(int(z.get("kind", 0)), 0, ZOMBIE_KIND_BOSS)
+            var turret_boss := turret_kind == ZOMBIE_KIND_BOSS
+            var turret_speed_scale: float = 0.54 if turret_boss else (0.68 if turret_kind == 2 else (1.25 if turret_kind == 3 else 1.0))
+            if wave_timed_out:
+                turret_speed_scale *= 1.18
+            z["face_x"] = -1.0 if turret_direction.x < 0.0 else 1.0
+            if nearest_turret_distance > TURRET_ATTACK_RANGE:
+                z["walking"] = true
+                attack_timer = 0.0
+                attack_hit_applied = false
+                z["x"] = clampf(zombie_pos.x + turret_direction.x * ZOMBIE_SPEED * turret_speed_scale * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
+                z["y"] = clampf(zombie_pos.y + turret_direction.y * ZOMBIE_SPEED * turret_speed_scale * delta, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+            elif turret_boss:
+                z["walking"] = false
+                if attack_timer <= 0.0 and attack_cooldown <= 0.0:
+                    attack_type = _choose_boss_attack(nearest_turret_distance, false)
+                    attack_timer = _boss_attack_duration(attack_type)
+                    attack_cooldown = _boss_attack_cooldown(attack_type)
+                    attack_hit_applied = false
+                    z["attack_type"] = attack_type
+                    _emit_sfx("boss_roar")
+                z["attacking"] = attack_timer > 0.0
+                if attack_timer > 0.0:
+                    var turret_attack_progress := clampf(1.0 - attack_timer / _boss_attack_duration(attack_type), 0.0, 1.0)
+                    if not attack_hit_applied and turret_attack_progress >= _boss_attack_hit_progress(attack_type):
+                        var brute_damage: float = 38.0 if attack_type == BOSS_ATTACK_SLAM else 27.0
+                        turret_target["hp"] = float(turret_target.get("hp", TURRET_MAX_HP)) - brute_damage
+                        _add_combat_effect(9 if attack_type == BOSS_ATTACK_SLAM else 5, turret_pos + Vector2(0.0, 1.0), turret_pos + Vector2(0.0, 1.0), 0.48)
+                        attack_hit_applied = true
+                        _emit_sfx("boss_attack")
+                        if float(turret_target.get("hp", 0.0)) <= 0.0:
+                            _add_combat_effect(9, turret_pos, turret_pos, 0.65)
+                            turrets.remove_at(turret_target_index)
+                            _emit_sfx("wall_break")
+                            ui_status = "AUTO TURRET DESTROYED BY BRUTE"
+                        else:
+                            turrets[turret_target_index] = turret_target
+            else:
+                z["walking"] = false
+                z["attacking"] = true
+                attack_timer = 0.36
+                if attack_cooldown <= 0.0:
+                    var turret_damage: float = 14.0 if turret_kind == 2 else (6.0 if turret_kind == 3 else 8.0)
+                    turret_target["hp"] = float(turret_target.get("hp", TURRET_MAX_HP)) - turret_damage
+                    attack_cooldown = 0.92 if turret_kind == 2 else (0.56 if turret_kind == 3 else 0.74)
+                    _add_combat_effect(5, zombie_pos + Vector2(float(z.get("face_x", 1.0)) * 14.0, -3.0), turret_pos, 0.22)
+                    _emit_sfx("attack")
+                    if float(turret_target.get("hp", 0.0)) <= 0.0:
+                        _add_combat_effect(9, turret_pos, turret_pos, 0.55)
+                        turrets.remove_at(turret_target_index)
+                        _emit_sfx("wall_break")
+                        ui_status = "AUTO TURRET DESTROYED BY HORDE"
+                    else:
+                        turrets[turret_target_index] = turret_target
+            z["attack_timer"] = attack_timer
+            z["attack_cooldown"] = attack_cooldown
+            z["attack_type"] = attack_type
+            z["attack_hit_applied"] = attack_hit_applied
+            zombies[zi] = z
+            continue
 
         if target_id != -1:
             var target: Dictionary = players[target_id]
@@ -825,6 +941,7 @@ func _host_simulate(delta: float) -> void:
         z["attack_hit_applied"] = attack_hit_applied
         zombies[zi] = z
 
+    _update_turrets(delta)
     _update_grenades(delta)
     _update_projectiles(delta)
     _update_airdrops(delta)
@@ -994,6 +1111,7 @@ func _make_player(id: int) -> Dictionary:
         "ammo": -1,
         "grenades": 3,
         "wall_kits": 2,
+        "turret_kits": 0,
         "active_slot": 0,
         "slot1_type": -1,
         "slot1_mag": 0,
@@ -1120,6 +1238,7 @@ func _encode_snapshot() -> PackedByteArray:
         sp.put_u8(clampi(int(p.get("medkits", 0)), 0, 255))
         sp.put_u8(clampi(int(p.get("grenades", 0)), 0, 255))
         sp.put_u8(clampi(int(p.get("wall_kits", 0)), 0, 255))
+        sp.put_u8(clampi(int(p.get("turret_kits", 0)), 0, 255))
         sp.put_u8(_qcenti(float(p.get("shoot_timer", 0.0))))
         sp.put_u8(_qcenti(float(p.get("hurt_timer", 0.0))))
         sp.put_u8(clampi(int(p.get("active_slot", 0)), 0, 2))
@@ -1169,6 +1288,17 @@ func _encode_snapshot() -> PackedByteArray:
         sp.put_u16(_qpos(float(wall.get("y", 0.0))))
         sp.put_u8(clampi(roundi(float(wall.get("hp", 0.0))), 0, 255))
         sp.put_u8(clampi(roundi(float(wall.get("max_hp", 125.0))), 1, 255))
+
+    var tcount := mini(turrets.size(), MAX_TURRETS)
+    sp.put_u8(tcount)
+    for i in range(tcount):
+        var turret: Dictionary = turrets[i]
+        sp.put_u16(int(turret.get("id", 0)) & 0xFFFF)
+        sp.put_u16(_qpos(float(turret.get("x", 0.0))))
+        sp.put_u16(_qpos(float(turret.get("y", 0.0))))
+        sp.put_u8(clampi(roundi(float(turret.get("hp", TURRET_MAX_HP))), 0, 255))
+        var wire_angle: float = wrapf(float(turret.get("angle", 0.0)), -PI, PI)
+        sp.put_u8(clampi(roundi((wire_angle + PI) / TAU * 255.0), 0, 255))
 
     var dcount := mini(airdrops.size(), MAX_AIRDROPS_PER_SNAPSHOT)
     sp.put_u8(dcount)
@@ -1274,6 +1404,7 @@ func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
         var pmed := sp.get_u8()
         var pgren := sp.get_u8()
         var pwall := sp.get_u8()
+        var pturret := sp.get_u8()
         var pshoot := float(sp.get_u8()) * 0.01
         var phurt := float(sp.get_u8()) * 0.01
         var active_slot := clampi(sp.get_u8(), 0, 2)
@@ -1288,7 +1419,7 @@ func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
         var reload_timer := float(sp.get_u8()) * 0.01
         var pack := sp.get_u32()
         pids.append(pid)
-        pmap[pid] = {"x": px, "y": py, "hp": php, "fl": pflags, "med": pmed, "gren": pgren, "wall": pwall, "shoot": pshoot, "hurt": phurt, "active_slot": active_slot, "slot1_type": slot1_type, "slot1_mag": slot1_mag, "slot1_reserve": slot1_reserve, "slot2_type": slot2_type, "slot2_mag": slot2_mag, "slot2_reserve": slot2_reserve, "reload_timer": reload_timer, "ack": pack}
+        pmap[pid] = {"x": px, "y": py, "hp": php, "fl": pflags, "med": pmed, "gren": pgren, "wall": pwall, "turret": pturret, "shoot": pshoot, "hurt": phurt, "active_slot": active_slot, "slot1_type": slot1_type, "slot1_mag": slot1_mag, "slot1_reserve": slot1_reserve, "slot2_type": slot2_type, "slot2_mag": slot2_mag, "slot2_reserve": slot2_reserve, "reload_timer": reload_timer, "ack": pack}
     snap["pids"] = pids
     snap["players"] = pmap
 
@@ -1325,6 +1456,19 @@ func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
         var wmax := float(sp.get_u8())
         walls.append({"id": wid, "x": wx, "y": wy, "hp": whp, "max_hp": wmax})
     snap["walls"] = walls
+
+    var tcount := sp.get_u8()
+    if tcount > MAX_TURRETS or sp.get_available_bytes() < tcount * TURRET_RECORD_BYTES + 1:
+        return {}
+    var decoded_turrets: Array[Dictionary] = []
+    for i in range(tcount):
+        var tid := sp.get_u16()
+        var tx := float(sp.get_u16()) / POS_SCALE
+        var ty := float(sp.get_u16()) / POS_SCALE
+        var thp := float(sp.get_u8())
+        var tangle := float(sp.get_u8()) / 255.0 * TAU - PI
+        decoded_turrets.append({"id": tid, "x": tx, "y": ty, "hp": thp, "max_hp": TURRET_MAX_HP, "angle": tangle})
+    snap["turrets"] = decoded_turrets
 
     var dcount := sp.get_u8()
     if sp.get_available_bytes() < dcount * DROP_RECORD_BYTES + 1:
@@ -1802,7 +1946,7 @@ func _predict_local_fire() -> bool:
     _play_sfx("shot")
     var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
     var facing := Vector2.LEFT if local_face < 0.0 else Vector2.RIGHT
-    var muzzle := player_pos + facing * 24.0 + Vector2(0.0, -5.0)
+    var muzzle := player_pos + facing * 24.0 + Vector2(0.0, 7.0)
     var max_range := minf(float(profile.get("range", SHOT_RANGE_MAX)), screen_size.x * 0.90)
     var closest_projection := max_range
     for zombie in zombies:
@@ -1810,7 +1954,7 @@ func _predict_local_fire() -> bool:
         var projection := offset.dot(facing)
         if projection > 16.0 and projection <= closest_projection and absf(offset.y) <= float(profile.get("lane", SHOT_LANE_TOLERANCE)):
             closest_projection = projection
-    var tracer_end := player_pos + facing * closest_projection + Vector2(0.0, -5.0)
+    var tracer_end := player_pos + facing * closest_projection + Vector2(0.0, 7.0)
     _push_local_effect(0, muzzle, muzzle, 0.13 if weapon_id != WEAPON_SNIPER else 0.22)
     if weapon_id == WEAPON_SHOTGUN:
         for spread in SHOTGUN_PELLET_OFFSETS:
@@ -1901,6 +2045,7 @@ func _client_update_render(delta: float) -> void:
         shown["ammo"] = -1
         shown["grenades"] = int(stats["gren"])
         shown["wall_kits"] = int(stats["wall"])
+        shown["turret_kits"] = int(stats.get("turret", 0))
         shown["active_slot"] = int(stats.get("active_slot", 0))
         shown["slot1_type"] = int(stats.get("slot1_type", -1))
         shown["slot1_mag"] = int(stats.get("slot1_mag", 0))
@@ -1941,6 +2086,17 @@ func _client_update_render(delta: float) -> void:
     barricades.clear()
     for wall in to_snap["walls"]:
         barricades.append({"id": int(wall["id"]), "x": float(wall["x"]) * sx, "y": float(wall["y"]) * sy, "hp": float(wall["hp"]), "max_hp": float(wall["max_hp"])})
+    turrets.clear()
+    var from_turrets: Array = from_snap.get("turrets", [])
+    for turret_record in to_snap.get("turrets", []):
+        var prior_turret: Dictionary = _find_record(from_turrets, int(turret_record.get("id", 0)), turret_record)
+        var turret_pos := Vector2(
+            lerpf(float(prior_turret.get("x", turret_record["x"])), float(turret_record["x"]), alpha) * sx,
+            lerpf(float(prior_turret.get("y", turret_record["y"])), float(turret_record["y"]), alpha) * sy
+        )
+        var prior_angle: float = float(prior_turret.get("angle", turret_record.get("angle", 0.0)))
+        var angle_step: float = wrapf(float(turret_record.get("angle", 0.0)) - prior_angle, -PI, PI)
+        turrets.append({"id": int(turret_record["id"]), "x": turret_pos.x, "y": turret_pos.y, "hp": float(turret_record["hp"]), "max_hp": float(turret_record.get("max_hp", TURRET_MAX_HP)), "angle": prior_angle + angle_step * alpha, "flash_timer": 0.0})
     airdrops.clear()
     var from_drops: Array = from_snap["drops"]
     for drop in to_snap["drops"]:
@@ -2111,6 +2267,7 @@ func _start_offline(load_saved: bool = false) -> void:
     zombies.clear()
     airdrops.clear()
     barricades.clear()
+    turrets.clear()
     active_grenades.clear()
     active_projectiles.clear()
     airdrop_spawn_timer = AIRDROP_FIRST_DELAY
@@ -2120,6 +2277,7 @@ func _start_offline(load_saved: bool = false) -> void:
     heal_cooldowns.clear()
     grenade_cooldowns.clear()
     build_cooldowns.clear()
+    turret_sequence = 1
     wave_number = 1
     wave_total = _zombie_count_for_wave(wave_number)
     wave_spawned = 0
@@ -2359,7 +2517,7 @@ func _host_fire(id: int) -> void:
 
     var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.5)))
     var facing := Vector2.LEFT if float(p.get("face_x", 1.0)) < 0.0 else Vector2.RIGHT
-    var muzzle := player_pos + facing * 24.0 + Vector2(0.0, -5.0)
+    var muzzle := player_pos + facing * 24.0 + Vector2(0.0, 7.0)
     var shot_range := minf(float(profile["range"]), screen_size.x * 0.90)
     var closest_index := -1
     var closest_projection := shot_range
@@ -2406,7 +2564,7 @@ func _host_fire(id: int) -> void:
             target_pos = Vector2(float(closest_zombie.get("x", target_pos.x)), float(closest_zombie.get("y", player_pos.y)))
         else:
             target_pos = player_pos + facing * shot_range
-        var tracer_end := Vector2(target_pos.x, player_pos.y - 5.0)
+        var tracer_end := Vector2(target_pos.x, player_pos.y + 7.0)
         _add_combat_effect(0, muzzle, muzzle, 0.13 if weapon_id != WEAPON_SNIPER else 0.22, id)
         if weapon_id == WEAPON_ROCKET:
             var travel_time := clampf(player_pos.distance_to(target_pos) / 920.0, 0.16, 0.44)
@@ -2416,7 +2574,7 @@ func _host_fire(id: int) -> void:
             _add_combat_effect(int(profile["effect"]), muzzle, tracer_end, 0.12 if weapon_id == WEAPON_SMG else (0.22 if weapon_id == WEAPON_SNIPER else 0.16), id)
             if closest_index >= 0:
                 _add_combat_effect(2, target_pos, target_pos, 0.18)
-                _add_combat_effect(3, target_pos, Vector2(target_pos.x, player_pos.y - 5.0), 0.26)
+                _add_combat_effect(3, target_pos, Vector2(target_pos.x, player_pos.y + 7.0), 0.26)
                 _apply_weapon_damage(closest_index, float(profile["damage"]), target_pos)
     if weapon_id != WEAPON_SIDEARM and _slot_mag(p, active_slot) <= 0 and _slot_reserve(p, active_slot) > 0:
         _start_weapon_reload(p, active_slot)
@@ -2480,6 +2638,14 @@ func request_build_wall(x_ratio: float, y_ratio: float) -> void:
     var sender_id := multiplayer.get_remote_sender_id()
     if players.has(sender_id):
         _host_build_wall(sender_id, x_ratio, y_ratio)
+
+@rpc("any_peer", "call_remote", "reliable")
+func request_build_turret(x_ratio: float, y_ratio: float) -> void:
+    if not is_host:
+        return
+    var sender_id := multiplayer.get_remote_sender_id()
+    if players.has(sender_id):
+        _host_build_turret(sender_id, x_ratio, y_ratio)
 
 func _host_heal(id: int) -> void:
     if game_over or not players.has(id):
@@ -2612,6 +2778,235 @@ func _wall_placement_is_valid(id: int, wall_pos: Vector2) -> bool:
             return false
     return true
 
+func _next_turret_id() -> int:
+    var candidate: int = posmod(turret_sequence, 65535) + 1
+    var attempts := 0
+    while attempts < 65535:
+        var occupied := false
+        for turret in turrets:
+            if int(turret.get("id", -1)) == candidate:
+                occupied = true
+                break
+        if not occupied:
+            turret_sequence = posmod(candidate, 65535) + 1
+            return candidate
+        candidate = posmod(candidate, 65535) + 1
+        attempts += 1
+    return randi() & 0xFFFF
+
+func _turret_placement_is_valid(id: int, turret_pos: Vector2) -> bool:
+    if not players.has(id) or turrets.size() >= MAX_TURRETS:
+        return false
+    var p: Dictionary = players[id]
+    if float(p.get("hp", 0.0)) <= 0.0 or int(p.get("turret_kits", 0)) <= 0:
+        return false
+    var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+    var placement_distance := player_pos.distance_to(turret_pos)
+    if placement_distance < TURRET_MIN_PLAYER_DISTANCE or placement_distance > screen_size.x * TURRET_PLACE_RANGE_RATIO:
+        return false
+    if turret_pos.x < 35.0 or turret_pos.x > screen_size.x - 35.0:
+        return false
+    if turret_pos.y < _arena_top() + ARENA_TOP_CLEARANCE or turret_pos.y > _arena_bottom() - ARENA_BOTTOM_CLEARANCE:
+        return false
+    for turret in turrets:
+        var other_pos := Vector2(float(turret.get("x", 0.0)), float(turret.get("y", 0.0)))
+        if turret_pos.distance_to(other_pos) < TURRET_BASE_SPACING:
+            return false
+    for wall in barricades:
+        var wall_pos := Vector2(float(wall.get("x", 0.0)), float(wall.get("y", 0.0)))
+        if turret_pos.distance_to(wall_pos) < TURRET_WALL_SPACING:
+            return false
+    return true
+
+func _host_build_turret(id: int, x_ratio: float, y_ratio: float) -> void:
+    if game_over or not players.has(id):
+        return
+    var now := Time.get_ticks_msec()
+    if now - int(build_cooldowns.get(id, 0)) < 520:
+        return
+    var p: Dictionary = players[id]
+    var turret_pos := Vector2(
+        clampf(x_ratio * screen_size.x, 35.0, maxf(36.0, screen_size.x - 35.0)),
+        clampf(y_ratio * screen_size.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+    if not _turret_placement_is_valid(id, turret_pos):
+        if int(p.get("turret_kits", 0)) <= 0:
+            ui_status = "NO TURRET KIT — secure an airdrop"
+        elif turrets.size() >= MAX_TURRETS:
+            ui_status = "TURRET LIMIT REACHED — only four can be deployed"
+        else:
+            ui_status = "INVALID TURRET SPOT — keep the circle clear and in range"
+        return
+    p["turret_kits"] = maxi(0, int(p.get("turret_kits", 0)) - 1)
+    players[id] = p
+    build_cooldowns[id] = now
+    var turret_id := _next_turret_id()
+    turrets.append({"id": turret_id, "x": turret_pos.x, "y": turret_pos.y, "hp": TURRET_MAX_HP, "max_hp": TURRET_MAX_HP, "angle": 0.0, "fire_timer": 0.25, "flash_timer": 0.0, "owner_id": id})
+    _emit_sfx("wall_build")
+    ui_status = "AUTO TURRET DEPLOYED • RANGE 270 • ZOMBIES CAN DESTROY IT"
+    _broadcast_world()
+
+func _set_turret_preview_from_pointer(pointer_pos: Vector2) -> void:
+    if not players.has(local_player_id):
+        return
+    var p: Dictionary = players[local_player_id]
+    var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+    var desired := Vector2(
+        clampf(pointer_pos.x, 35.0, maxf(36.0, screen_size.x - 35.0)),
+        clampf(pointer_pos.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+    var from_player := desired - player_pos
+    var max_distance: float = screen_size.x * TURRET_PLACE_RANGE_RATIO
+    if from_player.length() > max_distance:
+        desired = player_pos + from_player.normalized() * max_distance
+    turret_preview_position = Vector2(
+        clampf(desired.x, 35.0, maxf(36.0, screen_size.x - 35.0)),
+        clampf(desired.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+
+func _begin_turret_placement(touch_id: int = -1) -> void:
+    var p: Dictionary = players.get(local_player_id, {})
+    if p.is_empty() or int(p.get("turret_kits", 0)) <= 0:
+        ui_status = "NO TURRET KIT — collect the marked airdrop"
+        return
+    if turrets.size() >= MAX_TURRETS:
+        ui_status = "TURRET LIMIT REACHED — only four can be deployed"
+        return
+    grenade_aim_active = false
+    grenade_aim_touch_id = -1
+    grenade_requested = false
+    wall_place_active = false
+    wall_place_touch_id = -1
+    build_requested = false
+    turret_requested = false
+    turret_place_active = true
+    turret_place_touch_id = touch_id
+    var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+    var face: float = -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
+    turret_preview_position = Vector2(
+        clampf(player_pos.x + face * 88.0, 35.0, maxf(36.0, screen_size.x - 35.0)),
+        clampf(player_pos.y + 6.0, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+    )
+    ui_status = "HOLD & DRAG TURRET • GREEN CIRCLE VALID • RELEASE TO DEPLOY"
+
+func _draw_turret_placement_preview() -> void:
+    var valid: bool = _turret_placement_is_valid(local_player_id, turret_preview_position)
+    var radius := TURRET_RANGE
+    if not is_host:
+        radius *= screen_size.x / maxf(1.0, host_world_w)
+    var fill := Color(0.36, 0.80, 0.40, 0.10) if valid else Color(0.92, 0.30, 0.22, 0.10)
+    var line_color := Color("#92d578", 0.84) if valid else Color("#e46e58", 0.92)
+    var ring_points := PackedVector2Array()
+    for point_index in range(48):
+        var angle := TAU * float(point_index) / 48.0
+        ring_points.append(turret_preview_position + Vector2(cos(angle), sin(angle)) * radius)
+    draw_colored_polygon(ring_points, fill)
+    draw_arc(turret_preview_position, radius, 0.0, TAU, 80, line_color, 1.5, true)
+    draw_arc(turret_preview_position, 28.0, 0.0, TAU, 32, Color(line_color.r, line_color.g, line_color.b, 0.55), 1.0, true)
+    _draw_turret_entity({"id": -1, "x": turret_preview_position.x, "y": turret_preview_position.y, "hp": TURRET_MAX_HP, "max_hp": TURRET_MAX_HP, "angle": 0.0, "flash_timer": 0.0}, true, valid)
+    var note := "RANGE 270  •  RELEASE TO DEPLOY" if valid else "BLOCKED / OUT OF RANGE"
+    draw_rect(Rect2(turret_preview_position.x - 93.0, turret_preview_position.y - 70.0, 186.0, 17.0), Color(0.008, 0.012, 0.014, 0.82))
+    draw_string(ui_font, Vector2(turret_preview_position.x - 90.0, turret_preview_position.y - 58.0), note, HORIZONTAL_ALIGNMENT_CENTER, 180.0, 9, line_color)
+
+func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid: bool = true) -> void:
+    var pos := Vector2(float(turret.get("x", 0.0)), float(turret.get("y", 0.0)))
+    var max_hp := maxf(1.0, float(turret.get("max_hp", TURRET_MAX_HP)))
+    var hp_ratio := clampf(float(turret.get("hp", max_hp)) / max_hp, 0.0, 1.0)
+    var alpha := 0.48 if is_preview else 1.0
+    var steel := Color("#4d5148", alpha)
+    var dark := Color("#1c2423", alpha)
+    var edge := Color("#8c8d79", alpha)
+    var bronze := Color("#7e6547", alpha)
+    if is_preview and not is_valid:
+        steel = steel.lerp(Color("#8b3439", alpha), 0.48)
+        edge = edge.lerp(Color("#e35a55", alpha), 0.62)
+    draw_ellipse_shadow(pos + Vector2(0.0, 30.0), 29.0, 6.0, 0.40 * alpha)
+    # Tripod feet and hinged support legs.
+    for foot in [Vector2(-24.0, 28.0), Vector2(24.0, 28.0), Vector2(0.0, 32.0)]:
+        var knee := Vector2(0.0, -1.0).lerp(foot, 0.57) + Vector2(0.0, 4.0)
+        draw_line(pos + Vector2(0.0, 2.0), pos + knee, dark, 7.0, true)
+        draw_line(pos + Vector2(0.0, 2.0), pos + knee, steel, 4.0, true)
+        draw_line(pos + knee, pos + foot, dark, 6.0, true)
+        draw_line(pos + knee, pos + foot, edge, 3.0, true)
+        draw_circle(pos + knee, 3.2, dark)
+        draw_circle(pos + knee, 1.5, bronze)
+        draw_rect(Rect2(pos + foot - Vector2(5.0, 1.5), Vector2(10.0, 3.0)), dark)
+        draw_rect(Rect2(pos + foot - Vector2(4.0, 1.0), Vector2(8.0, 1.0)), bronze)
+    draw_rect(Rect2(pos + Vector2(-9.0, -7.0), Vector2(18.0, 20.0)), dark)
+    draw_rect(Rect2(pos + Vector2(-7.0, -7.0), Vector2(14.0, 17.0)), steel)
+    draw_rect(Rect2(pos + Vector2(-4.0, -4.0), Vector2(8.0, 4.0)), bronze)
+    var pivot := pos + Vector2(0.0, -24.0)
+    var raw_angle: float = float(turret.get("angle", 0.0))
+    var flip_x: float = -1.0 if cos(raw_angle) < 0.0 else 1.0
+    var draw_angle: float = wrapf(raw_angle - PI, -PI, PI) if flip_x < 0.0 else raw_angle
+    draw_set_transform(pivot, draw_angle, Vector2(flip_x, 1.0))
+    draw_rect(Rect2(-14.0, -8.0, 31.0, 15.0), dark)
+    draw_rect(Rect2(-12.0, -7.0, 26.0, 12.0), steel)
+    draw_rect(Rect2(-9.0, -10.0, 15.0, 4.0), edge)
+    draw_rect(Rect2(-4.0, -12.0, 9.0, 4.0), bronze)
+    # Brief recoil retracts the barrel slightly on each synchronized shot.
+    var firing_flash: float = clampf(float(turret.get("flash_timer", 0.0)) / 0.075, 0.0, 1.0)
+    var barrel_kick: float = firing_flash * 2.2
+    draw_rect(Rect2(8.0 - barrel_kick, -3.0, 27.0, 5.0), dark)
+    draw_rect(Rect2(11.0 - barrel_kick, -2.0, 24.0, 3.0), edge)
+    draw_rect(Rect2(17.0 - barrel_kick, -5.0, 11.0, 9.0), bronze)
+    draw_rect(Rect2(31.0 - barrel_kick, -2.0, 4.0, 3.0), dark)
+    if firing_flash > 0.01:
+        draw_colored_polygon(PackedVector2Array([Vector2(36.0, 0.0), Vector2(44.0, -5.0), Vector2(41.0, 0.0), Vector2(44.0, 5.0)]), Color("#ffc86b", alpha * firing_flash))
+        draw_circle(Vector2(37.0, 0.0), 2.5 * firing_flash, Color("#fff0ac", alpha * firing_flash))
+    draw_circle(Vector2(-5.0, -1.0), 3.5, dark)
+    draw_circle(Vector2(-5.0, -1.0), 1.8, bronze)
+    draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+    if not is_preview:
+        var hp_rect := Rect2(pos.x - 23.0, pos.y - 53.0, 46.0, 4.0)
+        draw_rect(Rect2(hp_rect.position - Vector2(1.0, 1.0), hp_rect.size + Vector2(2.0, 2.0)), Color(0.01, 0.012, 0.014, 0.90))
+        draw_rect(hp_rect, Color("#402a26"))
+        draw_rect(Rect2(hp_rect.position, Vector2(hp_rect.size.x * hp_ratio, hp_rect.size.y)), Color("#8ec477") if hp_ratio > 0.4 else Color("#d35d4c"))
+        if hp_ratio < 0.32:
+            var smoke_offset: float = sin(animation_clock * 7.0 + float(int(turret.get("id", 0)))) * 2.0
+            draw_circle(pos + Vector2(-7.0, -38.0 + smoke_offset), 2.4, Color(0.16, 0.17, 0.15, 0.50))
+            draw_circle(pos + Vector2(1.0, -42.0 - smoke_offset), 3.0, Color(0.20, 0.19, 0.17, 0.34))
+
+func _update_turrets(delta: float) -> void:
+    for turret_index in range(turrets.size() - 1, -1, -1):
+        var turret: Dictionary = turrets[turret_index]
+        turret["fire_timer"] = maxf(0.0, float(turret.get("fire_timer", 0.0)) - delta)
+        turret["flash_timer"] = maxf(0.0, float(turret.get("flash_timer", 0.0)) - delta)
+        var turret_pos := Vector2(float(turret.get("x", 0.0)), float(turret.get("y", 0.0)))
+        var target_index := -1
+        var nearest_distance: float = TURRET_RANGE
+        for zombie_index in range(zombies.size()):
+            var zombie: Dictionary = zombies[zombie_index]
+            var zombie_pos := Vector2(float(zombie.get("x", 0.0)), float(zombie.get("y", 0.0)))
+            var distance := turret_pos.distance_to(zombie_pos)
+            if distance < nearest_distance:
+                nearest_distance = distance
+                target_index = zombie_index
+        var desired_angle: float = sin(world_time * 0.63 + float(int(turret.get("id", 0)))) * 0.10
+        var target_pos := turret_pos + Vector2.RIGHT * TURRET_RANGE
+        if target_index >= 0:
+            target_pos = Vector2(float(zombies[target_index].get("x", 0.0)), float(zombies[target_index].get("y", 0.0)) - 11.0)
+            desired_angle = (target_pos - (turret_pos + Vector2(0.0, -24.0))).angle()
+        var current_angle: float = float(turret.get("angle", 0.0))
+        var angle_delta: float = wrapf(desired_angle - current_angle, -PI, PI)
+        current_angle += clampf(angle_delta, -TURRET_TURN_SPEED * delta, TURRET_TURN_SPEED * delta)
+        turret["angle"] = wrapf(current_angle, -PI, PI)
+        if target_index >= 0 and absf(angle_delta) < 0.30 and float(turret.get("fire_timer", 0.0)) <= 0.0:
+            var target: Dictionary = zombies[target_index]
+            target["hp"] = float(target.get("hp", 1.0)) - TURRET_DAMAGE
+            target["hit_timer"] = 0.10
+            zombies[target_index] = target
+            var muzzle := turret_pos + Vector2(0.0, -24.0) + Vector2(cos(current_angle), sin(current_angle)) * 37.0
+            _add_combat_effect(14, muzzle, target_pos, 0.12)
+            turret["fire_timer"] = TURRET_FIRE_INTERVAL
+            turret["flash_timer"] = 0.075
+            if float(target.get("hp", 0.0)) <= 0.0:
+                _add_combat_effect(4, target_pos, target_pos, 0.32)
+                zombies.remove_at(target_index)
+                wave_kills = mini(wave_total, wave_kills + 1)
+                _emit_sfx("death")
+        turrets[turret_index] = turret
+
 func _snap_wall_preview_to_neighbour(desired: Vector2, player_pos: Vector2) -> Vector2:
     # Snap horizontal chains to the 4 px visual join gap and vertical rows to a much tighter
     # 60 px lane step. Lower rows are depth-sorted in front, so their sprite can naturally
@@ -2675,6 +3070,9 @@ func _begin_grenade_aim(touch_id: int = -1) -> void:
     wall_place_active = false
     wall_place_touch_id = -1
     build_requested = false
+    turret_place_active = false
+    turret_place_touch_id = -1
+    turret_requested = false
     grenade_requested = false
     grenade_aim_active = true
     grenade_aim_touch_id = touch_id
@@ -2714,6 +3112,9 @@ func _begin_wall_placement(touch_id: int = -1) -> void:
     grenade_aim_active = false
     grenade_aim_touch_id = -1
     grenade_requested = false
+    turret_place_active = false
+    turret_place_touch_id = -1
+    turret_requested = false
     wall_place_active = true
     wall_place_touch_id = touch_id
     build_requested = false
@@ -2731,6 +3132,9 @@ func _cancel_targeting_modes() -> void:
     grenade_aim_touch_id = -1
     wall_place_active = false
     wall_place_touch_id = -1
+    turret_place_active = false
+    turret_place_touch_id = -1
+    turret_requested = false
     grenade_requested = false
     build_requested = false
 
@@ -2760,7 +3164,14 @@ func _spawn_airdrop() -> void:
     var loot_kind := "grenade"
     var quantity := randi_range(1, 2)
     var weapon_id := 0
-    if loot_roll >= 88:
+    var squad_has_turret := not turrets.is_empty()
+    for player_variant in players.keys():
+        if int(players[int(player_variant)].get("turret_kits", 0)) > 0:
+            squad_has_turret = true
+    if (airdrop_sequence % 4 == 0 and not squad_has_turret) or loot_roll >= 96:
+        loot_kind = "turret"
+        quantity = 1
+    elif loot_roll >= 88:
         var owned_weapon_types: Array[int] = []
         for player_variant in players.keys():
             var owned_player: Dictionary = players[int(player_variant)]
@@ -2856,6 +3267,15 @@ func _grant_airdrop_loot(id: int, drop: Dictionary) -> void:
             _give_weapon(p, weapon_drop_id)
             var active_weapon := _active_weapon_id(p)
             ui_status = "AIRDROP: %s · %d/%d" % [_weapon_name(active_weapon), _slot_mag(p, int(p.get("active_slot", 0))), _slot_reserve(p, int(p.get("active_slot", 0)))]
+        "turret":
+            var before_turrets := int(p.get("turret_kits", 0))
+            p["turret_kits"] = mini(TURRET_KIT_MAX_CARRY, before_turrets + quantity)
+            var received_turrets := int(p["turret_kits"]) - before_turrets
+            if received_turrets > 0:
+                ui_status = "SUPPLY LOOT: +%d AUTO TURRET KIT • HOLD & DRAG TUR" % received_turrets
+            else:
+                p["wall_kits"] = mini(WALL_KIT_MAX_CARRY, int(p.get("wall_kits", 0)) + 1)
+                ui_status = "TURRET KIT CAPACITY FULL — converted to +1 wall kit"
         "ammo":
             var ammo_weapon_id := clampi(int(drop.get("weapon_id", WEAPON_SMG)), WEAPON_SMG, WEAPON_ROCKET)
             var ammo_slot := _find_weapon_slot(p, ammo_weapon_id)
@@ -2987,6 +3407,7 @@ func _restart_run() -> void:
     zombies.clear()
     airdrops.clear()
     barricades.clear()
+    turrets.clear()
     active_grenades.clear()
     active_projectiles.clear()
     combat_effects.clear()
@@ -2995,6 +3416,7 @@ func _restart_run() -> void:
     heal_cooldowns.clear()
     grenade_cooldowns.clear()
     build_cooldowns.clear()
+    turret_sequence = 1
     airdrop_spawn_timer = AIRDROP_FIRST_DELAY
     airdrop_sequence = 1
     world_time = 0.0
@@ -3020,6 +3442,7 @@ func _restart_run() -> void:
         p["ammo"] = -1
         p["grenades"] = 3
         p["wall_kits"] = 2
+        p["turret_kits"] = 0
         p["active_slot"] = 0
         p["slot1_type"] = -1
         p["slot1_mag"] = 0
@@ -3053,7 +3476,7 @@ func _save_world(announce: bool = true) -> void:
     if not is_host:
         return
     var data := {
-        "version": 5,
+        "version": 6,
         "seed": world_seed,
         "time": world_time,
         "wave_number": wave_number,
@@ -3067,7 +3490,8 @@ func _save_world(announce: bool = true) -> void:
         "airdrop_spawn_timer": airdrop_spawn_timer,
         "zombies": zombies,
         "airdrops": airdrops,
-        "barricades": barricades
+        "barricades": barricades,
+        "turrets": turrets
     }
     var file := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
     if file == null:
@@ -3108,6 +3532,7 @@ func _load_world() -> void:
     zombies.clear()
     airdrops.clear()
     barricades.clear()
+    turrets.clear()
     active_grenades.clear()
     active_projectiles.clear()
     var saved_zombies = parsed.get("zombies", [])
@@ -3162,6 +3587,21 @@ func _load_world() -> void:
                     "max_hp": maxf(1.0, float(wall.get("max_hp", 90.0))),
                     "owner_id": int(wall.get("owner_id", 1))
                 })
+    var saved_turrets = parsed.get("turrets", [])
+    if typeof(saved_turrets) == TYPE_ARRAY:
+        for turret in saved_turrets:
+            if typeof(turret) == TYPE_DICTIONARY and turret.has("x") and turret.has("y") and turrets.size() < MAX_TURRETS:
+                turrets.append({
+                    "id": int(turret.get("id", _next_turret_id())) & 0xFFFF,
+                    "x": clampf(float(turret.get("x", screen_size.x * 0.5)), 35.0, maxf(36.0, screen_size.x - 35.0)),
+                    "y": clampf(float(turret.get("y", screen_size.y * 0.7)), _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE),
+                    "hp": clampf(float(turret.get("hp", TURRET_MAX_HP)), 1.0, TURRET_MAX_HP),
+                    "max_hp": TURRET_MAX_HP,
+                    "angle": float(turret.get("angle", 0.0)),
+                    "fire_timer": 0.2,
+                    "flash_timer": 0.0,
+                    "owner_id": int(turret.get("owner_id", 1))
+                })
     players.clear()
     input_vectors.clear()
 
@@ -3196,6 +3636,7 @@ func _start_host() -> void:
     zombies.clear()
     airdrops.clear()
     barricades.clear()
+    turrets.clear()
     active_grenades.clear()
     active_projectiles.clear()
     airdrop_spawn_timer = AIRDROP_FIRST_DELAY
@@ -3205,6 +3646,7 @@ func _start_host() -> void:
     heal_cooldowns.clear()
     grenade_cooldowns.clear()
     build_cooldowns.clear()
+    turret_sequence = 1
     wave_number = 1
     wave_total = _zombie_count_for_wave(wave_number)
     wave_spawned = 0
@@ -3315,6 +3757,7 @@ func _reset_network_state() -> void:
     zombies.clear()
     airdrops.clear()
     barricades.clear()
+    turrets.clear()
     active_grenades.clear()
     active_projectiles.clear()
     airdrop_spawn_timer = AIRDROP_FIRST_DELAY
@@ -3691,6 +4134,8 @@ func _draw_game_world() -> void:
         render_entries.append({"y": float(zombies[zi].get("y", h * 0.68)), "type": "zombie", "index": zi})
     for wi in range(barricades.size()):
         render_entries.append({"y": float(barricades[wi].get("y", h * 0.68)) + 2.0, "type": "barricade", "index": wi})
+    for ti in range(turrets.size()):
+        render_entries.append({"y": float(turrets[ti].get("y", h * 0.68)) + 6.0, "type": "turret", "index": ti})
     for di in range(airdrops.size()):
         render_entries.append({"y": float(airdrops[di].get("y", h * 0.68)) + 35.0, "type": "airdrop", "index": di})
     for gi in range(active_grenades.size()):
@@ -3761,6 +4206,10 @@ func _draw_game_world() -> void:
             var wall: Dictionary = barricades[int(entry.index)]
             pos = Vector2(float(wall.get("x", 0.0)), float(wall.get("y", h * 0.68)))
             _draw_barricade(wall, pos)
+        elif entry_type == "turret":
+            var turret: Dictionary = turrets[int(entry.index)]
+            pos = Vector2(float(turret.get("x", 0.0)), float(turret.get("y", h * 0.68)))
+            _draw_turret_entity(turret)
         elif entry_type == "airdrop":
             var drop: Dictionary = airdrops[int(entry.index)]
             pos = Vector2(float(drop.get("x", 0.0)), float(drop.get("y", h * 0.68)))
@@ -3799,7 +4248,9 @@ func _draw_game_world() -> void:
         _draw_grenade_aim_preview()
     if wall_place_active:
         _draw_wall_placement_preview()
-    if screen_mode == "game":
+    if turret_place_active:
+        _draw_turret_placement_preview()
+    if screen_mode == "game" and aim_marker_enabled:
         _draw_aim_direction_marker()
     _draw_combat_effects()
     _draw_game_hud()
@@ -3919,6 +4370,9 @@ func _draw_airdrop(drop: Dictionary, pos: Vector2) -> void:
             "ammo":
                 loot_tag = "%s AMMO" % _weapon_name(int(drop.get("weapon_id", WEAPON_SMG)))
                 loot_color = Color("#9fd0dc")
+            "turret":
+                loot_tag = "AUTO TURRET +1"
+                loot_color = Color("#d2b57a")
 
     if landed:
         var remaining := clampf(float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)), 0.0, AIRDROP_LAND_LIFETIME)
@@ -4072,7 +4526,7 @@ func _draw_player_weapon(pos: Vector2, p: Dictionary) -> void:
     var bob := gait * (1.2 if moving else 0.35)
     var shoot_timer := float(p.get("shoot_timer", 0.0))
     var recoil := clampf(shoot_timer / 0.19, 0.0, 1.0)
-    var weapon_y := -14.0 + bob - recoil * 1.0
+    var weapon_y := 8.0 + bob - recoil * 1.0
 
     # Weapon sprites are long side-on illustrations. Fit them compactly and anchor their muzzle
     # to the same ~24 px firing origin used by the actual gameplay ray, instead of floating far
@@ -4110,13 +4564,13 @@ func _draw_player_weapon(pos: Vector2, p: Dictionary) -> void:
     var weapon_center := pos + Vector2(facing_sign * (24.0 - draw_w * 0.5 - recoil_shift), weapon_y)
     var grip_x := 24.0 - draw_w * (1.0 - grip_ratio) - recoil_shift
     var support_x := 24.0 - draw_w * (1.0 - support_ratio) - recoil_shift
-    var grip_y := weapon_y + 2.0
-    var support_y := weapon_y + 1.0
+    var grip_y := weapon_y + 1.0
+    var support_y := weapon_y + 0.5
     var grip := pos + Vector2(facing_sign * grip_x, grip_y + bob * 0.18)
     var support_hand := pos + Vector2(facing_sign * support_x, support_y + bob * 0.16)
 
     # Back arm goes behind the gun; this visually connects the shoulder to the fore-end.
-    var rear_shoulder := pos + Vector2(facing_sign * 1.5, -21.0 + bob)
+    var rear_shoulder := pos + Vector2(facing_sign * 1.5, -17.0 + bob)
     _draw_weapon_arm_segment(rear_shoulder, support_hand, Color("#4c5148"), false)
 
     if weapon_id == WEAPON_SIDEARM:
@@ -4141,7 +4595,7 @@ func _draw_player_weapon(pos: Vector2, p: Dictionary) -> void:
                 draw_texture_rect(texture, pos_rect, false, Color.WHITE)
 
     # Front arm and hand sit over the trigger/handle, making the weapon feel held rather than pasted on.
-    var front_shoulder := pos + Vector2(facing_sign * 5.0, -17.0 + bob)
+    var front_shoulder := pos + Vector2(facing_sign * 5.0, -13.0 + bob)
     _draw_weapon_arm_segment(front_shoulder, grip, Color("#5b5c4c"), true)
     draw_circle(grip, 2.3, Color("#a97550"))
     draw_circle(grip + Vector2(facing_sign * 0.5, -0.6), 1.1, Color("#d6a06e"))
@@ -4186,9 +4640,9 @@ func _draw_aim_direction_marker() -> void:
         if projection > 16.0 and projection <= projection_limit and absf(offset.y) <= float(profile.get("lane", SHOT_LANE_TOLERANCE)):
             projection_limit = projection
             has_target = true
-    var muzzle := player_pos + facing * 24.0 + Vector2(0.0, -5.0)
+    var muzzle := player_pos + facing * 24.0 + Vector2(0.0, 7.0)
     var marker_x := clampf(player_pos.x + facing.x * projection_limit, 8.0, maxf(8.0, screen_size.x - 8.0))
-    var marker_pos := Vector2(marker_x, player_pos.y - 5.0)
+    var marker_pos := Vector2(marker_x, player_pos.y + 7.0)
     var marker_color := Color("#b5df91") if has_target else Color("#d5c79a")
     var available_distance := maxf(0.0, (marker_pos.x - muzzle.x) * facing.x)
 
@@ -4257,6 +4711,7 @@ func _draw_game_hud() -> void:
     var medkits := int(local_p.get("medkits", 2))
     var grenades := int(local_p.get("grenades", 3))
     var wall_kits := int(local_p.get("wall_kits", 2))
+    var turret_kits := int(local_p.get("turret_kits", 0))
     var health_rect := Rect2(w - 274.0, 12, 239.0, 61.0)
     draw_rect(Rect2(health_rect.position + Vector2(3, 4), health_rect.size), Color(0.0, 0.0, 0.0, 0.40))
     draw_rect(health_rect, Color(0.015, 0.025, 0.03, 0.94))
@@ -4270,7 +4725,7 @@ func _draw_game_hud() -> void:
     var ammo_text := "AMMO ∞" if active_weapon == WEAPON_SIDEARM else "AMMO %d/%d" % [_slot_mag(local_p, int(local_p.get("active_slot", 0))), _slot_reserve(local_p, int(local_p.get("active_slot", 0)))]
     if float(local_p.get("reload_timer", 0.0)) > 0.0:
         ammo_text = "RELOAD %.1fs" % float(local_p.get("reload_timer", 0.0))
-    draw_string(ui_font, Vector2(w - 260, 62), "%s • G%d M%d W%d" % [ammo_text, grenades, medkits, wall_kits], HORIZONTAL_ALIGNMENT_LEFT, 219, 7, Color("#d5c7a9"))
+    draw_string(ui_font, Vector2(w - 260, 62), "%s • G%d M%d W%d T%d" % [ammo_text, grenades, medkits, wall_kits, turret_kits], HORIZONTAL_ALIGNMENT_LEFT, 219, 7, Color("#d5c7a9"))
 
     var control_scale := _control_scale()
     var joystick_radius := _joystick_radius()
@@ -4288,13 +4743,17 @@ func _draw_game_hud() -> void:
     var heal_pos := Vector2(w - 171.0 * control_scale, h - 61.0 * control_scale)
     var grenade_pos := Vector2(w - 173.0 * control_scale, h - 137.0 * control_scale)
     var wall_pos := Vector2(w - 82.0 * control_scale, h - 177.0 * control_scale)
+    var turret_pos := Vector2(w - 82.0 * control_scale, h - 239.0 * control_scale)
     _draw_action_button("game_fire", fire_pos, 41.0 * control_scale, "FIRE", Color("#b83f45"))
     _draw_action_button("game_heal", heal_pos, 31.0 * control_scale, "HEAL", Color("#647d57"))
     var grenade_label := "DRAG" if grenade_aim_active else "GREN %d" % grenades
     var wall_label := "DRAG" if wall_place_active else "WALL %d" % wall_kits
     _draw_action_button("game_grenade", grenade_pos, 29.0 * control_scale, grenade_label, Color("#d0a14b") if grenade_aim_active else Color("#8b7850"))
     _draw_action_button("game_build", wall_pos, 29.0 * control_scale, wall_label, Color("#8bb775") if wall_place_active else Color("#69756b"))
+    var turret_label := "DRAG" if turret_place_active else "TUR %d" % turret_kits
+    _draw_action_button("game_turret", turret_pos, 27.0 * control_scale, turret_label, Color("#d0ac62") if turret_place_active else Color("#66745d"))
     _draw_weapon_slots(local_p, control_scale)
+    _draw_ui_button("game_aim_toggle", Rect2(w * 0.66 - 43.0 * control_scale, 112.0 * control_scale, 86.0 * control_scale, 34.0 * control_scale), "AIM", "ON" if aim_marker_enabled else "OFF", Color("#8bb775") if aim_marker_enabled else Color("#7b8584"), false)
     _draw_ui_button("game_pause", Rect2(w - 65.0, 72.0, 49.0, 41.0), "Ⅱ", "", Color("#c19a68"), false)
     if SHOW_NET_STATS and _is_connected_client():
         _draw_net_stats()
@@ -4396,6 +4855,15 @@ func _draw_action_button(id: String, pos: Vector2, radius: float, label: String,
         else:
             draw_circle(pos + Vector2(0, -4), 8.0, Color("#252a21"))
             draw_arc(pos + Vector2(0, -4), 8.0, 0, TAU, 20, Color("#d4bc81"), 1.5)
+        draw_string(ui_font, pos + Vector2(-radius + 1.0, radius * 0.67), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 2.0, 8, Color.WHITE)
+    elif id == "game_turret":
+        draw_line(pos + Vector2(-12.0, 7.0), pos + Vector2(-7.0, -2.0), Color("#28312d"), 4.0, true)
+        draw_line(pos + Vector2(-7.0, -2.0), pos + Vector2(0.0, 7.0), Color("#9fa18a"), 3.0, true)
+        draw_line(pos + Vector2(0.0, 7.0), pos + Vector2(12.0, 7.0), Color("#28312d"), 4.0, true)
+        draw_rect(Rect2(pos.x - 10.0, pos.y - 10.0, 19.0, 11.0), Color("#252d2a"))
+        draw_rect(Rect2(pos.x - 8.0, pos.y - 8.0, 15.0, 7.0), Color("#89907a"))
+        draw_line(pos + Vector2(3.0, -5.0), pos + Vector2(15.0, -5.0), Color("#252d2a"), 4.0, true)
+        draw_line(pos + Vector2(4.0, -5.0), pos + Vector2(15.0, -5.0), Color("#b1a47b"), 1.5, true)
         draw_string(ui_font, pos + Vector2(-radius + 1.0, radius * 0.67), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 2.0, 8, Color.WHITE)
     else:
         if barricade_texture != null:
@@ -4830,6 +5298,13 @@ func _handle_ui_button(id: String) -> void:
         "lobby_leave":
             _leave_world()
             ui_status = "Lobby disconnected"
+        "game_aim_toggle":
+            aim_marker_enabled = not aim_marker_enabled
+            var control_settings := ConfigFile.new()
+            control_settings.load("user://settings.cfg")
+            control_settings.set_value("controls", "aim_marker_enabled", aim_marker_enabled)
+            control_settings.save("user://settings.cfg")
+            ui_status = "AIM ASSIST MARKER %s" % ("ON" if aim_marker_enabled else "OFF")
         "game_pause":
             screen_mode = "pause"
             joystick_vector = Vector2.ZERO
@@ -4854,6 +5329,11 @@ func _handle_ui_button(id: String) -> void:
                 build_requested = true
             else:
                 _begin_wall_placement()
+        "game_turret":
+            if turret_place_active:
+                turret_requested = true
+            else:
+                _begin_turret_placement()
         "pause_resume":
             screen_mode = "game"
         "pause_save":
@@ -4900,6 +5380,8 @@ func _input(event: InputEvent) -> void:
             _update_grenade_target_from_pointer(event.position)
         elif event.index == wall_place_touch_id and wall_place_active:
             _set_wall_preview_from_pointer(event.position)
+        elif event.index == turret_place_touch_id and turret_place_active:
+            _set_turret_preview_from_pointer(event.position)
     elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
         if event.pressed:
             _touch_start(-2, event.position)
@@ -4912,6 +5394,8 @@ func _input(event: InputEvent) -> void:
             _update_grenade_target_from_pointer(event.position)
         elif wall_place_touch_id == -2 and wall_place_active:
             _set_wall_preview_from_pointer(event.position)
+        elif turret_place_touch_id == -2 and turret_place_active:
+            _set_turret_preview_from_pointer(event.position)
 
 func _touch_start(index: int, pos: Vector2) -> void:
     if screen_mode == "game":
@@ -4922,6 +5406,10 @@ func _touch_start(index: int, pos: Vector2) -> void:
         var wall_rect: Rect2 = button_rects.get("game_build", Rect2())
         if wall_rect.has_point(pos):
             _begin_wall_placement(index)
+            return
+        var turret_rect: Rect2 = button_rects.get("game_turret", Rect2())
+        if turret_rect.has_point(pos):
+            _begin_turret_placement(index)
             return
     if _handle_press(pos, index):
         return
@@ -4935,6 +5423,10 @@ func _touch_start(index: int, pos: Vector2) -> void:
     if grenade_aim_active and grenade_aim_touch_id < 0 and pos.y >= _arena_top() - 5.0 and pos.y <= _arena_bottom() + 8.0:
         grenade_aim_touch_id = index
         _update_grenade_target_from_pointer(pos)
+        return
+    if turret_place_active and turret_place_touch_id < 0 and pos.y >= _arena_top() - 5.0 and pos.y <= _arena_bottom() + 8.0:
+        turret_place_touch_id = index
+        _set_turret_preview_from_pointer(pos)
         return
     if pos.x < screen_size.x * 0.40 and pos.y > screen_size.y * 0.57 and not joystick_active:
         joystick_active = true
@@ -4950,6 +5442,10 @@ func _touch_end(index: int) -> void:
         wall_place_touch_id = -1
         if wall_place_active:
             build_requested = true
+    if index == turret_place_touch_id:
+        turret_place_touch_id = -1
+        if turret_place_active:
+            turret_requested = true
     if index == fire_touch_id:
         fire_held = false
         fire_touch_id = -1

@@ -21,12 +21,12 @@ func _initialize() -> void:
     rng.seed = 11
 
     var scenarios := [
-        {"name": "lobby, 2 players, idle", "p": 2, "z": 0, "fx": 0, "g": 0, "w": 0, "d": 0},
-        {"name": "2 players, 6 zombies, idle", "p": 2, "z": 6, "fx": 0, "g": 0, "w": 0, "d": 0},
-        {"name": "2 players, 10 zombies, shooting", "p": 2, "z": 10, "fx": 4, "g": 0, "w": 0, "d": 0},
-        {"name": "4 players, 14 zombies, busy", "p": 4, "z": 14, "fx": 12, "g": 1, "w": 3, "d": 1},
-        {"name": "4 players, 14 zombies, worst case", "p": 4, "z": 14, "fx": 36, "g": 3, "w": 8, "d": 2},
-        {"name": "boss + 13 zombies, normalized boss HP", "p": 4, "z": 14, "fx": 12, "g": 1, "w": 3, "d": 1},
+        {"name": "lobby, 2 players, idle", "p": 2, "z": 0, "fx": 0, "g": 0, "w": 0, "t": 0, "d": 0},
+        {"name": "2 players, 6 zombies, idle", "p": 2, "z": 6, "fx": 0, "g": 0, "w": 0, "t": 1, "d": 0},
+        {"name": "2 players, 10 zombies, shooting", "p": 2, "z": 10, "fx": 4, "g": 0, "w": 0, "t": 0, "d": 0},
+        {"name": "4 players, 14 zombies, busy", "p": 4, "z": 14, "fx": 12, "g": 1, "w": 3, "t": 2, "d": 1},
+        {"name": "4 players, 14 zombies, worst case", "p": 4, "z": 14, "fx": 36, "g": 3, "w": 8, "t": 4, "d": 2},
+        {"name": "boss + 13 zombies, normalized boss HP", "p": 4, "z": 14, "fx": 12, "g": 1, "w": 3, "t": 3, "d": 1},
     ]
     check(game._zombie_count_for_wave(1) == 25, "wave 1 starts with 25 infected")
     check(game._zombie_count_for_wave(2) == 30, "wave 2 grows beyond 25")
@@ -42,6 +42,7 @@ func _initialize() -> void:
         game.zombies.clear()
         game.combat_effects.clear()
         game.barricades.clear()
+        game.turrets.clear()
         game.airdrops.clear()
         game.active_grenades.clear()
         game.cmd_last_seq.clear()
@@ -49,7 +50,7 @@ func _initialize() -> void:
         for i in range(int(sc.p) - 1):
             ids.append(rng.randi_range(100000, 2000000000))
         for pid in ids:
-            game.players[pid] = {"x": rng.randf_range(30, 1170), "y": rng.randf_range(300, 460), "hp": rng.randf_range(1, 100), "medkits": 2, "ammo": -1, "grenades": 3, "wall_kits": 2, "face_x": -1.0, "name": "P", "walking": true, "shoot_timer": 0.17, "hurt_timer": 0.0}
+            game.players[pid] = {"x": rng.randf_range(30, 1170), "y": rng.randf_range(300, 460), "hp": rng.randf_range(1, 100), "medkits": 2, "ammo": -1, "grenades": 3, "wall_kits": 2, "turret_kits": rng.randi_range(0, 2), "face_x": -1.0, "name": "P", "walking": true, "shoot_timer": 0.17, "hurt_timer": 0.0}
             game.cmd_last_seq[pid] = rng.randi_range(0, 100000)
         for i in range(int(sc.z)):
             var zombie_kind := 4 if boss_scenario and i == 0 else rng.randi_range(0, 3)
@@ -61,6 +62,8 @@ func _initialize() -> void:
             game.combat_effects.append({"eid": i + 1, "born_ms": born - i * 5, "src": ids[0], "kind": i % 8, "x": rng.randf_range(0, 1100), "y": 300.0, "x2": 500.0, "y2": 320.0, "ttl": 0.1, "life": 0.3})
         for i in range(int(sc.w)):
             game.barricades.append({"id": rng.randi(), "x": 100.0 + i * 130, "y": 380.0, "hp": 90.0 - i, "max_hp": 125.0, "owner_id": 1})
+        for i in range(int(sc.get("t", 0))):
+            game.turrets.append({"id": i + 1, "x": 250.0 + i * 115.0, "y": 374.0 + (i % 2) * 44.0, "hp": 140.0 - i, "max_hp": game.TURRET_MAX_HP, "angle": -0.5 + i * 0.25, "fire_timer": 0.1, "flash_timer": 0.0})
         for i in range(int(sc.d)):
             game.airdrops.append({"id": i + 1, "x": 300.0 + i * 200, "y": 350.0, "start_y": 280.0, "land_y": 400.0, "elapsed": 1.3, "fall_duration": 2.6, "despawn_timer": 20.0, "landed": false, "loot_kind": "wall", "quantity": 2})
         for i in range(int(sc.g)):
@@ -113,6 +116,18 @@ func _initialize() -> void:
             check(near(float(z.hp), float(zr.hp), hp_tolerance), "zombie hp")
             check(int(zr.kind) == int(z.kind), "zombie kind")
         check(snap.walls.size() == int(sc.w), sc.name + ": walls")
+        check(snap.turrets.size() == int(sc.get("t", 0)), sc.name + ": turrets")
+        for turret_index in range(snap.turrets.size()):
+            var source_turret: Dictionary = game.turrets[turret_index]
+            var decoded_turret: Dictionary = snap.turrets[turret_index]
+            check(int(source_turret.id) == int(decoded_turret.id), "turret id round-trip")
+            check(near(float(source_turret.x), float(decoded_turret.x), 0.07) and near(float(source_turret.y), float(decoded_turret.y), 0.07), "turret position round-trip")
+            check(near(float(source_turret.hp), float(decoded_turret.hp), 1.0), "turret HP round-trip")
+            check(absf(wrapf(float(source_turret.angle) - float(decoded_turret.angle), -PI, PI)) <= 0.03, "turret head angle round-trip")
+        for pid in ids:
+            var player_source: Dictionary = game.players[pid]
+            var player_decoded: Dictionary = snap.players[pid]
+            check(int(player_decoded.get("turret", 0)) == int(player_source.get("turret_kits", 0)), "turret kits round-trip")
         check(snap.drops.size() == int(sc.d), sc.name + ": drops")
         if int(sc.d) > 0:
             if str(sc.name).contains("worst case"):
@@ -205,6 +220,63 @@ func _initialize() -> void:
             check(attack_frame >= 0 and attack_frame < game.BOSS_ATTACK_FRAME_COUNT, "boss attack frame stays inside sheet")
             check(attack_frame >= previous_frame, "boss attack frames are ordered")
             previous_frame = attack_frame
+
+    # Auto-turret placement, aim tracking, automatic fire and zombie destruction.
+    game.players.clear()
+    game.zombies.clear()
+    game.turrets.clear()
+    game.barricades.clear()
+    game.combat_effects.clear()
+    game.local_player_id = 1
+    game.is_host = true
+    game.is_offline = true
+    game.game_over = false
+    game.players[1] = {
+        "x": 320.0, "y": 390.0, "hp": 100.0, "medkits": 2, "ammo": -1,
+        "grenades": 3, "wall_kits": 2, "turret_kits": 1, "face_x": 1.0,
+        "name": "P1", "walking": false, "shoot_timer": 0.0, "hurt_timer": 0.0,
+        "active_slot": 0, "slot1_type": -1, "slot1_mag": 0, "slot1_reserve": 0,
+        "slot2_type": -1, "slot2_mag": 0, "slot2_reserve": 0, "reload_timer": 0.0
+    }
+    var turret_spot := Vector2(430.0, 390.0)
+    check(game._turret_placement_is_valid(1, turret_spot), "turret spot inside placement ring is valid")
+    check(not game._turret_placement_is_valid(1, Vector2(334.0, 390.0)), "turret cannot be placed too close to owner")
+    game.build_cooldowns[1] = Time.get_ticks_msec() - 1000
+    game._host_build_turret(1, turret_spot.x / game.screen_size.x, turret_spot.y / game.screen_size.y)
+    check(game.turrets.size() == 1, "host successfully deploys one turret kit")
+    check(int(game.players[1].get("turret_kits", 0)) == 0, "successful turret deploy consumes one kit")
+    if game.turrets.size() == 1:
+        var test_target_pos := Vector2(452.0, 390.0)
+        var turret_pivot := turret_spot + Vector2(0.0, -24.0)
+        game.turrets[0]["angle"] = (Vector2(test_target_pos.x, test_target_pos.y - 11.0) - turret_pivot).angle()
+        game.turrets[0]["fire_timer"] = 0.0
+        game.zombies = [{"id": 80808, "kind": 0, "x": test_target_pos.x, "y": test_target_pos.y, "hp": 20.0, "max_hp": 20.0, "walking": true, "attacking": false, "attack_timer": 0.0, "attack_cooldown": 0.0, "hit_timer": 0.0}]
+        game._update_turrets(0.016)
+        check(float(game.zombies[0].get("hp", 20.0)) < 20.0, "auto-turret tracks and damages a zombie in range")
+        # A zombie closer to a turret than any survivor must attack and be able to destroy it.
+        game.players[1]["x"] = 850.0
+        game.turrets[0]["x"] = 450.0
+        game.turrets[0]["y"] = 390.0
+        game.turrets[0]["hp"] = 2.0
+        game.turrets[0]["angle"] = 0.0
+        game.turrets[0]["fire_timer"] = 4.0
+        game.zombies = [{"id": 80809, "kind": 0, "x": 455.0, "y": 390.0, "face_x": 1.0, "hp": 20.0, "max_hp": 20.0, "walking": true, "attacking": false, "attack_timer": 0.0, "attack_cooldown": 0.0, "attack_type": game.BOSS_ATTACK_SLASH, "attack_hit_applied": false, "hit_timer": 0.0}]
+        game.wave_number = 3
+        game.wave_total = 1
+        game.wave_spawned = 1
+        game.wave_kills = 0
+        game.wave_spawn_timer = 60.0
+        game.wave_break_timer = 0.0
+        game.wave_time_remaining = 60.0
+        game.wave_timed_out = false
+        game.input_vectors[1] = Vector2.ZERO
+        game._host_simulate(0.016)
+        check(game.turrets.is_empty(), "zombie melee can destroy a turret")
+    game.players.clear()
+    game.zombies.clear()
+    game.turrets.clear()
+    game.barricades.clear()
+    game.combat_effects.clear()
 
     # Truncation / garbage must never crash and must be rejected.
     var good: PackedByteArray = game._encode_snapshot()

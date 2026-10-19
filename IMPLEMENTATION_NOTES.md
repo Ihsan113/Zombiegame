@@ -1,3 +1,13 @@
+# Implementation notes — v0.4.21
+
+## v0.4.21 turret and aim update
+
+- `assets/sprite_atlas_player_clean.png` is generated from the 320×192 survivor/zombie atlas. Only the four survivor cells have their baked diagonal gun area inpainted; zombie cells and transparent alpha regions are preserved. `_draw_player_weapon()` then draws the selected weapon and custom forearm/hand at chest height. `sprite_atlas.png` remains the source/fallback.
+- The aim assistance marker is local presentation and can be toggled with the AIM button, placed clear of the VITALS panel. Preference is stored in `user://settings.cfg` under `[controls] aim_marker_enabled`; it does not alter authoritative damage.
+- Auto-turret behavior is host authoritative: host validates build placement, consumes one turret kit, tracks the nearest zombie within 270 px, turns its head at 3.8 rad/s, and fires every 0.20 s for 1.35 damage per hit. Each turret has 180 HP. Zombies engage a turret when it is within 132 px and nearer than a survivor; ordinary and boss attacks reduce turret HP and can destroy it. Four turrets maximum.
+- An airdrop rolls an auto-turret kit rarely and guarantees one on every fourth generated drop if the squad has no kit and no deployed turret. Holding/draging the TUR control previews a green/red range circle; release requests host deployment.
+- Snapshot player records are now 30 bytes (one new turret-kit byte); turret records are 8 bytes: id u16, x/y u16, HP u8, angle u8. The encoder still computes the effect budget from the remaining bytes and keeps the full datagram within `MAX_SNAPSHOT_BYTES = 1180`. All LAN clients must run the same version.
+
 # Implementation notes — v0.4.20
 
 - On-player firearm draw sizes were reduced to fit the survivor scale. The muzzle is anchored around `face * 24 px`, matching the authoritative shot origin. Per-weapon grip ratios anchor the trigger and support hands; outlined arm segments render behind/in front of the weapon to reduce the floating-sprite appearance.

@@ -1,6 +1,15 @@
-# Pixel Zombie LAN — v0.4.20
+# Pixel Zombie LAN — v0.4.21
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
+
+## v0.4.21 — Destructible auto-turrets, aim toggle and survivor weapon cleanup
+
+- Added a deployable auto-turret kit delivered by airdrop. Hold and drag from the TUR control to position it; the green/red circular range preview shows placement/range before release.
+- Turret head tracks nearby zombies smoothly, fires server-authoritative shots, displays health/damage smoke, and can be destroyed by the horde. Maximum four turrets per world.
+- Added local AIM marker ON/OFF control, persisted on the device and placed in the upper HUD gap to avoid the VITALS panel.
+- Fixed duplicate/overhead survivor weapons: clean survivor atlas removes baked-in gun pixels, then the selected loadout weapon and arm/hand overlay is drawn along the torso/hand line; visible muzzle and ray effects share the firing lane.
+- Added turret kit count and turret position/HP/head-angle to the LAN snapshot; all players must use the same protocol version.
+- Android version code/name: 33 / 0.4.21. Snapshot cap remains 1180 bytes.
 
 ## v0.4.20 — Weapon grip, aim guide, tighter barricade rows and supplied ambience
 - Reworked survivor weapon rendering: firearms are scaled/placed around the gameplay muzzle, mirrored for facing, and connected to the character with outlined arms and hands. Recoil flash now lines up with the actual shot origin.

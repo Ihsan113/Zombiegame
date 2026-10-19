@@ -1,3 +1,14 @@
+## v0.4.21 — Deployable auto-turret and survivor weapon correction
+
+- Added destructible server-authoritative auto-turrets with a 270 px range, smooth head rotation, muzzle flash/tracer effects, health bar and damage smoke.
+- Added an airdrop turret kit. Each fourth supply drop guarantees one when the squad has neither a kit nor an active turret; rare random drops can also appear. Kit cap is two, and a world supports four deployed turrets.
+- Turret build preview follows the barricade's hold/drag/release placement style and shows the turret's attack radius and invalid placement colour.
+- Zombies will target a turret when it is closer than a survivor and attack it; regular and boss attacks can destroy the turret.
+- Fixed duplicated survivor weapons by adding a cleaned body-only survivor atlas and lowering the selected weapon/hand overlay to the torso. Fire lane and muzzle FX are aligned to the rendered muzzle.
+- Added persistent local AIM marker toggle in a non-overlapping upper HUD position.
+- Extended the player snapshot by one turret-kit byte and added compact turret records (8 bytes each); packet size is still bounded by the existing 1180-byte cap. LAN peers must all update to 0.4.21.
+- Android version code/name: 33 / 0.4.21.
+
 # Changelog — Pixel Zombie LAN
 
 ## v0.4.20 — Weapon grip, aim marker, barricade depth and supplied music

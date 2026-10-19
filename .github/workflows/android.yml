@@ -95,8 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=32' not in preset or 'version/name="0.4.20"' not in preset:
-              raise SystemExit('Android export preset must report version code 32 / version 0.4.20')
+          if 'version/code=33' not in preset or 'version/name="0.4.21"' not in preset:
+              raise SystemExit('Android export preset must report version code 33 / version 0.4.21')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -124,6 +124,12 @@ jobs:
                   raise SystemExit('Unexpected generated VFX dimensions: ' + str(image_path))
               if image_name.startswith('boss_attack_') and (image_width != 1680 or image_height != 226):
                   raise SystemExit('Boss attack sheets must be 5 RGBA frames of 336x226: ' + str(image_path))
+          clean_atlas = root / 'assets' / 'sprite_atlas_player_clean.png'
+          if not clean_atlas.is_file():
+              raise SystemExit('Missing clean survivor atlas; gun must not be baked into the player sprite.')
+          clean_w, clean_h, clean_type = png_metadata(clean_atlas)
+          if (clean_w, clean_h, clean_type) != (320, 192, 6):
+              raise SystemExit('Clean survivor atlas must remain a 320x192 RGBA image.')
           weapon_assets = ['smg.png', 'shotgun.png', 'rifle.png', 'sniper.png', 'rocket.png']
           weapon_dir = root / 'assets' / 'weapons'
           for weapon_asset in weapon_assets:
@@ -158,6 +164,17 @@ jobs:
               'const BARRICADE_FEET: Array[Vector2]',
               'const BARRICADE_JOIN_GAP := 4.0',
               'const BARRICADE_VERTICAL_SPACING := 60.0',
+              'const MAX_TURRETS := 4',
+              'const TURRET_RANGE := 270.0',
+              'const TURRET_RECORD_BYTES := 8',
+              'func _host_build_turret(id: int, x_ratio: float, y_ratio: float) -> void:',
+              'func _turret_placement_is_valid(id: int, turret_pos: Vector2) -> bool:',
+              'func _update_turrets(delta: float) -> void:',
+              'func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid: bool = true) -> void:',
+              'var aim_marker_enabled := true',
+              'func _draw_aim_direction_marker() -> void:',
+              'game_aim_toggle',
+              'res://assets/sprite_atlas_player_clean.png',
               'func _snap_wall_preview_to_neighbour(desired: Vector2, player_pos: Vector2) -> Vector2:',
               'var snap_spacing: float = BARRICADE_RECT_SIZE.x + BARRICADE_JOIN_GAP',
               'func _host_track_arrival(track: Dictionary, vt_before: float) -> void:',
@@ -250,8 +267,8 @@ jobs:
           missing_markers = [marker for marker in required_markers if marker not in script]
           if 'ENetMultiplayerPeer.COMPRESS_FASTLZ' in script or 'peer.compression_mode' in script:
               raise SystemExit('Invalid Godot 4.7 compression API: configure peer.host.compress(ENetConnection.COMPRESS_FASTLZ) after creating the peer.')
-          if 'const SNAPSHOT_HEADER_BYTES := 31' not in script or 'const PLAYER_RECORD_BYTES := 29' not in script or 'const DROP_RECORD_BYTES := 27' not in script or 'const EFFECT_RECORD_BYTES := 16' not in script:
-              raise SystemExit('The v0.4.20 snapshot layout must retain its 29-byte player record and 27-byte drop record.')
+          if 'const SNAPSHOT_HEADER_BYTES := 31' not in script or 'const PLAYER_RECORD_BYTES := 30' not in script or 'const DROP_RECORD_BYTES := 27' not in script or 'const EFFECT_RECORD_BYTES := 16' not in script:
+              raise SystemExit('The v0.4.21 snapshot layout must retain its 30-byte player record, 8-byte turret record and 27-byte drop record.')
           if 'rpc("receive_world", _encode_snapshot()' not in script:
               raise SystemExit('Host snapshot broadcast is missing.')
           if script.count('peer.host.compress(ENetConnection.COMPRESS_FASTLZ)') != 2:
@@ -291,6 +308,9 @@ jobs:
           codec_test = (root / 'tests/codec_test.gd').read_text()
           if '_can_collect_ammo' not in codec_test or 'reserve-full ammo cache tops up the magazine' not in codec_test or 'partial reserve space is filled before excess ammo tops up the magazine' not in codec_test or 'empty firearm with no reserve switches to default sidearm' not in codec_test or 'weapon airdrop subtype round-trips' not in codec_test or 'has a dedicated firing effect' not in codec_test:
               raise SystemExit('Weapon profile, codec, fallback and ammo pickup regression tests are missing')
+          for turret_test_marker in ['turret spot inside placement ring is valid', 'auto-turret tracks and damages a zombie in range', 'zombie melee can destroy a turret']:
+              if turret_test_marker not in codec_test:
+                  raise SystemExit('Missing turret regression test: ' + turret_test_marker)
           if any(marker not in script for marker in weapon_markers):
               raise SystemExit('Finite-ammo weapon and airdrop flow is incomplete')
           if 'draw_line(pos + Vector2(-4.0, 10.0), grenade_visual_pos' in script:
@@ -317,8 +337,8 @@ jobs:
           script = (root / 'scripts/game.gd').read_text()
           for marker in ['func _setup_music() -> void:', 'AudioStreamWAV.LOOP_FORWARD', 'AudioStreamMP3', 'mp3_stream.loop = true', 'func _sync_music_state() -> void:', 'AIRDROP_INTERVAL_MIN := 24.0', 'AIRDROP_INTERVAL_MAX := 34.0', '_emit_sfx("boss_roar")', '_emit_sfx("boss_attack")']:
               if marker not in script:
-                  raise SystemExit('Missing v0.4.20 animation/audio/airdrop feature marker: ' + marker)
-          print(f'Validated {len(refs)} resource references, landscape/version settings, five RGBA firearm sprites, finite firearm ammo with infinite sidearm fallback, compatible ammo pickup, hold-drag controls, death/bone visuals, grenade blast, more frequent airdrops, gameplay music, boss/airdrop SFX, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
+                  raise SystemExit('Missing v0.4.21 animation/audio/airdrop feature marker: ' + marker)
+          print(f'Validated {len(refs)} resource references, landscape/version settings, clean RGBA survivor atlas, five RGBA firearm sprites, destructible deployable auto-turrets, aim marker toggle, finite firearm ammo with infinite sidearm fallback, compatible ammo pickup, hold-drag controls, death/bone visuals, grenade blast, more frequent airdrops, gameplay music, boss/airdrop SFX, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
           PYCODE
 
       - name: Import and validate project scripts
@@ -366,7 +386,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.20-APK
+          name: PixelZombieLAN-v0.4.21-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -375,15 +395,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.20-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.21-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.20-source.zip
+          test -s build/PixelZombieLAN-v0.4.21-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.20-source
-          path: build/PixelZombieLAN-v0.4.20-source.zip
+          name: PixelZombieLAN-v0.4.21-source
+          path: build/PixelZombieLAN-v0.4.21-source.zip
           if-no-files-found: error
           retention-days: 14
