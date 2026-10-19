@@ -1,3 +1,10 @@
+## 0.4.17 — Brute attack animations
+- Added five-frame transparent pixel-art strips for the Brute's claw slash, overhead ground slam, and forward lunge, with consistent ground anchoring and detached edge-fragment cleanup.
+- Added attack-specific wind-up, hit timing, recovery, damage reach/radius, timed barricade damage, lunge movement, and a synchronized ground shockwave/dust/debris effect.
+- Removed the ordinary-zombie swipe overlay from boss renders so it no longer conflicts with the custom frames.
+- Reused two spare bits of the zombie flags byte to transmit boss attack type. The 13-byte zombie record, snapshot size cap, RPC signatures, and network cadence remain unchanged.
+- Android version code/name: 29 / 0.4.17.
+
 ## 0.4.16 — escalating waves, Brute boss, and grounded airdrop
 - Wave target counts rise by five each wave instead of remaining fixed at 25; the displayed counter remains within its one-byte network range.
 - Waves 10, 20, 30, etc. introduce the Brute boss, with dedicated art, health bar, higher durability per boss tier, slower chase speed and harder melee damage. Boss health uses a normalized field, preserving existing record lengths.

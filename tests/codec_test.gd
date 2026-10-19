@@ -99,6 +99,35 @@ func _initialize() -> void:
             check(int(snap.fx[0].src) == ids[0], "effect src mapping")
         print("%-40s %5d bytes  (players %d, zombies %d, effects %d)" % [sc.name, buf.size(), snap.players.size(), snap.zids.size(), snap.fx.size()])
 
+    # Boss attack type reuses spare flags bits without changing the 13-byte zombie record.
+    game.players.clear()
+    game.players[1] = {"x": 320.0, "y": 390.0, "hp": 100.0, "medkits": 2, "ammo": -1, "grenades": 3, "wall_kits": 2, "face_x": 1.0, "name": "P1", "walking": false, "shoot_timer": 0.0, "hurt_timer": 0.0}
+    game.barricades.clear()
+    game.airdrops.clear()
+    game.active_grenades.clear()
+    game.combat_effects.clear()
+    game.wave_number = 10
+    game.wave_total = game._zombie_count_for_wave(10)
+    for attack_type in range(game.BOSS_ATTACK_LUNGE + 1):
+        game.zombies.clear()
+        var boss_id := 42420 + attack_type
+        var boss_max_hp := game._boss_hp_for_wave(10)
+        game.zombies.append({"id": boss_id, "kind": game.ZOMBIE_KIND_BOSS, "x": 500.0, "y": 390.0, "face_x": 1.0, "hp": boss_max_hp * 0.75, "max_hp": boss_max_hp, "walking": false, "attacking": true, "attack_timer": 0.4, "attack_cooldown": 0.8, "attack_type": attack_type, "hit_timer": 0.0})
+        var boss_packet: PackedByteArray = game._encode_snapshot()
+        var boss_snapshot: Dictionary = game._decode_snapshot(boss_packet)
+        check(not boss_snapshot.is_empty(), "boss attack type %d snapshot decodes" % attack_type)
+        if not boss_snapshot.is_empty():
+            var decoded_boss: Dictionary = boss_snapshot.zombies.get(boss_id, {})
+            check(int(decoded_boss.get("attack_type", -1)) == attack_type, "boss attack type %d round-trips in flags" % attack_type)
+            check(near(float(decoded_boss.get("atk", -1.0)), 0.4, 0.02), "boss attack timer round-trips")
+        check(boss_packet.size() <= game.MAX_SNAPSHOT_BYTES, "boss attack animation leaves snapshot under cap")
+        var previous_frame := -1
+        for frame_step in range(11):
+            var attack_frame := game._boss_attack_frame(attack_type, float(frame_step) / 10.0)
+            check(attack_frame >= 0 and attack_frame < game.BOSS_ATTACK_FRAME_COUNT, "boss attack frame stays inside sheet")
+            check(attack_frame >= previous_frame, "boss attack frames are ordered")
+            previous_frame = attack_frame
+
     # Truncation / garbage must never crash and must be rejected.
     var good: PackedByteArray = game._encode_snapshot()
     check(game._decode_snapshot(good.slice(0, 20)).is_empty(), "truncated header rejected")

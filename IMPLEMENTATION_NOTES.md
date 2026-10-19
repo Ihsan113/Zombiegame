@@ -1,4 +1,10 @@
-# Implementation notes — v0.4.16
+# Implementation notes — v0.4.17
+
+## v0.4.17 Brute animation / combat notes
+- Runtime attack sheets are `assets/boss_attack_slash_sheet.png`, `assets/boss_attack_slam_sheet.png`, and `assets/boss_attack_lunge_sheet.png`. Each is a 1680×226 RGBA strip of five 336×226 frames, sliced from the provided reference artwork in `art_source/boss_brute_spritesheet_source.jpg` by `tools/build_boss_attack_sheets.py`.
+- `_boss_attack_duration`, `_boss_attack_hit_progress`, and `_boss_attack_frame` separate anticipation, hit timing, and follow-through. The host is authoritative for damage and lunge position; clients render the attack type carried in bits 3–4 of the pre-existing zombie flags byte. Bits 0–2 remain facing/walking/attacking, and the zombie record remains 13 bytes.
+- Slash: 18 damage at 76 px reach; lunge: 22 damage at 62 px reach plus 165 px/s forward movement until impact; slam: 24 damage inside 104 px, with a 1.10 s animation and effect kind 9 for the shock ring/debris. Against barricades, slam deals 34 and other boss hits deal 25 at the attack's impact frame.
+- `tests/codec_test.gd` round-trip tests should verify all attack type values through the snapshot flags without enlarging the snapshot. The local edit environment has no Godot executable; Godot parser/import, headless codec run, network loopback, and APK export must still pass in CI or on a Godot 4.7.2 machine before considering the runtime verified.
 
 - Target: Godot 4, landscape Android; 4-player host-authoritative ENet/UDP LAN on port 24567.
 - `assets/barricade_detail.png` is the transparent A-frame road barrier; SVG is its fallback. Both render at 120×72, preserving the asset's 720×433 aspect ratio. With the game entity position at the same center convention as a survivor, the barrier's feet and a wider contact shadow reach the ground line. Wall placement preview shares the same dimensions. Minimum spacing is 132 px and zombie attack distance is tuned to engage at the outside edge.
@@ -61,7 +67,7 @@
 
 ## v0.4.16 wave/boss/airdrop notes
 - `_zombie_count_for_wave()` computes `min(255, 25 + 5 * (wave - 1))`; a boss is counted as the first spawn of each wave number divisible by ten. `MAX_ZOMBIES_PER_SNAPSHOT` remains 40 while the live concurrency limit remains 14, so increasing wave totals do not increase the maximum snapshot size.
-- Boss kind 4 uses normalized HP in the existing zombie HP byte. Normal zombies retain 20 HP-units-per-byte encoding. The record is still 13 bytes and no snapshot, RPC or effect record layout changed; all LAN peers should run 0.4.16 together.
+- Boss kind 4 uses normalized HP in the existing zombie HP byte. Normal zombies retain 20 HP-units-per-byte encoding. The record is still 13 bytes and no snapshot, RPC or effect record layout changed; all LAN peers should run 0.4.16 together for the boss-wave update.
 - `boss_brute.png` is an isolated transparent frame from the supplied Brute sheet, with extra canvas padding and aspect-ratio-preserving rendering so the spikes and hands do not clip. The canopy PNG is now generated from the standalone parachute SVG and cropped to its alpha bounds. The landing dust PNG is one clean transparent plume, not an atlas. Landing smoke lasts 2.0 seconds; expiry dust uses the shorter 1.15-second lifetime. Effect kind 8 is drawn before depth-sorted world entities to keep smoke behind the supply crate.
 - Airdrop crate base and contact shadow use `pos.y + 35`, aligned to the survivor ground-contact line. Suspension lines attach to the canopy lower edge and terminate close to the crate lid.
 

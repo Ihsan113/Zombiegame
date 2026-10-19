@@ -1,4 +1,4 @@
-# Pixel Zombie LAN — v0.4.16
+# Pixel Zombie LAN — v0.4.17
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
 
@@ -77,6 +77,12 @@ v0.4.10 was parsed and run in Godot 4.7.2 (netcode checked at v0.4.9, barricade 
 The project now includes `assets/grenade_explosion_asset.png`, `assets/airdrop_parachute_generated.png`, `assets/airdrop_crate_generated.png`, and `assets/airdrop_landing_dust_generated.png`. Full generated source sheets are retained in `assets/grenade_explosion_spritesheet_source.png` and `assets/airdrop_spritesheet_source.png`. The in-game grenade blast still uses the existing synchronized effect lifetime and host authority.
 
 
+
+## v0.4.17 — Brute attack animations
+- Added three dedicated five-frame transparent pixel-art animation strips based on the supplied Brute reference: heavy claw slash, overhead ground slam, and forward lunge. The frames keep a common ground baseline and preserve their intended action silhouettes.
+- Attack anticipation, active hit moment, and recovery use distinct timings. Slashes deal 18 damage in a short arc, lunges deal 22 and move the boss toward its target, and ground slams deal 24 in a 104 px radius with a ground-hugging shock ring, dust, and debris. The boss also uses attack-timed damage against barricades.
+- The generic zombie swipe overlay no longer draws on top of the boss's custom animation. Boss attack type is synchronized by reusing spare bits in the existing flags byte; the zombie record remains 13 bytes and snapshot size/cadence are unchanged.
+- Android version code/name: 29 / 0.4.17. Use the same version on LAN devices for synchronized boss animation.
 
 ## v0.4.16 — boss waves, scaling hordes, and grounded supply drops
 - Zombie count is no longer fixed at 25: each wave adds five infected (Wave 1: 25, Wave 2: 30, Wave 10: 70), with the network counter safely capped at 255.

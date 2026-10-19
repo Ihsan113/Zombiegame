@@ -95,8 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=28' not in preset or 'version/name="0.4.16"' not in preset:
-              raise SystemExit('Android export preset must report version code 28 / version 0.4.16')
+          if 'version/code=29' not in preset or 'version/name="0.4.17"' not in preset:
+              raise SystemExit('Android export preset must report version code 29 / version 0.4.17')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -113,7 +113,7 @@ jobs:
               width, height = struct.unpack('>II', data[16:24])
               color_type = data[25]
               return width, height, color_type
-          for image_name in ['grenade_explosion_asset.png', 'airdrop_crate_generated.png', 'airdrop_parachute_generated.png', 'airdrop_landing_dust_generated.png', 'boss_brute.png']:
+          for image_name in ['grenade_explosion_asset.png', 'airdrop_crate_generated.png', 'airdrop_parachute_generated.png', 'airdrop_landing_dust_generated.png', 'boss_brute.png', 'boss_attack_slash_sheet.png', 'boss_attack_slam_sheet.png', 'boss_attack_lunge_sheet.png']:
               image_path = root / 'assets' / image_name
               if not image_path.is_file():
                   raise SystemExit('Missing generated VFX PNG: ' + str(image_path))
@@ -122,6 +122,8 @@ jobs:
                   raise SystemExit('Generated VFX PNG must use RGBA transparency (PNG color type 6): ' + str(image_path))
               if image_width < 64 or image_height < 32 or image_width > 4096 or image_height > 4096:
                   raise SystemExit('Unexpected generated VFX dimensions: ' + str(image_path))
+              if image_name.startswith('boss_attack_') and (image_width != 1680 or image_height != 226):
+                  raise SystemExit('Boss attack sheets must be 5 RGBA frames of 336x226: ' + str(image_path))
           script = (root / 'scripts/game.gd').read_text()
           required_markers = [
               'const ARENA_TOP_RATIO := 0.520',
@@ -159,6 +161,14 @@ jobs:
               'const AIRDROP_LAND_LIFETIME := 22.0',
               'const AIRDROP_DESPAWN_EFFECT_DURATION := 1.15',
               'const AIRDROP_LANDING_EFFECT_DURATION := 2.0',
+              'const BOSS_ATTACK_SLASH := 0',
+              'const BOSS_ATTACK_SLAM := 1',
+              'const BOSS_ATTACK_LUNGE := 2',
+              'func _boss_attack_duration(attack_type: int) -> float:',
+              'func _boss_attack_hit_progress(attack_type: int) -> float:',
+              'func _boss_attack_frame(attack_type: int, progress: float) -> int:',
+              'draw_texture_rect_region(frame_texture, dest, source, tint, false, true)',
+              'if attacking and not boss:',
               '_add_combat_effect(8, landing_ground, landing_ground, AIRDROP_LANDING_EFFECT_DURATION)',
               'const PLAYER_DEATH_FADE_DURATION := 1.25',
               'func _update_player_death_visuals(delta: float) -> void:',
@@ -320,7 +330,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.16-APK
+          name: PixelZombieLAN-v0.4.17-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -329,15 +339,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.16-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.17-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.16-source.zip
+          test -s build/PixelZombieLAN-v0.4.17-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.16-source
-          path: build/PixelZombieLAN-v0.4.16-source.zip
+          name: PixelZombieLAN-v0.4.17-source
+          path: build/PixelZombieLAN-v0.4.17-source.zip
           if-no-files-found: error
           retention-days: 14

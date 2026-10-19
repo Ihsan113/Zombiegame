@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.16
+# Pixel Zombie LAN — wave defense prototype v0.4.17
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -9,6 +9,17 @@ const PLAYER_SPEED := 150.0
 const ZOMBIE_SPEED := 28.0
 const ZOMBIE_ATTACK_RANGE := 45.0
 const ZOMBIE_KIND_BOSS := 4
+const BOSS_ATTACK_SLASH := 0
+const BOSS_ATTACK_SLAM := 1
+const BOSS_ATTACK_LUNGE := 2
+const BOSS_ATTACK_FRAME_COUNT := 5
+const BOSS_ATTACK_FRAME_WIDTH := 336.0
+const BOSS_ATTACK_FRAME_HEIGHT := 226.0
+const BOSS_ATTACK_BASELINE_Y := 214.0
+const BOSS_SLASH_REACH := 76.0
+const BOSS_SLAM_RADIUS := 104.0
+const BOSS_LUNGE_REACH := 62.0
+const BOSS_LUNGE_SPEED := 165.0
 const ZOMBIE_MAX_HP := [3.0, 4.0, 7.0, 3.5, 100.0]
 const WAVE_ZOMBIE_COUNT := 25
 const WAVE_ZOMBIES_PER_LEVEL := 5
@@ -126,6 +137,7 @@ var airdrop_crate_texture: Texture2D
 var parachute_texture: Texture2D
 var airdrop_landing_texture: Texture2D
 var boss_texture: Texture2D
+var boss_attack_textures: Array[Texture2D] = []
 var combat_effects: Array[Dictionary] = []
 # Local-only presentation state. Kept out of snapshots so v0.4.11 LAN packet layout stays unchanged.
 var player_death_visuals: Dictionary = {}
@@ -263,6 +275,13 @@ func _ready() -> void:
         parachute_texture = load("res://assets/parachute_detail.svg") as Texture2D
     airdrop_landing_texture = load("res://assets/airdrop_landing_dust_generated.png") as Texture2D
     boss_texture = load("res://assets/boss_brute.png") as Texture2D
+    boss_attack_textures.clear()
+    for attack_path in [
+        "res://assets/boss_attack_slash_sheet.png",
+        "res://assets/boss_attack_slam_sheet.png",
+        "res://assets/boss_attack_lunge_sheet.png"
+    ]:
+        boss_attack_textures.append(load(attack_path) as Texture2D)
     if sprite_atlas == null:
         push_warning("Pixel Zombie LAN: neither PNG nor SVG sprite atlas loaded; simple fallback characters will be drawn.")
     if background_texture == null:
@@ -545,6 +564,8 @@ func _host_simulate(delta: float) -> void:
         var nearest_distance := INF
         var attack_timer := maxf(0.0, float(z.get("attack_timer", 0.0)) - delta)
         var attack_cooldown := maxf(0.0, float(z.get("attack_cooldown", 0.0)) - delta)
+        var attack_type := clampi(int(z.get("attack_type", BOSS_ATTACK_SLASH)), BOSS_ATTACK_SLASH, BOSS_ATTACK_LUNGE)
+        var attack_hit_applied := bool(z.get("attack_hit_applied", false))
         z["hit_timer"] = maxf(0.0, float(z.get("hit_timer", 0.0)) - delta)
         z["attacking"] = false
         z["walking"] = false
@@ -564,7 +585,8 @@ func _host_simulate(delta: float) -> void:
             var target_pos := Vector2(float(target.get("x", 0.0)), float(target.get("y", 0.0)))
             var blocking_wall_index := _find_blocking_barricade(zombie_pos, target_pos)
             var zombie_kind := clampi(int(z.get("kind", 0)), 0, ZOMBIE_MAX_HP.size() - 1)
-            var speed_scale := 0.54 if zombie_kind == ZOMBIE_KIND_BOSS else (0.68 if zombie_kind == 2 else (1.25 if zombie_kind == 3 else 1.0))
+            var is_boss := zombie_kind == ZOMBIE_KIND_BOSS
+            var speed_scale := 0.54 if is_boss else (0.68 if zombie_kind == 2 else (1.25 if zombie_kind == 3 else 1.0))
             if wave_timed_out:
                 speed_scale *= 1.18
 
@@ -576,6 +598,8 @@ func _host_simulate(delta: float) -> void:
                 if absf(dx_to_wall) > WALL_ATTACK_RANGE:
                     z["walking"] = true
                     attack_timer = 0.0
+                    if is_boss:
+                        attack_hit_applied = false
                     var wall_direction := (wall_pos - zombie_pos).normalized()
                     var proposed_x := float(z.get("x", zombie_pos.x)) + wall_direction.x * ZOMBIE_SPEED * speed_scale * delta
                     if dx_to_wall > 0.0:
@@ -584,14 +608,42 @@ func _host_simulate(delta: float) -> void:
                         proposed_x = maxf(proposed_x, wall_pos.x + WALL_ATTACK_RANGE * 0.82)
                     z["x"] = clampf(proposed_x, 30.0, maxf(31.0, screen_size.x - 30.0))
                     z["y"] = clampf(float(z.get("y", zombie_pos.y)) + wall_direction.y * ZOMBIE_SPEED * speed_scale * delta, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+                elif is_boss:
+                    z["walking"] = false
+                    if attack_timer <= 0.0 and attack_cooldown <= 0.0:
+                        attack_type = _choose_boss_attack(0.0, true)
+                        attack_timer = _boss_attack_duration(attack_type)
+                        attack_cooldown = _boss_attack_cooldown(attack_type)
+                        attack_hit_applied = false
+                        z["attack_type"] = attack_type
+                    z["attacking"] = attack_timer > 0.0
+                    if attack_timer > 0.0:
+                        var wall_attack_progress := clampf(1.0 - attack_timer / _boss_attack_duration(attack_type), 0.0, 1.0)
+                        if not attack_hit_applied and wall_attack_progress >= _boss_attack_hit_progress(attack_type):
+                            var boss_wall_damage := 34.0 if attack_type == BOSS_ATTACK_SLAM else 25.0
+                            wall["hp"] = float(wall.get("hp", 80.0)) - boss_wall_damage
+                            var wall_hit_pos := wall_pos + Vector2(0.0, 8.0)
+                            if attack_type == BOSS_ATTACK_SLAM:
+                                _add_combat_effect(9, wall_hit_pos + Vector2(0.0, 15.0), wall_hit_pos + Vector2(0.0, 15.0), 0.58)
+                            else:
+                                _add_combat_effect(5, zombie_pos + Vector2(float(z.get("face_x", 1.0)) * 19.0, -5.0), wall_hit_pos, 0.26)
+                            attack_hit_applied = true
+                            _emit_sfx("attack")
+                            if float(wall.get("hp", 0.0)) <= 0.0:
+                                barricades.remove_at(blocking_wall_index)
+                                _emit_sfx("wall_break")
+                                ui_status = "BARRICADE DESTROYED — rebuild from a supply drop"
+                            else:
+                                barricades[blocking_wall_index] = wall
                 else:
+                    # Keep the familiar short attack cadence for ordinary infected.
                     z["walking"] = false
                     z["attacking"] = true
                     attack_timer = 0.38
                     if attack_cooldown <= 0.0:
-                        var wall_damage := 24.0 if zombie_kind == ZOMBIE_KIND_BOSS else (13.0 if zombie_kind == 2 else (6.0 if zombie_kind == 3 else 8.0))
+                        var wall_damage := 13.0 if zombie_kind == 2 else (6.0 if zombie_kind == 3 else (8.0 if zombie_kind == 1 else 8.0))
                         wall["hp"] = float(wall.get("hp", 80.0)) - wall_damage
-                        attack_cooldown = 1.10 if zombie_kind == ZOMBIE_KIND_BOSS else (0.92 if zombie_kind == 2 else (0.56 if zombie_kind == 3 else 0.74))
+                        attack_cooldown = 0.92 if zombie_kind == 2 else (0.56 if zombie_kind == 3 else 0.74)
                         _add_combat_effect(5, zombie_pos + Vector2(float(z.get("face_x", 1.0)) * 14.0, -3.0), wall_pos, 0.20)
                         _emit_sfx("attack")
                         if float(wall.get("hp", 0.0)) <= 0.0:
@@ -606,18 +658,75 @@ func _host_simulate(delta: float) -> void:
                 if absf(direction.x) > 0.08:
                     z["face_x"] = -1.0 if direction.x < 0.0 else 1.0
 
-                var zombie_attack_range := 64.0 if zombie_kind == ZOMBIE_KIND_BOSS else ZOMBIE_ATTACK_RANGE
+                var zombie_attack_range := 112.0 if is_boss else ZOMBIE_ATTACK_RANGE
                 if nearest_distance > zombie_attack_range:
                     z["walking"] = true
                     attack_timer = 0.0
+                    if is_boss:
+                        attack_hit_applied = false
                     z["x"] = clampf(float(z.get("x", zombie_pos.x)) + direction.x * ZOMBIE_SPEED * speed_scale * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
                     z["y"] = clampf(float(z.get("y", zombie_pos.y)) + direction.y * ZOMBIE_SPEED * speed_scale * delta, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+                elif is_boss:
+                    z["walking"] = false
+                    if attack_timer <= 0.0 and attack_cooldown <= 0.0:
+                        attack_type = _choose_boss_attack(nearest_distance, false)
+                        attack_timer = _boss_attack_duration(attack_type)
+                        attack_cooldown = _boss_attack_cooldown(attack_type)
+                        attack_hit_applied = false
+                        z["attack_type"] = attack_type
+                    z["attacking"] = attack_timer > 0.0
+                    if attack_timer > 0.0:
+                        var attack_progress := clampf(1.0 - attack_timer / _boss_attack_duration(attack_type), 0.0, 1.0)
+                        if attack_type == BOSS_ATTACK_LUNGE and attack_progress < _boss_attack_hit_progress(attack_type):
+                            var lunge_player: Dictionary = players.get(target_id, {})
+                            var lunge_target_pos := Vector2(float(lunge_player.get("x", target_pos.x)), float(lunge_player.get("y", target_pos.y)))
+                            var current_boss_pos := Vector2(float(z.get("x", zombie_pos.x)), float(z.get("y", zombie_pos.y)))
+                            var lunge_vector := lunge_target_pos - current_boss_pos
+                            var lunge_distance := lunge_vector.length()
+                            var lunge_step := minf(BOSS_LUNGE_SPEED * delta, maxf(0.0, lunge_distance - 34.0))
+                            if lunge_distance > 0.001 and lunge_step > 0.0:
+                                var lunge_move := lunge_vector / lunge_distance * lunge_step
+                                z["x"] = clampf(current_boss_pos.x + lunge_move.x, 30.0, maxf(31.0, screen_size.x - 30.0))
+                                z["y"] = clampf(current_boss_pos.y + lunge_move.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+                        if not attack_hit_applied and attack_progress >= _boss_attack_hit_progress(attack_type):
+                            attack_hit_applied = true
+                            var boss_impact_pos := Vector2(float(z.get("x", zombie_pos.x)), float(z.get("y", zombie_pos.y)))
+                            if attack_type == BOSS_ATTACK_SLAM:
+                                _add_combat_effect(9, boss_impact_pos + Vector2(0.0, 28.0), boss_impact_pos + Vector2(0.0, 28.0), 0.62)
+                                for player_variant in players.keys():
+                                    var slam_id := int(player_variant)
+                                    var slam_target: Dictionary = players[slam_id]
+                                    if float(slam_target.get("hp", 0.0)) <= 0.0:
+                                        continue
+                                    var slam_target_pos := Vector2(float(slam_target.get("x", 0.0)), float(slam_target.get("y", 0.0)))
+                                    if boss_impact_pos.distance_to(slam_target_pos) <= BOSS_SLAM_RADIUS:
+                                        slam_target["hp"] = maxf(0.0, float(slam_target.get("hp", 0.0)) - 24.0)
+                                        slam_target["hurt_timer"] = 0.42
+                                        players[slam_id] = slam_target
+                                        _add_combat_effect(2, slam_target_pos + Vector2(0.0, -7.0), slam_target_pos + Vector2(0.0, -7.0), 0.24)
+                                _emit_sfx("attack")
+                            else:
+                                var impact_target: Dictionary = players.get(target_id, {})
+                                if not impact_target.is_empty() and float(impact_target.get("hp", 0.0)) > 0.0:
+                                    var impact_target_pos := Vector2(float(impact_target.get("x", target_pos.x)), float(impact_target.get("y", target_pos.y)))
+                                    var impact_distance := boss_impact_pos.distance_to(impact_target_pos)
+                                    var impact_reach := BOSS_LUNGE_REACH if attack_type == BOSS_ATTACK_LUNGE else BOSS_SLASH_REACH
+                                    if impact_distance <= impact_reach:
+                                        var boss_damage := 22.0 if attack_type == BOSS_ATTACK_LUNGE else 18.0
+                                        impact_target["hp"] = maxf(0.0, float(impact_target.get("hp", 0.0)) - boss_damage)
+                                        impact_target["hurt_timer"] = 0.38
+                                        players[target_id] = impact_target
+                                        _add_combat_effect(5, boss_impact_pos + Vector2(float(z.get("face_x", 1.0)) * 20.0, -7.0), impact_target_pos + Vector2(0.0, -7.0), 0.27)
+                                    else:
+                                        var miss_dir := -1.0 if float(z.get("face_x", 1.0)) < 0.0 else 1.0
+                                        _add_combat_effect(5, boss_impact_pos + Vector2(miss_dir * 18.0, -8.0), boss_impact_pos + Vector2(miss_dir * 60.0, -7.0), 0.18)
+                                _emit_sfx("attack")
                 else:
                     z["walking"] = false
                     z["attacking"] = attack_timer > 0.0
                     if attack_cooldown <= 0.0:
-                        var damage := 17.0 if zombie_kind == ZOMBIE_KIND_BOSS else (8.0 if zombie_kind == 2 else (4.5 if zombie_kind == 3 else 6.0))
-                        var cooldown := 1.10 if zombie_kind == ZOMBIE_KIND_BOSS else (0.92 if zombie_kind == 2 else (0.56 if zombie_kind == 3 else 0.74))
+                        var damage := 8.0 if zombie_kind == 2 else (4.5 if zombie_kind == 3 else (6.0 if zombie_kind == 1 else 6.0))
+                        var cooldown := 0.92 if zombie_kind == 2 else (0.56 if zombie_kind == 3 else 0.74)
                         target["hp"] = maxf(0.0, float(target.get("hp", 0.0)) - damage)
                         target["hurt_timer"] = 0.34
                         players[target_id] = target
@@ -629,6 +738,8 @@ func _host_simulate(delta: float) -> void:
 
         z["attack_timer"] = attack_timer
         z["attack_cooldown"] = attack_cooldown
+        z["attack_type"] = attack_type
+        z["attack_hit_applied"] = attack_hit_applied
         zombies[zi] = z
 
     _update_grenades(delta)
@@ -668,6 +779,68 @@ func _zombie_count_for_wave(number: int) -> int:
 func _boss_hp_for_wave(number: int) -> float:
     var boss_tier := maxi(1, floori(float(maxi(1, number)) / 10.0))
     return BOSS_BASE_HP + float(boss_tier - 1) * BOSS_HP_PER_TIER
+
+func _boss_attack_duration(attack_type: int) -> float:
+    match clampi(attack_type, BOSS_ATTACK_SLASH, BOSS_ATTACK_LUNGE):
+        BOSS_ATTACK_SLAM:
+            return 1.10
+        BOSS_ATTACK_LUNGE:
+            return 0.88
+        _:
+            return 0.82
+
+func _boss_attack_cooldown(attack_type: int) -> float:
+    match clampi(attack_type, BOSS_ATTACK_SLASH, BOSS_ATTACK_LUNGE):
+        BOSS_ATTACK_SLAM:
+            return 1.72
+        BOSS_ATTACK_LUNGE:
+            return 1.48
+        _:
+            return 1.34
+
+func _boss_attack_hit_progress(attack_type: int) -> float:
+    match clampi(attack_type, BOSS_ATTACK_SLASH, BOSS_ATTACK_LUNGE):
+        BOSS_ATTACK_SLAM:
+            return 0.68
+        BOSS_ATTACK_LUNGE:
+            return 0.60
+        _:
+            return 0.57
+
+func _choose_boss_attack(distance: float, against_wall: bool) -> int:
+    if against_wall:
+        return BOSS_ATTACK_SLAM if randi_range(0, 99) < 38 else BOSS_ATTACK_SLASH
+    # Far targets trigger the readable, telegraphed lunge rather than a short-range swipe.
+    if distance > 76.0:
+        return BOSS_ATTACK_LUNGE
+    var roll := randi_range(0, 99)
+    if roll < 52:
+        return BOSS_ATTACK_SLASH
+    if roll < 78:
+        return BOSS_ATTACK_SLAM
+    return BOSS_ATTACK_LUNGE
+
+func _boss_attack_frame(attack_type: int, progress: float) -> int:
+    var t := clampf(progress, 0.0, 1.0)
+    match clampi(attack_type, BOSS_ATTACK_SLASH, BOSS_ATTACK_LUNGE):
+        BOSS_ATTACK_SLAM:
+            if t < 0.22: return 0
+            if t < 0.42: return 1
+            if t < 0.62: return 2
+            if t < 0.82: return 3
+            return 4
+        BOSS_ATTACK_LUNGE:
+            if t < 0.20: return 0
+            if t < 0.40: return 1
+            if t < 0.61: return 2
+            if t < 0.82: return 3
+            return 4
+        _:
+            if t < 0.20: return 0
+            if t < 0.42: return 1
+            if t < 0.64: return 2
+            if t < 0.84: return 3
+            return 4
 
 func _zombie_max_hp_for(kind: int, for_wave: int = -1) -> float:
     if kind == ZOMBIE_KIND_BOSS:
@@ -711,6 +884,8 @@ func _spawn_wave_zombie() -> void:
         "attacking": false,
         "attack_timer": 0.0,
         "attack_cooldown": randf_range(0.12, 0.50),
+        "attack_type": BOSS_ATTACK_SLASH,
+        "attack_hit_applied": false,
         "hit_timer": 0.0
     })
 
@@ -867,6 +1042,8 @@ func _encode_snapshot() -> PackedByteArray:
             zflags |= 4
         sp.put_u32(int(z.get("id", 0)) & 0xFFFFFFFF)
         var zombie_kind := clampi(int(z.get("kind", 0)), 0, ZOMBIE_KIND_BOSS)
+        if zombie_kind == ZOMBIE_KIND_BOSS:
+            zflags |= clampi(int(z.get("attack_type", BOSS_ATTACK_SLASH)), BOSS_ATTACK_SLASH, BOSS_ATTACK_LUNGE) << 3
         sp.put_u8(zombie_kind)
         sp.put_u16(_qpos(float(z.get("x", 0.0))))
         sp.put_u16(_qpos(float(z.get("y", 0.0))))
@@ -1011,8 +1188,9 @@ func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
         var zflags := sp.get_u8()
         var zattack := float(sp.get_u8()) * 0.01
         var zhit := float(sp.get_u8()) * 0.01
+        var zattack_type := clampi((zflags >> 3) & 0x03, BOSS_ATTACK_SLASH, BOSS_ATTACK_LUNGE)
         zids.append(zid)
-        zmap[zid] = {"x": zx, "y": zy, "kind": zkind, "hp": zhp, "fl": zflags, "atk": zattack, "hit": zhit}
+        zmap[zid] = {"x": zx, "y": zy, "kind": zkind, "hp": zhp, "fl": zflags, "atk": zattack, "hit": zhit, "attack_type": zattack_type}
     snap["zids"] = zids
     snap["zombies"] = zmap
 
@@ -1673,6 +1851,7 @@ func _build_zombie(zid: int, rec: Dictionary, older: Dictionary, alpha: float, s
     shown["walking"] = (flags & 2) != 0
     shown["attacking"] = (flags & 4) != 0
     shown["attack_timer"] = float(rec["atk"])
+    shown["attack_type"] = clampi(int(rec.get("attack_type", (flags >> 3) & 0x03)), BOSS_ATTACK_SLASH, BOSS_ATTACK_LUNGE)
     shown["hit_timer"] = float(rec["hit"])
     zombie_cache[zid] = shown
     return shown
@@ -2491,6 +2670,8 @@ func _load_world() -> void:
                     "attacking": false,
                     "attack_timer": 0.0,
                     "attack_cooldown": randf_range(0.12, 0.50),
+                    "attack_type": clampi(int(z.get("attack_type", BOSS_ATTACK_SLASH)), BOSS_ATTACK_SLASH, BOSS_ATTACK_LUNGE),
+                    "attack_hit_applied": false,
                     "hit_timer": 0.0
                 })
     var saved_drops = parsed.get("airdrops", [])
@@ -3108,10 +3289,10 @@ func _draw_game_world() -> void:
             if moving:
                 _draw_footstep_dust(pos, phase, true)
             if boss:
-                _draw_boss_zombie(visual_pos, facing_left, moving, attacking, hurt, phase)
+                _draw_boss_zombie(visual_pos, facing_left, moving, attacking, hurt, phase, attack_timer_value, int(z.get("attack_type", BOSS_ATTACK_SLASH)))
             else:
                 _draw_atlas_character(pos, zombie_kind, true, 1.0, facing_left, moving, attacking, hurt, false, phase)
-            if attacking:
+            if attacking and not boss:
                 _draw_zombie_attack_swipe(visual_pos, facing_left, attack_timer_value)
             _draw_zombie_health(z, visual_pos)
         elif entry_type == "barricade":
@@ -3582,27 +3763,56 @@ func _character_visual_position(pos: Vector2, zombie: bool, facing_left: bool, m
     var hurt_shake := -facing_sign * 1.8 * sin(animation_clock * 54.0) if hurt else 0.0
     return pos + Vector2(facing_sign * lunge + hurt_shake, bob)
 
-func _draw_boss_zombie(pos: Vector2, facing_left: bool, moving: bool, attacking: bool, hurt: bool, phase: float) -> void:
+func _draw_boss_zombie(pos: Vector2, facing_left: bool, moving: bool, attacking: bool, hurt: bool, phase: float, attack_timer: float = 0.0, attack_type: int = BOSS_ATTACK_SLASH) -> void:
     if boss_texture == null:
         _draw_atlas_character(pos, 2, true, 1.48, facing_left, moving, attacking, hurt, false, phase)
         return
+    attack_type = clampi(attack_type, BOSS_ATTACK_SLASH, BOSS_ATTACK_LUNGE)
+    var duration := _boss_attack_duration(attack_type)
+    var attack_progress := clampf(1.0 - attack_timer / duration, 0.0, 1.0) if attacking else 0.0
     var cadence := animation_clock * (9.0 if moving else 2.2) + phase
     var facing_sign := -1.0 if facing_left else 1.0
     var rotation := sin(cadence) * (0.018 if moving else 0.004)
-    if attacking:
-        rotation -= facing_sign * 0.035
     var sx := 1.0 + sin(cadence) * (0.009 if moving else 0.002)
     var sy := 1.0 - sin(cadence) * (0.012 if moving else 0.003)
+    if attacking:
+        match attack_type:
+            BOSS_ATTACK_SLASH:
+                rotation -= facing_sign * (0.018 + 0.052 * sin(attack_progress * PI))
+                sx += 0.018 * sin(attack_progress * PI)
+            BOSS_ATTACK_SLAM:
+                rotation += facing_sign * (0.025 if attack_progress < 0.42 else -0.035)
+                sy += 0.012 * sin(attack_progress * PI)
+            BOSS_ATTACK_LUNGE:
+                rotation -= facing_sign * 0.052
+                sx += 0.035 * sin(attack_progress * PI)
+                sy -= 0.012 * sin(attack_progress * PI)
     var tint := Color.WHITE
     if hurt and int(animation_clock * 32.0) % 2 == 0:
         tint = Color(1.0, 0.60, 0.56, 1.0)
     var flip_x := -sx if facing_left else sx
     draw_set_transform(pos, rotation, Vector2(flip_x, sy))
-    var boss_width := 92.0
-    var boss_size := Vector2(boss_width, boss_width * float(boss_texture.get_height()) / maxf(1.0, float(boss_texture.get_width())))
-    # Preserve the complete source aspect ratio; the transparent padding keeps the horns and mutated arm uncropped.
-    # Feet land on the same depth line as survivors for consistent world depth sorting.
-    draw_texture_rect(boss_texture, Rect2(Vector2(-boss_size.x * 0.5, -boss_size.y + 33.0), boss_size), false, tint)
+
+    var frame_texture: Texture2D = null
+    var frame_index := 0
+    if attacking and boss_attack_textures.size() > attack_type:
+        frame_texture = boss_attack_textures[attack_type]
+        frame_index = _boss_attack_frame(attack_type, attack_progress)
+    if frame_texture != null:
+        var frame_width := BOSS_ATTACK_FRAME_WIDTH
+        var frame_height := BOSS_ATTACK_FRAME_HEIGHT
+        var drawn_height := 92.0
+        var drawn_width := drawn_height * frame_width / frame_height
+        # Generated frame alpha bounds end at y=215 (last visible row y=214); pin that baseline to the normal ground line (pos.y + 33).
+        var drawn_top := 33.0 - drawn_height * BOSS_ATTACK_BASELINE_Y / frame_height
+        var dest := Rect2(Vector2(-drawn_width * 0.5, drawn_top), Vector2(drawn_width, drawn_height))
+        var source := Rect2(float(frame_index) * frame_width, 0.0, frame_width, frame_height)
+        draw_texture_rect_region(frame_texture, dest, source, tint, false, true)
+    else:
+        var boss_width := 92.0
+        var boss_size := Vector2(boss_width, boss_width * float(boss_texture.get_height()) / maxf(1.0, float(boss_texture.get_width())))
+        # Preserve the complete source aspect ratio; feet stay on the survivor depth line.
+        draw_texture_rect(boss_texture, Rect2(Vector2(-boss_size.x * 0.5, -boss_size.y + 33.0), boss_size), false, tint)
     draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 func _draw_atlas_character(pos: Vector2, kind: int, zombie: bool, scale_value: float = 1.0, facing_left: bool = false, moving: bool = false, attacking: bool = false, hurt: bool = false, shooting: bool = false, phase: float = 0.0, opacity: float = 1.0) -> void:
@@ -3696,7 +3906,7 @@ func _draw_zombie_health(zombie: Dictionary, pos: Vector2) -> void:
 
 func _draw_combat_effects() -> void:
     for effect in combat_effects:
-        var kind := clampi(int(effect.get("kind", 0)), 0, 8)
+        var kind := clampi(int(effect.get("kind", 0)), 0, 9)
         if kind == 8:
             continue
         var start_pos := Vector2(float(effect.get("x", 0.0)), float(effect.get("y", 0.0)))
@@ -3813,6 +4023,31 @@ func _draw_combat_effects() -> void:
             var pickup_radius := 8.0 + progress * 25.0
             draw_arc(start_pos, pickup_radius, 0, TAU, 24, Color(0.78, 0.89, 0.56, alpha), 2.0)
             draw_circle(start_pos, 3.0 + (1.0 - progress) * 4.0, Color(0.9, 0.96, 0.69, alpha))
+        elif kind == 9:
+            # Heavy Brute impact: a pavement-hugging pressure ring with dust and loose debris.
+            var ring_t := clampf(progress / 0.76, 0.0, 1.0)
+            var ring_radius := 12.0 + 76.0 * ring_t
+            var ring_alpha := clampf(1.0 - progress / 0.82, 0.0, 1.0)
+            draw_ellipse_shadow(start_pos + Vector2(0.0, 4.0), 18.0 + 42.0 * ring_t, 4.0 + 5.0 * ring_t, 0.30 * ring_alpha)
+            draw_set_transform(start_pos + Vector2(0.0, 3.0), 0.0, Vector2(1.0, 0.24))
+            draw_arc(Vector2.ZERO, ring_radius, 0.0, TAU, 48, Color(0.88, 0.64, 0.39, ring_alpha * 0.74), 2.1 * ring_alpha + 0.35)
+            draw_arc(Vector2.ZERO, ring_radius * 0.72, 0.0, TAU, 40, Color(0.47, 0.41, 0.32, ring_alpha * 0.42), 1.3 * ring_alpha + 0.25)
+            draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+            for debris_index in range(9):
+                var debris_angle := TAU * float(debris_index) / 9.0 + float(int(effect.get("eid", 0)) % 7) * 0.17
+                var debris_dir := Vector2(cos(debris_angle), sin(debris_angle))
+                var debris_dist := (13.0 + float((debris_index * 7) % 19) * 2.2) * ring_t
+                var debris_arc := sin(ring_t * PI) * (7.0 + float(debris_index % 4) * 3.0)
+                var debris_pos := start_pos + Vector2(debris_dir.x * debris_dist, debris_dir.y * debris_dist * 0.42 - debris_arc + ring_t * ring_t * 8.0)
+                var chip_size := (1.0 + float(debris_index % 3) * 0.65) * ring_alpha
+                draw_line(debris_pos - debris_dir * 3.5, debris_pos, Color(0.42, 0.36, 0.28, ring_alpha * 0.88), 1.5, true)
+                draw_circle(debris_pos, chip_size, Color(0.67, 0.58, 0.43, ring_alpha * 0.84))
+            for dust_index in range(7):
+                var dust_side := -1.0 if dust_index % 2 == 0 else 1.0
+                var dust_x := dust_side * (9.0 + float(dust_index) * 6.0) * ring_t
+                var dust_y := -ring_t * (2.0 + float(dust_index % 3) * 3.0)
+                var dust_radius := (2.5 + float(dust_index % 3) * 1.5) * ring_alpha
+                draw_circle(start_pos + Vector2(dust_x, dust_y), dust_radius, Color(0.48, 0.43, 0.34, ring_alpha * 0.48))
         elif sprite_atlas != null:
             var source_x := kind * 32
             var effect_size := Vector2(24, 24) if kind == 0 or kind == 2 or kind == 3 else Vector2(27, 27)
