@@ -1,4 +1,4 @@
-# Implementation notes v0.4.23
+# Implementation notes v0.4.24
 
 - Turret base/head generated as separate transparent PNGs so the head can rotate independently.
 - Turret firing sound is a compact local WAV and participates in existing SFX broadcast.
@@ -134,3 +134,8 @@ The `Snapshot codec test` workflow step now uses `tee` for live console output a
 - Test scene is marked offline before any host-side helper emits sound.
 - Multiplayer event relay now checks that the node is in the scene tree and `get_multiplayer()` returns a valid API/peer.
 - Turret codec tests append dictionaries to the typed zombie array instead of assigning a plain `Array`; timer and active world effects are reset to make the simulation deterministic.
+
+### v0.4.24 runtime asset-test fix
+- The SceneTree codec test waits for one process frame after adding `Main.tscn`, ensuring `_ready()` runs before it tests the runtime-loaded turret textures.
+- Asset validation checks direct resource loading separately from the fields populated by `_ready()` so the next CI log can precisely locate any remaining discrepancy.
+- No game protocol fields or gameplay balance changed.

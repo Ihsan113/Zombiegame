@@ -15,8 +15,16 @@ func near(a: float, b: float, tol: float) -> bool:
 func _initialize() -> void:
     print("[codec checkpoint] START: instantiate Main.tscn")
     var game: Node = load("res://Main.tscn").instantiate()
+    # Set offline mode before entering the tree so startup callbacks never try to use LAN APIs.
+    game.is_offline = true
+    game.is_host = true
     root.add_child(game)
-    print("[codec checkpoint] Main.tscn instantiated")
+    # SceneTree._initialize runs before the first idle frame. Yield once so Main._ready()
+    # and its runtime asset loaders finish before we assert texture fields.
+    print("[codec checkpoint] Waiting for Main.tscn _ready and asset loading")
+    await process_frame
+    print("[codec checkpoint] Main.tscn instantiated; ready=%s" % str(game.is_node_ready()))
+    check(game.is_node_ready(), "Main.tscn completes _ready before runtime tests")
     # The codec suite is an offline test; no MultiplayerAPI/peer is required.
     game.is_offline = true
     game.screen_size = Vector2(1201, 540)
@@ -262,8 +270,11 @@ func _initialize() -> void:
             previous_frame = attack_frame
 
     print("[codec checkpoint] PASS: boss attack snapshot and frames")
-    # Asset imports for the rotating turret must remain transparent PNG cutouts and the custom SFX must exist.
-    check(game.turret_base_texture != null and game.turret_head_texture != null, "turret base/head PNG assets load")
+    # Verify both the packed project resources and the textures actually loaded by Game._ready().
+    var turret_base_resource: Texture2D = ResourceLoader.load("res://assets/turret_base.png") as Texture2D
+    var turret_head_resource: Texture2D = ResourceLoader.load("res://assets/turret_head.png") as Texture2D
+    check(turret_base_resource != null and turret_head_resource != null, "turret base/head PNG resources load from res paths")
+    check(game.turret_base_texture != null and game.turret_head_texture != null, "game ready loads turret base/head PNG assets")
     check(ResourceLoader.exists("res://assets/audio/turret_fire.wav"), "turret fire SFX resource exists")
     # Auto-turret placement, aim tracking, automatic fire and zombie destruction.
     game.players.clear()

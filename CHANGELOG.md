@@ -1,4 +1,4 @@
-# Pixel Zombie LAN v0.4.23
+# Pixel Zombie LAN v0.4.24
 
 - Replaced procedural turret geometry with transparent generated PNG base/head sprites; only the head rotates around its pivot.
 - Added compact generated turret-fire SFX and connected it to synchronized turret firing.
@@ -7,6 +7,13 @@
 - Added explicit weapon airdrop replacement choice when both slots are occupied: choose slot 1, slot 2, or cancel; the crate remains available until resolved. The player flags use spare bits, keeping the 30-byte player record unchanged.
 - Reduced turret target acquisition overhead by using squared-distance comparisons; kept host-authoritative simulation and four-player LAN limits.
 - Reserved weapon drops are released if their chooser dies or disconnects; the prompt intercepts taps before underlying combat controls.
+
+## v0.4.24 — turret asset check lifecycle fix
+
+- Wait for one SceneTree frame after adding `Main.tscn` in the SceneTree codec test so `_ready()` completes before runtime resource assertions.
+- Added separate direct `ResourceLoader` checks for both turret PNGs alongside checks for the loaded fields.
+- Android version code/name: 36 / 0.4.24.
+
 
 ## v0.4.23 — codec test runtime fixes
 

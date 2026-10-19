@@ -1,10 +1,17 @@
-# Pixel Zombie LAN v0.4.23
+# Pixel Zombie LAN v0.4.24
 
 This update improves survivor weapon presentation, adds transparent PNG turret assets and turret-fire audio, moves AIM Assist to the pre-game User Settings screen, and adds explicit airdrop weapon replacement choice when both carry slots are occupied. Gameplay networking remains host-authoritative; player snapshot record size remains 30 bytes.
 
 # Pixel Zombie LAN — v0.4.23
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
+
+## v0.4.24 — Turret asset runtime test fix
+
+- The headless codec suite now yields one frame after adding `Main.tscn` to the SceneTree so `_ready()` and runtime texture loading complete before assertions execute.
+- Added separate checks for loading both turret PNGs by resource path and for the game node's loaded texture fields. This distinguishes bad resource packaging from a test lifecycle/order problem.
+- CI now reports Android version code/name 36 / 0.4.24. The game snapshot layout, turret firing, loot, and host-authoritative mechanics are unchanged.
+
 
 ## v0.4.23 — Destructible auto-turrets, aim toggle and survivor weapon cleanup
 

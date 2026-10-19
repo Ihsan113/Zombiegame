@@ -95,8 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=35' not in preset or 'version/name="0.4.23"' not in preset:
-              raise SystemExit('Android export preset must report version code 35 / version 0.4.23')
+          if 'version/code=36' not in preset or 'version/name="0.4.24"' not in preset:
+              raise SystemExit('Android export preset must report version code 36 / version 0.4.24')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -277,7 +277,7 @@ jobs:
           if 'ENetMultiplayerPeer.COMPRESS_FASTLZ' in script or 'peer.compression_mode' in script:
               raise SystemExit('Invalid Godot 4.7 compression API: configure peer.host.compress(ENetConnection.COMPRESS_FASTLZ) after creating the peer.')
           if 'const SNAPSHOT_HEADER_BYTES := 31' not in script or 'const PLAYER_RECORD_BYTES := 30' not in script or 'const DROP_RECORD_BYTES := 27' not in script or 'const EFFECT_RECORD_BYTES := 16' not in script:
-              raise SystemExit('The v0.4.23 snapshot layout must retain its 30-byte player record, 8-byte turret record and 27-byte drop record.')
+              raise SystemExit('The v0.4.24 snapshot layout must retain its 30-byte player record, 8-byte turret record and 27-byte drop record.')
           if 'rpc("receive_world", _encode_snapshot()' not in script:
               raise SystemExit('Host snapshot broadcast is missing.')
           if script.count('peer.host.compress(ENetConnection.COMPRESS_FASTLZ)') != 2:
@@ -349,7 +349,7 @@ jobs:
           script = (root / 'scripts/game.gd').read_text()
           for marker in ['func _setup_music() -> void:', 'AudioStreamWAV.LOOP_FORWARD', 'AudioStreamMP3', 'mp3_stream.loop = true', 'func _sync_music_state() -> void:', 'AIRDROP_INTERVAL_MIN := 24.0', 'AIRDROP_INTERVAL_MAX := 34.0', '_emit_sfx("boss_roar")', '_emit_sfx("boss_attack")']:
               if marker not in script:
-                  raise SystemExit('Missing v0.4.23 animation/audio/airdrop feature marker: ' + marker)
+                  raise SystemExit('Missing v0.4.24 animation/audio/airdrop feature marker: ' + marker)
           print(f'Validated {len(refs)} resource references, landscape/version settings, clean RGBA survivor atlas, five RGBA firearm sprites, destructible deployable auto-turrets with PNG layers/SFX, settings-based aim marker toggle, explicit airdrop slot replacement, finite firearm ammo with infinite sidearm fallback, compatible ammo pickup, hold-drag controls, death/bone visuals, grenade blast, more frequent airdrops, gameplay music, boss/airdrop SFX, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
           PYCODE
 
@@ -410,7 +410,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.23-APK
+          name: PixelZombieLAN-v0.4.24-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -419,15 +419,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.23-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.24-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.23-source.zip
+          test -s build/PixelZombieLAN-v0.4.24-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.23-source
-          path: build/PixelZombieLAN-v0.4.23-source.zip
+          name: PixelZombieLAN-v0.4.24-source
+          path: build/PixelZombieLAN-v0.4.24-source.zip
           if-no-files-found: error
           retention-days: 14
