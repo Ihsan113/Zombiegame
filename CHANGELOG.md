@@ -1,4 +1,11 @@
-# Pixel Zombie LAN v0.4.31
+# Pixel Zombie LAN v0.4.32
+
+## v0.4.32 — reliable cancel, AIM toggle and easier turret placement
+- Enlarged the weapon replacement Cancel button hitbox and added immediate local client dismissal while the reliable host cancellation is processed.
+- Guarded the AIM switch against duplicate touch/mouse activation, persisted the state robustly, and queued an immediate redraw.
+- Changed turret placement to a persistent preview controlled by tap/drag plus explicit DEPLOY and CANCEL actions. Invalid host-side placement leaves placement mode open for another attempt.
+- Added regressions for the Cancel touch hitbox, AIM duplicate events, and two-step turret placement. LAN snapshot and save schemas are unchanged.
+- Android version code/name: 44 / 0.4.32.
 
 ## v0.4.31 — turret destruction assertion fix and test cleanup
 - Corrected the turret melee regression test to verify the specific attacked turret is removed while an unrelated turret remains intact; the old `turrets.is_empty()` assertion incorrectly failed with two deployed turrets.

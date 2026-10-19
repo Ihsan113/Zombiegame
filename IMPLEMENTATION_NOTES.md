@@ -1,3 +1,12 @@
+## v0.4.32 input/placement reliability notes
+
+- Weapon replacement Cancel now uses a 40 px hit target; a LAN client dismisses the local modal immediately after sending the reliable host request while the server remains authoritative for reservation release.
+- AIM toggle centralizes persistence and redraw, with a short debounce to collapse duplicate Android touch/emulated-mouse activation for one tap.
+- Turret placement preview stays active after a positioning touch releases. The preview can be repositioned repeatedly and requires explicit DEPLOY; CANCEL returns to normal gameplay. Host-local invalid attempts keep placement active for correction.
+- Regression tests exercise the visible modal Cancel hitbox, duplicate AIM taps, and explicit turret confirm/cancel behavior.
+- Android version code/name: 44 / 0.4.32. Player/turret/drop snapshot records and save schema remain unchanged.
+- This workspace has no Godot executable installed, so GDScript parse, codec runtime tests and APK export must be verified by the configured Godot 4.7.2 CI runner or on a device.
+
 ## v0.4.31 test fix
 - Failure was a test assertion bug, not evidence of a turret combat bug: the fixture has two turrets, and melee is expected to remove only the nearby low-HP turret. The test previously incorrectly required the entire turret array to be empty.
 - Assert removal by target turret ID and survival of the unrelated turret ID.

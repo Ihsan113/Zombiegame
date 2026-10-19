@@ -1,4 +1,11 @@
-# Pixel Zombie LAN v0.4.31
+# Pixel Zombie LAN v0.4.32
+
+## v0.4.32 — reliable cancel, AIM toggle and easier turret placement
+- Expanded the weapon-replacement Cancel target to a thumb-friendly 40 px and dismisses the LAN client's prompt immediately while the host releases the reserved crate.
+- AIM setting input ignores duplicate touch/mouse events from a single Android tap, persists the selected state, and refreshes immediately.
+- Turret placement supports repeated tap/drag repositioning, explicit DEPLOY confirmation, and CANCEL PLACEMENT. Releasing the drag no longer deploys accidentally; invalid host placements keep the preview active for correction.
+- Regression checks cover first-touch Cancel, duplicate AIM taps, and explicit turret placement. Snapshot records and LAN protocol remain unchanged.
+- Android version code/name: 44 / 0.4.32. Godot runtime tests and APK export still require Godot 4.7.2 CI or a local Godot environment.
 
 ## v0.4.31 — turret destruction assertion fix and test cleanup
 - Added shared `_turret_facing_button_rects()` geometry for drawing, touch hit-testing, and Android coordinate fallback. First tap on AIM LEFT/RIGHT now registers before the first draw pass, and selection remains independent of the chosen ground point.

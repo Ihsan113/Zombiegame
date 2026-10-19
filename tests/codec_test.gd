@@ -170,12 +170,16 @@ func _initialize() -> void:
     game.button_rects.clear() # deliberately stale/empty: first setting tap must still work.
     var aim_toggle_rect: Rect2 = game._settings_aim_toggle_rect()
     var aim_before_touch: bool = bool(game.aim_marker_enabled)
+    game.aim_toggle_last_msec = -1000
     game._touch_start(9, aim_toggle_rect.position + Vector2(1.0, 1.0))
     check(bool(game.aim_marker_enabled) != aim_before_touch, "AIM Settings toggle responds to first touch at switch-row edge")
     var aim_after_toggle: bool = bool(game.aim_marker_enabled)
-    game._touch_start(10, aim_toggle_rect.position - Vector2(30.0, 25.0))
+    game._touch_start(10, aim_toggle_rect.position + aim_toggle_rect.size * 0.5)
+    check(bool(game.aim_marker_enabled) == aim_after_toggle, "duplicate adjacent AIM touch does not toggle twice")
+    game._touch_start(11, aim_toggle_rect.position - Vector2(30.0, 25.0))
     check(bool(game.aim_marker_enabled) == aim_after_toggle, "AIM Settings tap outside switch does not toggle")
-    game._touch_start(11, aim_toggle_rect.position + aim_toggle_rect.size * 0.5)
+    game.aim_toggle_last_msec = -1000
+    game._touch_start(12, aim_toggle_rect.position + aim_toggle_rect.size * 0.5)
     check(bool(game.aim_marker_enabled) == aim_before_touch, "AIM Settings switch track toggles back on tap")
     # Android builds can report touches in viewport or physical-window space. Validate the
     # transformed path that _input uses while the menu transform is non-identity.
@@ -254,6 +258,20 @@ func _initialize() -> void:
     game._host_cancel_weapon_replacement(1)
     check(game.airdrops.size() == 1 and not game.airdrops[0].has("reserved_by"), "cancel releases weapon crate instead of consuming it")
     check(not bool(game.players[1].get("weapon_replace_pending", true)), "cancel closes weapon replacement prompt")
+    # Exercise the visible Cancel hitbox and touch routing, not only the host helper.
+    game.screen_mode = "game"
+    game.players[1]["weapon_replace_pending"] = true
+    game.players[1]["pending_weapon_drop_id"] = 76504
+    game.players[1]["pending_weapon_id"] = game.WEAPON_SNIPER
+    game.airdrops.append({"id": 76504, "x": 320.0, "y": 390.0, "landed": true, "despawn_timer": 12.0, "loot_kind": "weapon", "weapon_id": game.WEAPON_SNIPER, "reserved_by": 1})
+    var cancel_hitboxes: Dictionary = game._weapon_replace_hitboxes()
+    var cancel_rect: Rect2 = cancel_hitboxes["weapon_replace_cancel"]
+    check(cancel_rect.size.y >= 40.0, "weapon replacement Cancel has a thumb-friendly hit target")
+    game.button_rects.clear()
+    game._touch_start(30, cancel_rect.position + cancel_rect.size * 0.5)
+    check(not bool(game.players[1].get("weapon_replace_pending", true)), "first touch on replacement Cancel dismisses the prompt")
+    check(int(game.airdrops.back().get("reserved_by", -1)) != 1, "replacement Cancel releases the crate reservation")
+    game.screen_mode = previous_replace_screen
     print("[codec checkpoint] PASS: host replacement selection and cancellation")
     # Ammo airdrops must match an owned firearm and never be wasted at a full reserve.
     var ammo_profile: Dictionary = game._weapon_profile(game.WEAPON_SMG)
@@ -348,6 +366,22 @@ func _initialize() -> void:
     var first_left_selector_rect: Rect2 = selector_rects["turret_face_left"]
     game._touch_start(18, first_left_selector_rect.position + first_left_selector_rect.size * 0.5)
     check(float(game.turret_preview_face_x) < 0.0 and not game.turret_requested, "first AIM LEFT placement tap works before draw registers selector hitboxes")
+    game._touch_start(19, turret_spot)
+    check(game.turret_place_touch_id == 19, "touching the arena starts the turret preview drag")
+    game._set_turret_preview_from_pointer(Vector2(420.0, 390.0))
+    game._touch_end(19)
+    check(game.turret_place_active and not game.turret_requested, "releasing the turret drag keeps the preview without deploying")
+    var deploy_rect: Rect2 = game._game_turret_button_rect()
+    game.button_rects.clear()
+    game._touch_start(20, deploy_rect.position + deploy_rect.size * 0.5)
+    check(game.turret_requested, "first touch on the visible DEPLOY control confirms the turret preview")
+    game.turret_requested = false
+    var placement_cancel_rect: Rect2 = game._turret_placement_control_rects()["turret_cancel"]
+    check(placement_cancel_rect.size.y >= 32.0, "turret placement Cancel has a thumb-friendly target")
+    game.button_rects.clear()
+    game._touch_start(21, placement_cancel_rect.position + placement_cancel_rect.size * 0.5)
+    check(not game.turret_place_active and not game.turret_requested, "first touch on visible turret Cancel exits without deploying")
+    game._begin_turret_placement()
     game._set_turret_preview_from_pointer(Vector2(420.0, 390.0))
     check(float(game.turret_preview_face_x) < 0.0, "explicit AIM LEFT selector stays left even when placement point is on the right")
     game._handle_ui_button("turret_face_right")
