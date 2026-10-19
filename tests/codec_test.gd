@@ -17,6 +17,8 @@ func _initialize() -> void:
     var game: Node = load("res://Main.tscn").instantiate()
     root.add_child(game)
     print("[codec checkpoint] Main.tscn instantiated")
+    # The codec suite is an offline test; no MultiplayerAPI/peer is required.
+    game.is_offline = true
     game.screen_size = Vector2(1201, 540)
     game.is_host = true
     var rng := RandomNumberGenerator.new()
@@ -261,7 +263,8 @@ func _initialize() -> void:
         var turret_pivot := turret_spot + Vector2(0.0, -24.0)
         game.turrets[0]["angle"] = (Vector2(test_target_pos.x, test_target_pos.y - 11.0) - turret_pivot).angle()
         game.turrets[0]["fire_timer"] = 0.0
-        game.zombies = [{"id": 80808, "kind": 0, "x": test_target_pos.x, "y": test_target_pos.y, "hp": 20.0, "max_hp": 20.0, "walking": true, "attacking": false, "attack_timer": 0.0, "attack_cooldown": 0.0, "hit_timer": 0.0}]
+        game.zombies.clear()
+        game.zombies.append({"id": 80808, "kind": 0, "x": test_target_pos.x, "y": test_target_pos.y, "hp": 20.0, "max_hp": 20.0, "walking": true, "attacking": false, "attack_timer": 0.0, "attack_cooldown": 0.0, "hit_timer": 0.0})
         game._update_turrets(0.016)
         check(float(game.zombies[0].get("hp", 20.0)) < 20.0, "auto-turret tracks and damages a zombie in range")
         # A zombie closer to a turret than any survivor must attack and be able to destroy it.
@@ -271,7 +274,8 @@ func _initialize() -> void:
         game.turrets[0]["hp"] = 2.0
         game.turrets[0]["angle"] = 0.0
         game.turrets[0]["fire_timer"] = 4.0
-        game.zombies = [{"id": 80809, "kind": 0, "x": 455.0, "y": 390.0, "face_x": 1.0, "hp": 20.0, "max_hp": 20.0, "walking": true, "attacking": false, "attack_timer": 0.0, "attack_cooldown": 0.0, "attack_type": game.BOSS_ATTACK_SLASH, "attack_hit_applied": false, "hit_timer": 0.0}]
+        game.zombies.clear()
+        game.zombies.append({"id": 80809, "kind": 0, "x": 455.0, "y": 390.0, "face_x": 1.0, "hp": 20.0, "max_hp": 20.0, "walking": true, "attacking": false, "attack_timer": 0.0, "attack_cooldown": 0.0, "attack_type": game.BOSS_ATTACK_SLASH, "attack_hit_applied": false, "hit_timer": 0.0})
         game.wave_number = 3
         game.wave_total = 1
         game.wave_spawned = 1
@@ -280,6 +284,10 @@ func _initialize() -> void:
         game.wave_break_timer = 0.0
         game.wave_time_remaining = 60.0
         game.wave_timed_out = false
+        game.airdrop_spawn_timer = 60.0
+        game.active_projectiles.clear()
+        game.active_grenades.clear()
+        game.airdrops.clear()
         game.input_vectors[1] = Vector2.ZERO
         print("[codec checkpoint] BEFORE: _host_simulate turret-destruction test")
         game._host_simulate(0.016)

@@ -1,4 +1,4 @@
-# Implementation notes — v0.4.21
+# Implementation notes — v0.4.22 hotfix (includes v0.4.21 features)
 
 ## v0.4.21 turret and aim update
 
@@ -118,3 +118,9 @@ New draw-time lower-body gait, weapon grip/recoil, boss movement aura and attack
 
 ## CI codec-test diagnostic hotfix
 The `Snapshot codec test` workflow step now uses `tee` for live console output and a 90-second `timeout`. `tests/codec_test.gd` prints checkpoints before/after potentially expensive operations. This is intended to prevent unbounded waiting and make the next failing run provide a useful last checkpoint; it does not claim to have confirmed the root cause until the rerun completes.
+
+
+### v0.4.22 codec test fixes
+- Test scene is marked offline before any host-side helper emits sound.
+- Multiplayer event relay now checks that the node is in the scene tree and `get_multiplayer()` returns a valid API/peer.
+- Turret codec tests append dictionaries to the typed zombie array instead of assigning a plain `Array`; timer and active world effects are reset to make the simulation deterministic.

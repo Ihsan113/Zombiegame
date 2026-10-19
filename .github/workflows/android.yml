@@ -95,8 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=33' not in preset or 'version/name="0.4.21"' not in preset:
-              raise SystemExit('Android export preset must report version code 33 / version 0.4.21')
+          if 'version/code=34' not in preset or 'version/name="0.4.22"' not in preset:
+              raise SystemExit('Android export preset must report version code 34 / version 0.4.22')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -398,7 +398,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.21-APK
+          name: PixelZombieLAN-v0.4.22-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -407,15 +407,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.21-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.22-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.21-source.zip
+          test -s build/PixelZombieLAN-v0.4.22-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.21-source
-          path: build/PixelZombieLAN-v0.4.21-source.zip
+          name: PixelZombieLAN-v0.4.22-source
+          path: build/PixelZombieLAN-v0.4.22-source.zip
           if-no-files-found: error
           retention-days: 14

@@ -1,3 +1,11 @@
+## v0.4.22 — codec test runtime fixes
+
+- Made offline codec tests explicitly offline before exercising loot/fire functions, preventing sound events from dereferencing a null MultiplayerAPI.
+- Guarded `_emit_sfx` and `_is_connected_client` when the MultiplayerAPI or peer is unavailable.
+- Fixed typed `Array[Dictionary]` test fixtures by using `clear()` + `append()` rather than assigning an untyped array.
+- Reset test projectiles/grenades/airdrops and hold the airdrop spawn timer during the turret-destruction simulation for deterministic results.
+- Android version code/name: 34 / 0.4.22.
+
 ## v0.4.21 — Deployable auto-turret and survivor weapon correction
 
 - Added destructible server-authoritative auto-turrets with a 270 px range, smooth head rotation, muzzle flash/tracer effects, health bar and damage smoke.

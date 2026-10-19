@@ -496,10 +496,15 @@ func _play_sfx(clip: String) -> void:
 
 func _emit_sfx(clip: String, skip_peer: int = 0) -> void:
     _play_sfx(clip)
-    if not is_host or is_offline or multiplayer.multiplayer_peer == null:
+    # Offline/headless tests can instantiate the scene before a MultiplayerAPI is bound.
+    # Never dereference Node.multiplayer until its API and peer have both been verified.
+    if not is_host or is_offline or not is_inside_tree():
+        return
+    var peer_api: MultiplayerAPI = get_multiplayer()
+    if peer_api == null or peer_api.multiplayer_peer == null:
         return
     var stamp := Time.get_ticks_msec() & 0xFFFFFFFF
-    for peer_id in multiplayer.get_peers():
+    for peer_id in peer_api.get_peers():
         if int(peer_id) == skip_peer:
             continue # the shooter already played its own shot locally
         rpc_id(int(peer_id), "receive_sfx_event", clip, stamp)
@@ -515,7 +520,10 @@ func receive_sfx_event(clip: String, host_ms: int) -> void:
         pending_sfx.pop_front()
 
 func _is_connected_client() -> bool:
-    return multiplayer.multiplayer_peer != null and not is_host and multiplayer.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED
+    if not is_inside_tree():
+        return false
+    var peer_api: MultiplayerAPI = get_multiplayer()
+    return peer_api != null and peer_api.multiplayer_peer != null and not is_host and peer_api.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED
 
 func _arena_top() -> float:
     return screen_size.y * ARENA_TOP_RATIO
