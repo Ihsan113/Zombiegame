@@ -95,8 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=38' not in preset or 'version/name="0.4.26"' not in preset:
-              raise SystemExit('Android export preset must report version code 38 / version 0.4.26')
+          if 'version/code=39' not in preset or 'version/name="0.4.27"' not in preset:
+              raise SystemExit('Android export preset must report version code 39 / version 0.4.27')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -329,6 +329,9 @@ jobs:
           for turret_test_marker in ['turret spot inside placement ring is valid', 'auto-turret tracks and damages a zombie in range', 'turret cannot fire into rear hemisphere', 'left-facing turret can track and fire inside its forward hemisphere', 'legacy world save migrates global turret yaw to left-facing half-arc', 'legacy turret without facing field infers and migrates left-facing yaw', 'current turret save preserves relative angle and facing', 'AIM Settings toggle responds to touch at switch-row edge', 'AIM Settings tap outside switch does not toggle', 'AIM Settings switch track toggles back on tap', 'survivor collides with turret body instead of passing through', 'turret body blocks survivor approaching from the opposite direction', 'zombie melee can destroy a turret']:
               if turret_test_marker not in codec_test:
                   raise SystemExit('Missing turret regression test: ' + turret_test_marker)
+          for explicit_type_marker in ['var collision_result: Vector2 = game._resolve_turret_collision(', 'var collision_result_right: Vector2 = game._resolve_turret_collision(']:
+              if explicit_type_marker not in codec_test:
+                  raise SystemExit('Turret collision tests must explicitly type values returned through a dynamic Node: ' + explicit_type_marker)
           if any(marker not in script for marker in weapon_markers):
               raise SystemExit('Finite-ammo weapon and airdrop flow is incomplete')
           if 'draw_line(pos + Vector2(-4.0, 10.0), grenade_visual_pos' in script:
@@ -416,7 +419,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.26-APK
+          name: PixelZombieLAN-v0.4.27-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -425,15 +428,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.26-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.27-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.26-source.zip
+          test -s build/PixelZombieLAN-v0.4.27-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.26-source
-          path: build/PixelZombieLAN-v0.4.26-source.zip
+          name: PixelZombieLAN-v0.4.27-source
+          path: build/PixelZombieLAN-v0.4.27-source.zip
           if-no-files-found: error
           retention-days: 14

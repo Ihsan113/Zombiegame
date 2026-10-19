@@ -349,12 +349,12 @@ func _initialize() -> void:
         # Collision footprint is enforced by authoritative and predicted movement.
         var collision_from := Vector2(turret_spot.x - 50.0, turret_spot.y)
         var collision_desired := Vector2(turret_spot.x - 20.0, turret_spot.y)
-        var collision_result := game._resolve_turret_collision(collision_from, collision_desired, 8.0)
+        var collision_result: Vector2 = game._resolve_turret_collision(collision_from, collision_desired, 8.0)
         var turret_body_rect := Rect2(turret_spot.x - game.TURRET_BODY_HALF_WIDTH, turret_spot.y + game.TURRET_BODY_TOP, game.TURRET_BODY_HALF_WIDTH * 2.0, game.TURRET_BODY_BOTTOM - game.TURRET_BODY_TOP).grow(8.0)
         check(not turret_body_rect.has_point(collision_result), "survivor collides with turret body instead of passing through")
         var collision_from_right := Vector2(turret_spot.x + 60.0, turret_spot.y)
         var collision_desired_left := Vector2(turret_spot.x - 10.0, turret_spot.y)
-        var collision_result_right := game._resolve_turret_collision(collision_from_right, collision_desired_left, 8.0)
+        var collision_result_right: Vector2 = game._resolve_turret_collision(collision_from_right, collision_desired_left, 8.0)
         check(not turret_body_rect.has_point(collision_result_right), "turret body blocks survivor approaching from the opposite direction")
         # A zombie closer to a turret than any survivor must attack and be able to destroy it.
         game.players[1]["x"] = 850.0

@@ -1,3 +1,14 @@
+# Pixel Zombie LAN v0.4.27
+
+## v0.4.27 — explicit Vector2 typing for collision codec regressions
+
+- Fixed Godot 4.7.2 parse errors in `tests/codec_test.gd`: both turret collision resolver results are explicitly declared as `Vector2`, because the call is made through a dynamically typed `Node` reference and GDScript cannot infer the return type through it.
+- Audited the other inferred declarations in the codec test; the remaining call-derived variables use statically typed engine methods or constructors and need no matching annotation.
+- Bumped Android version code/name to 39 / 0.4.27. Gameplay behavior, save schema, snapshot records, and LAN protocol are unchanged.
+- Static checks and archive integrity were verified in this environment. Godot 4.7.2 runtime codec test and APK export must still be confirmed by GitHub Actions.
+
+---
+
 # Pixel Zombie LAN v0.4.26
 
 ## v0.4.26 — half-plane turret aiming and reliable settings toggle

@@ -1,6 +1,12 @@
-# Pixel Zombie LAN v0.4.26
+# Pixel Zombie LAN v0.4.27
 
-## v0.4.26 — front 180° turret sector, solid footprint, dependable AIM toggle
+## v0.4.27 — codec collision result typing hotfix
+
+- The two turret collision test results now explicitly use `Vector2` annotations to satisfy Godot 4.7.2 GDScript parsing when invoking a method through a dynamically typed node.
+- Android version code/name: 39 / 0.4.27. Gameplay behavior and network/save layouts are unchanged.
+- Runtime codec test and APK export must pass GitHub Actions before treating the update as fully verified.
+
+## Previous release: v0.4.26 — front 180° turret sector, solid footprint, dependable AIM toggle
 
 - Turret keeps the deployment-side direction (left/right) and targets only zombies in the front 180° sector. The head rotates inside that sector without crossing through the back arc.
 - Expanded the turret body collision to cover the visible base more accurately; survivor prediction, authoritative player movement, and zombie movement use the same solid footprint.

@@ -1,4 +1,12 @@
-# Implementation notes v0.4.26
+# Implementation notes v0.4.27
+
+- GDScript type fix: `_resolve_turret_collision()` returns `Vector2`, but tests call it through `game: Node`, so type inference treated the value as dynamic. Both test variables are now explicitly typed `Vector2`.
+- Audited inferred declarations in `tests/codec_test.gd`; no other variables assigned directly from `game.some_method(...)` remain without an explicit return type.
+- Android version code/name is 39 / 0.4.27. Save version, snapshot record sizes, and LAN protocol remain unchanged.
+- ZIP/resource/shell/YAML checks are static. Godot 4.7.2 codec execution and Android export are still pending the CI run.
+
+---
+
 
 - Directional turret sector: target candidates must be within the deployment-facing 180° hemisphere, and yaw is stored as a relative offset bounded to ±90°.
 - Collision: widened the solid turret body rectangle to align with the rendered footprint. Host simulation, received movement commands, local prediction, and zombie movement all resolve against this shared shape.
