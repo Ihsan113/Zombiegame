@@ -13,8 +13,10 @@ func near(a: float, b: float, tol: float) -> bool:
     return absf(a - b) <= tol
 
 func _initialize() -> void:
+    print("[codec checkpoint] START: instantiate Main.tscn")
     var game: Node = load("res://Main.tscn").instantiate()
     root.add_child(game)
+    print("[codec checkpoint] Main.tscn instantiated")
     game.screen_size = Vector2(1201, 540)
     game.is_host = true
     var rng := RandomNumberGenerator.new()
@@ -142,6 +144,7 @@ func _initialize() -> void:
             check(int(snap.fx[0].src) == ids[0], "effect src mapping")
         print("%-40s %5d bytes  (players %d, zombies %d, effects %d)" % [sc.name, buf.size(), snap.players.size(), snap.zids.size(), snap.fx.size()])
 
+    print("[codec checkpoint] PASS: snapshot scenario round-trips")
     # Weapon profiles and reload arithmetic are deterministic and bounded.
     var sidearm_profile: Dictionary = game._weapon_profile(game.WEAPON_SIDEARM)
     check(int(sidearm_profile.mag_size) == -1 and int(sidearm_profile.interval_ms) == 280, "default sidearm keeps infinite ammo")
@@ -167,6 +170,7 @@ func _initialize() -> void:
     check(int(weapon_inventory.slot1_mag) == 4 and int(weapon_inventory.slot1_reserve) == 0, "partial magazine reload transfers only available ammo")
     check(int(weapon_inventory.slot1_reserve) >= 0, "weapon reserve never becomes negative")
 
+    print("[codec checkpoint] PASS: weapon profiles and reload arithmetic")
     # Ammo airdrops must match an owned firearm and never be wasted at a full reserve.
     var ammo_profile: Dictionary = game._weapon_profile(game.WEAPON_SMG)
     var ammo_inventory := {"active_slot": 0, "slot1_type": game.WEAPON_SMG, "slot1_mag": 0, "slot1_reserve": int(ammo_profile.reserve_cap), "slot2_type": -1, "slot2_mag": 0, "slot2_reserve": 0, "reload_timer": 0.0}
@@ -184,14 +188,18 @@ func _initialize() -> void:
     var split_ammo_result: Dictionary = game.players[1]
     check(int(split_ammo_result.slot1_reserve) == 180 and int(split_ammo_result.slot1_mag) == 30, "partial reserve space is filled before excess ammo tops up the magazine")
 
+    print("[codec checkpoint] PASS: ammo airdrop cases")
     # A depleted firearm with no reserve must reliably return to the infinite-ammo sidearm.
     game.players.clear()
     game.zombies.clear()
     game.fire_cooldowns.clear()
     game.players[1] = {"x": 320.0, "y": 390.0, "hp": 100.0, "medkits": 2, "ammo": -1, "grenades": 3, "wall_kits": 2, "active_slot": 2, "slot1_type": -1, "slot1_mag": 0, "slot1_reserve": 0, "slot2_type": game.WEAPON_ROCKET, "slot2_mag": 0, "slot2_reserve": 0, "reload_timer": 0.0, "face_x": 1.0, "shoot_timer": 0.0, "hurt_timer": 0.0}
+    print("[codec checkpoint] BEFORE: _host_fire fallback test")
     game._host_fire(1)
+    print("[codec checkpoint] AFTER: _host_fire fallback test")
     check(int(game.players[1].active_slot) == 0, "empty firearm with no reserve switches to default sidearm")
 
+    print("[codec checkpoint] PASS: empty-ammo sidearm fallback")
     # Boss attack type reuses spare flags bits without changing the 13-byte zombie record.
     game.players.clear()
     game.players[1] = {"x": 320.0, "y": 390.0, "hp": 100.0, "medkits": 2, "ammo": -1, "grenades": 3, "wall_kits": 2, "face_x": 1.0, "name": "P1", "walking": false, "shoot_timer": 0.0, "hurt_timer": 0.0}
@@ -221,6 +229,7 @@ func _initialize() -> void:
             check(attack_frame >= previous_frame, "boss attack frames are ordered")
             previous_frame = attack_frame
 
+    print("[codec checkpoint] PASS: boss attack snapshot and frames")
     # Auto-turret placement, aim tracking, automatic fire and zombie destruction.
     game.players.clear()
     game.zombies.clear()
@@ -242,7 +251,9 @@ func _initialize() -> void:
     check(game._turret_placement_is_valid(1, turret_spot), "turret spot inside placement ring is valid")
     check(not game._turret_placement_is_valid(1, Vector2(334.0, 390.0)), "turret cannot be placed too close to owner")
     game.build_cooldowns[1] = Time.get_ticks_msec() - 1000
+    print("[codec checkpoint] BEFORE: _host_build_turret placement test")
     game._host_build_turret(1, turret_spot.x / game.screen_size.x, turret_spot.y / game.screen_size.y)
+    print("[codec checkpoint] AFTER: _host_build_turret placement test")
     check(game.turrets.size() == 1, "host successfully deploys one turret kit")
     check(int(game.players[1].get("turret_kits", 0)) == 0, "successful turret deploy consumes one kit")
     if game.turrets.size() == 1:
@@ -270,7 +281,9 @@ func _initialize() -> void:
         game.wave_time_remaining = 60.0
         game.wave_timed_out = false
         game.input_vectors[1] = Vector2.ZERO
+        print("[codec checkpoint] BEFORE: _host_simulate turret-destruction test")
         game._host_simulate(0.016)
+        print("[codec checkpoint] AFTER: _host_simulate turret-destruction test")
         check(game.turrets.is_empty(), "zombie melee can destroy a turret")
     game.players.clear()
     game.zombies.clear()
@@ -278,6 +291,7 @@ func _initialize() -> void:
     game.barricades.clear()
     game.combat_effects.clear()
 
+    print("[codec checkpoint] PASS: turret placement, firing, and destruction")
     # Truncation / garbage must never crash and must be rejected.
     var good: PackedByteArray = game._encode_snapshot()
     check(game._decode_snapshot(good.slice(0, 20)).is_empty(), "truncated header rejected")
@@ -286,14 +300,18 @@ func _initialize() -> void:
     for i in range(300):
         junk.append(rng.randi_range(0, 255))
     check(game._decode_snapshot(junk).is_empty() or true, "junk survives")
+    print("[codec checkpoint] PASS: malformed and truncated packets")
+    print("[codec checkpoint] BEFORE: 2000 snapshot encodes")
     var t0 := Time.get_ticks_usec()
     var last: PackedByteArray
     for i in range(2000):
         last = game._encode_snapshot()
     var t1 := Time.get_ticks_usec()
+    print("[codec checkpoint] AFTER: 2000 snapshot encodes; BEFORE: 2000 snapshot decodes")
     for i in range(2000):
         game._decode_snapshot(last)
     var t2 := Time.get_ticks_usec()
+    print("[codec checkpoint] AFTER: 2000 snapshot decodes")
     print("worst-case encode %.0f us, decode %.0f us per snapshot (this machine)" % [float(t1 - t0) / 2000.0, float(t2 - t1) / 2000.0])
     print("largest snapshot: %d bytes (cap %d)" % [max_bytes, game.MAX_SNAPSHOT_BYTES])
     print("CODEC TEST: ", "PASS" if failures == 0 else "FAILED (%d)" % failures)

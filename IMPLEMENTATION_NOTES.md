@@ -114,3 +114,7 @@
 ## 0.4.19 — Animation, Airdrop & Audio Pass
 
 New draw-time lower-body gait, weapon grip/recoil, boss movement aura and attack deformation are visual-only and do not alter the fixed network snapshot record sizes. Gameplay ambience uses its own looping AudioStreamPlayer; boss and incoming-airdrop SFX travel through the existing SFX event RPC. Airdrops now arrive on a shorter bounded schedule with slot retry to prevent missed spawn windows.
+
+
+## CI codec-test diagnostic hotfix
+The `Snapshot codec test` workflow step now uses `tee` for live console output and a 90-second `timeout`. `tests/codec_test.gd` prints checkpoints before/after potentially expensive operations. This is intended to prevent unbounded waiting and make the next failing run provide a useful last checkpoint; it does not claim to have confirmed the root cause until the rerun completes.

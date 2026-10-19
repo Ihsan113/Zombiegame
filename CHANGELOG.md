@@ -163,3 +163,11 @@ Other changes:
 - Replaced the airdrop crate texture with a worn muted olive/rust supply crate and preserved texture proportions while aligning its base to the road.
 - Merged loot type and remaining time into a single small landed-drop tag instead of two stacked labels.
 - No multiplayer protocol or network-configuration changes. Android version code/name: 27 / 0.4.15.
+
+
+## v0.4.21 CI hotfix — codec-test live logs and hang diagnostics
+
+- Changed the GitHub Actions snapshot codec test to stream Godot output directly into the job log instead of hiding it in a temporary file until completion.
+- Added a 90-second safety timeout with explicit failure reporting if the codec test stalls.
+- Added named checkpoints around snapshot round-trips, weapon/ammo handling, boss frames, turret deployment/destruction, and the encode/decode stress loops, so the last printed checkpoint identifies the area to inspect.
+- This is a CI/test-diagnostics hotfix only; gameplay code, assets, LAN packet structure, and Android version code remain unchanged.

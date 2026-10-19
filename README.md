@@ -127,3 +127,7 @@ The project now includes `assets/grenade_explosion_asset.png`, `assets/airdrop_p
 - Replaced the bright blue crate with a worn olive/rust/red supply crate that matches the dusk palette. Rendering now preserves the texture aspect ratio and aligns the crate bottom to the road contact point. Large original source sheets are kept in `art_source/` and excluded from Android export.
 - Combined the landed loot label and expiry countdown into one compact panel above the crate; removed the duplicate label below it and the strong rectangular warning outline.
 - Kept the compact binary snapshot protocol, ENet settings, RPC signatures and LAN cadence unchanged. Android version code/name: 27 / 0.4.15.
+
+
+### CI troubleshooting: codec test
+The snapshot codec CI step streams output live and stops after 90 seconds if no completion occurs. Look for the last `[codec checkpoint]` line in GitHub Actions to identify which test section stalled.

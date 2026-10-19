@@ -371,9 +371,21 @@ jobs:
         run: |
           set -euo pipefail
           codec_log="$(mktemp)"
-          ./godot --headless --path . -s res://tests/codec_test.gd >"$codec_log" 2>&1 || { cat "$codec_log"; exit 1; }
-          cat "$codec_log"
-          grep -q 'CODEC TEST: PASS' "$codec_log"
+          echo "Running snapshot codec test (90-second safety timeout); live log follows."
+          set +e
+          timeout --signal=TERM --kill-after=5s 90s \
+            stdbuf -oL -eL ./godot --headless --path . -s res://tests/codec_test.gd 2>&1 | tee "$codec_log"
+          codec_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$codec_status" -eq 124 ] || [ "$codec_status" -eq 137 ]; then
+            echo "::error::Snapshot codec test exceeded its 90-second timeout. See the last [codec checkpoint] above to locate the stalled section."
+            exit 1
+          fi
+          if [ "$codec_status" -ne 0 ]; then
+            echo "::error::Snapshot codec test failed with exit code $codec_status."
+            exit "$codec_status"
+          fi
+          grep -q 'CODEC TEST: PASS' "$codec_log" || { echo "::error::Godot exited without the CODEC TEST: PASS marker."; exit 1; }
 
       - name: Export debug APK
         shell: bash
