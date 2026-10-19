@@ -1,4 +1,4 @@
-# Pixel Zombie LAN — v0.4.15
+# Pixel Zombie LAN — v0.4.16
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
 
@@ -76,6 +76,13 @@ v0.4.10 was parsed and run in Godot 4.7.2 (netcode checked at v0.4.9, barricade 
 
 The project now includes `assets/grenade_explosion_asset.png`, `assets/airdrop_parachute_generated.png`, `assets/airdrop_crate_generated.png`, and `assets/airdrop_landing_dust_generated.png`. Full generated source sheets are retained in `assets/grenade_explosion_spritesheet_source.png` and `assets/airdrop_spritesheet_source.png`. The in-game grenade blast still uses the existing synchronized effect lifetime and host authority.
 
+
+
+## v0.4.16 — boss waves, scaling hordes, and grounded supply drops
+- Zombie count is no longer fixed at 25: each wave adds five infected (Wave 1: 25, Wave 2: 30, Wave 10: 70), with the network counter safely capped at 255.
+- Every wave divisible by 10 begins with a dedicated Brute boss. It has a large isolated sprite, a boss HP bar, slower movement, stronger attacks, and more HP at later boss tiers. Boss HP is normalized into the existing compact snapshot byte; the packet layout and 60 Hz LAN cadence are unchanged.
+- Replaced the clipped multi-canopy airdrop PNG with one complete canopy. Suspension lines now meet the parachute and crate, and the crate/shadow bottom is aligned with the survivor ground line. A dust/smoke puff appears for two seconds when the crate lands and sits behind it so the crate remains readable. Old saved runs also recalculate the horde target from the current wave.
+- Source version: 0.4.16. Android version code/name: 28 / 0.4.16. Install the same build on all LAN devices because older builds do not understand the new boss kind.
 
 ## v0.4.15 — cohesive generated VFX and airdrop presentation
 - Replaced the old explosion raster, whose partially transparent orange/brown background caused a large muddy rectangle over the road, with a cropped, premultiplied-alpha transparent pixel-art blast. It is rendered using its original aspect ratio and anchored at ground level.

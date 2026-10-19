@@ -26,9 +26,18 @@ func _initialize() -> void:
         {"name": "2 players, 10 zombies, shooting", "p": 2, "z": 10, "fx": 4, "g": 0, "w": 0, "d": 0},
         {"name": "4 players, 14 zombies, busy", "p": 4, "z": 14, "fx": 12, "g": 1, "w": 3, "d": 1},
         {"name": "4 players, 14 zombies, worst case", "p": 4, "z": 14, "fx": 36, "g": 3, "w": 8, "d": 2},
+        {"name": "boss + 13 zombies, normalized boss HP", "p": 4, "z": 14, "fx": 12, "g": 1, "w": 3, "d": 1},
     ]
+    check(game._zombie_count_for_wave(1) == 25, "wave 1 starts with 25 infected")
+    check(game._zombie_count_for_wave(2) == 30, "wave 2 grows beyond 25")
+    check(game._zombie_count_for_wave(10) == 70, "wave 10 scales the horde")
+    check(game._zombie_count_for_wave(20) > game._zombie_count_for_wave(10), "higher waves keep growing")
+    check(game._boss_hp_for_wave(20) > game._boss_hp_for_wave(10), "boss HP scales by boss tier")
     var max_bytes := 0
     for sc in scenarios:
+        var boss_scenario := str(sc.name).contains("boss")
+        game.wave_number = 10 if boss_scenario else 3
+        game.wave_total = game._zombie_count_for_wave(game.wave_number)
         game.players.clear()
         game.zombies.clear()
         game.combat_effects.clear()
@@ -43,7 +52,10 @@ func _initialize() -> void:
             game.players[pid] = {"x": rng.randf_range(30, 1170), "y": rng.randf_range(300, 460), "hp": rng.randf_range(1, 100), "medkits": 2, "ammo": -1, "grenades": 3, "wall_kits": 2, "face_x": -1.0, "name": "P", "walking": true, "shoot_timer": 0.17, "hurt_timer": 0.0}
             game.cmd_last_seq[pid] = rng.randi_range(0, 100000)
         for i in range(int(sc.z)):
-            game.zombies.append({"id": rng.randi(), "kind": rng.randi_range(0, 3), "x": rng.randf_range(30, 1170), "y": rng.randf_range(300, 460), "face_x": 1.0, "hp": 3.5, "max_hp": 3.5, "walking": true, "attacking": i % 3 == 0, "attack_timer": 0.2, "attack_cooldown": 0.3, "hit_timer": 0.1})
+            var zombie_kind := 4 if boss_scenario and i == 0 else rng.randi_range(0, 3)
+            var max_zombie_hp: float = game._zombie_max_hp_for(zombie_kind, game.wave_number)
+            var hp_value: float = max_zombie_hp * 0.73 if zombie_kind == 4 else 3.5
+            game.zombies.append({"id": rng.randi(), "kind": zombie_kind, "x": rng.randf_range(30, 1170), "y": rng.randf_range(300, 460), "face_x": 1.0, "hp": hp_value, "max_hp": max_zombie_hp, "walking": true, "attacking": i % 3 == 0, "attack_timer": 0.2, "attack_cooldown": 0.3, "hit_timer": 0.1})
         var born := Time.get_ticks_msec()
         for i in range(int(sc.fx)):
             game.combat_effects.append({"eid": i + 1, "born_ms": born - i * 5, "src": ids[0], "kind": i % 8, "x": rng.randf_range(0, 1100), "y": 300.0, "x2": 500.0, "y2": 320.0, "ttl": 0.1, "life": 0.3})
@@ -73,7 +85,8 @@ func _initialize() -> void:
         for z in game.zombies:
             var zr: Dictionary = snap.zombies[int(z.id) & 0xFFFFFFFF]
             check(near(float(z.x), float(zr.x), 0.07) and near(float(z.y), float(zr.y), 0.07), "zombie pos")
-            check(near(float(z.hp), float(zr.hp), 0.03), "zombie hp")
+            var hp_tolerance := 0.45 if int(z.kind) == 4 else 0.03
+            check(near(float(z.hp), float(zr.hp), hp_tolerance), "zombie hp")
             check(int(zr.kind) == int(z.kind), "zombie kind")
         check(snap.walls.size() == int(sc.w), sc.name + ": walls")
         check(snap.drops.size() == int(sc.d), sc.name + ": drops")

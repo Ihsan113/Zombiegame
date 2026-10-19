@@ -1,4 +1,4 @@
-# Implementation notes — v0.4.15
+# Implementation notes — v0.4.16
 
 - Target: Godot 4, landscape Android; 4-player host-authoritative ENet/UDP LAN on port 24567.
 - `assets/barricade_detail.png` is the transparent A-frame road barrier; SVG is its fallback. Both render at 120×72, preserving the asset's 720×433 aspect ratio. With the game entity position at the same center convention as a survivor, the barrier's feet and a wider contact shadow reach the ground line. Wall placement preview shares the same dimensions. Minimum spacing is 132 px and zombie attack distance is tuned to engage at the outside edge.
@@ -57,6 +57,13 @@
 - `assets/grenade_explosion_asset.svg` is a transparent 512×420 vector sprite with fire core, irregular flames, smoke lobes, ground dust and debris. The runtime scales/fades the asset while preserving the shock ring, sparks, falling fragments and smoke simulation.
 - No snapshot fields, RPC signatures, network intervals, or ENet compression settings were changed in this update.
 
+
+
+## v0.4.16 wave/boss/airdrop notes
+- `_zombie_count_for_wave()` computes `min(255, 25 + 5 * (wave - 1))`; a boss is counted as the first spawn of each wave number divisible by ten. `MAX_ZOMBIES_PER_SNAPSHOT` remains 40 while the live concurrency limit remains 14, so increasing wave totals do not increase the maximum snapshot size.
+- Boss kind 4 uses normalized HP in the existing zombie HP byte. Normal zombies retain 20 HP-units-per-byte encoding. The record is still 13 bytes and no snapshot, RPC or effect record layout changed; all LAN peers should run 0.4.16 together.
+- `boss_brute.png` is an isolated transparent frame from the supplied Brute sheet, with extra canvas padding and aspect-ratio-preserving rendering so the spikes and hands do not clip. The canopy PNG is now generated from the standalone parachute SVG and cropped to its alpha bounds. The landing dust PNG is one clean transparent plume, not an atlas. Landing smoke lasts 2.0 seconds; expiry dust uses the shorter 1.15-second lifetime. Effect kind 8 is drawn before depth-sorted world entities to keep smoke behind the supply crate.
+- Airdrop crate base and contact shadow use `pos.y + 35`, aligned to the survivor ground-contact line. Suspension lines attach to the canopy lower edge and terminate close to the crate lid.
 
 ## v0.4.15 asset/render notes
 - `assets/grenade_explosion_asset.png` is a generated RGBA asset trimmed around visible alpha content, resampled in premultiplied-alpha space, and saved with transparent edges. Runtime uses the PNG; the SVG fallback has been restyled to match it.

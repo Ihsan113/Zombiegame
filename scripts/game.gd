@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.15
+# Pixel Zombie LAN — wave defense prototype v0.4.16
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -8,8 +8,12 @@ const MAX_PLAYERS := 4
 const PLAYER_SPEED := 150.0
 const ZOMBIE_SPEED := 28.0
 const ZOMBIE_ATTACK_RANGE := 45.0
-const ZOMBIE_MAX_HP := [3.0, 4.0, 7.0, 3.5]
+const ZOMBIE_KIND_BOSS := 4
+const ZOMBIE_MAX_HP := [3.0, 4.0, 7.0, 3.5, 100.0]
 const WAVE_ZOMBIE_COUNT := 25
+const WAVE_ZOMBIES_PER_LEVEL := 5
+const BOSS_BASE_HP := 100.0
+const BOSS_HP_PER_TIER := 35.0
 const WAVE_BASE_DURATION := 90.0
 const SHOT_RANGE_MAX := 560.0
 const SHOT_LANE_TOLERANCE := 25.0
@@ -23,6 +27,7 @@ const GRENADE_DAMAGE := 5.0
 const GRENADE_EXPLOSION_EFFECT_DURATION := 1.65
 const AIRDROP_LAND_LIFETIME := 22.0 # Seconds after landing before an unclaimed supply crate fades out.
 const AIRDROP_DESPAWN_EFFECT_DURATION := 1.15
+const AIRDROP_LANDING_EFFECT_DURATION := 2.0
 const PLAYER_DEATH_FADE_DURATION := 1.25
 const PLAYER_REMAINS_FADE_START := 11.0
 const PLAYER_REMAINS_FADE_END := 14.0
@@ -120,6 +125,7 @@ var barricade_texture: Texture2D
 var airdrop_crate_texture: Texture2D
 var parachute_texture: Texture2D
 var airdrop_landing_texture: Texture2D
+var boss_texture: Texture2D
 var combat_effects: Array[Dictionary] = []
 # Local-only presentation state. Kept out of snapshots so v0.4.11 LAN packet layout stays unchanged.
 var player_death_visuals: Dictionary = {}
@@ -256,6 +262,7 @@ func _ready() -> void:
     if parachute_texture == null:
         parachute_texture = load("res://assets/parachute_detail.svg") as Texture2D
     airdrop_landing_texture = load("res://assets/airdrop_landing_dust_generated.png") as Texture2D
+    boss_texture = load("res://assets/boss_brute.png") as Texture2D
     if sprite_atlas == null:
         push_warning("Pixel Zombie LAN: neither PNG nor SVG sprite atlas loaded; simple fallback characters will be drawn.")
     if background_texture == null:
@@ -505,13 +512,16 @@ func _host_simulate(delta: float) -> void:
         wave_break_timer = maxf(0.0, wave_break_timer - delta)
         if wave_break_timer <= 0.0:
             wave_number += 1
-            wave_total = WAVE_ZOMBIE_COUNT
+            wave_total = _zombie_count_for_wave(wave_number)
             wave_spawned = 0
             wave_kills = 0
             wave_spawn_timer = 1.0
             wave_time_remaining = _wave_duration_for(wave_number)
             wave_timed_out = false
-            ui_status = "Wave %d incoming — hold the middle!" % wave_number
+            if wave_number % 10 == 0:
+                ui_status = "BOSS WAVE %d — THE BRUTE IS COMING!" % wave_number
+            else:
+                ui_status = "Wave %d incoming — %d infected detected" % [wave_number, wave_total]
             _emit_sfx("wave_start")
     else:
         if not wave_timed_out:
@@ -554,7 +564,7 @@ func _host_simulate(delta: float) -> void:
             var target_pos := Vector2(float(target.get("x", 0.0)), float(target.get("y", 0.0)))
             var blocking_wall_index := _find_blocking_barricade(zombie_pos, target_pos)
             var zombie_kind := clampi(int(z.get("kind", 0)), 0, ZOMBIE_MAX_HP.size() - 1)
-            var speed_scale := 0.68 if zombie_kind == 2 else (1.25 if zombie_kind == 3 else 1.0)
+            var speed_scale := 0.54 if zombie_kind == ZOMBIE_KIND_BOSS else (0.68 if zombie_kind == 2 else (1.25 if zombie_kind == 3 else 1.0))
             if wave_timed_out:
                 speed_scale *= 1.18
 
@@ -579,9 +589,9 @@ func _host_simulate(delta: float) -> void:
                     z["attacking"] = true
                     attack_timer = 0.38
                     if attack_cooldown <= 0.0:
-                        var wall_damage := 13.0 if zombie_kind == 2 else (6.0 if zombie_kind == 3 else 8.0)
+                        var wall_damage := 24.0 if zombie_kind == ZOMBIE_KIND_BOSS else (13.0 if zombie_kind == 2 else (6.0 if zombie_kind == 3 else 8.0))
                         wall["hp"] = float(wall.get("hp", 80.0)) - wall_damage
-                        attack_cooldown = 0.92 if zombie_kind == 2 else (0.56 if zombie_kind == 3 else 0.74)
+                        attack_cooldown = 1.10 if zombie_kind == ZOMBIE_KIND_BOSS else (0.92 if zombie_kind == 2 else (0.56 if zombie_kind == 3 else 0.74))
                         _add_combat_effect(5, zombie_pos + Vector2(float(z.get("face_x", 1.0)) * 14.0, -3.0), wall_pos, 0.20)
                         _emit_sfx("attack")
                         if float(wall.get("hp", 0.0)) <= 0.0:
@@ -596,7 +606,8 @@ func _host_simulate(delta: float) -> void:
                 if absf(direction.x) > 0.08:
                     z["face_x"] = -1.0 if direction.x < 0.0 else 1.0
 
-                if nearest_distance > ZOMBIE_ATTACK_RANGE:
+                var zombie_attack_range := 64.0 if zombie_kind == ZOMBIE_KIND_BOSS else ZOMBIE_ATTACK_RANGE
+                if nearest_distance > zombie_attack_range:
                     z["walking"] = true
                     attack_timer = 0.0
                     z["x"] = clampf(float(z.get("x", zombie_pos.x)) + direction.x * ZOMBIE_SPEED * speed_scale * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
@@ -605,8 +616,8 @@ func _host_simulate(delta: float) -> void:
                     z["walking"] = false
                     z["attacking"] = attack_timer > 0.0
                     if attack_cooldown <= 0.0:
-                        var damage := 8.0 if zombie_kind == 2 else (4.5 if zombie_kind == 3 else 6.0)
-                        var cooldown := 0.92 if zombie_kind == 2 else (0.56 if zombie_kind == 3 else 0.74)
+                        var damage := 17.0 if zombie_kind == ZOMBIE_KIND_BOSS else (8.0 if zombie_kind == 2 else (4.5 if zombie_kind == 3 else 6.0))
+                        var cooldown := 1.10 if zombie_kind == ZOMBIE_KIND_BOSS else (0.92 if zombie_kind == 2 else (0.56 if zombie_kind == 3 else 0.74))
                         target["hp"] = maxf(0.0, float(target.get("hp", 0.0)) - damage)
                         target["hurt_timer"] = 0.34
                         players[target_id] = target
@@ -650,6 +661,19 @@ func _host_simulate(delta: float) -> void:
 func _wave_duration_for(number: int) -> float:
     return maxf(55.0, WAVE_BASE_DURATION - float(maxi(0, number - 1)) * 3.0)
 
+func _zombie_count_for_wave(number: int) -> int:
+    # Start at 25, add five infected every wave, and cap to the byte-sized LAN counter.
+    return clampi(WAVE_ZOMBIE_COUNT + maxi(0, number - 1) * WAVE_ZOMBIES_PER_LEVEL, WAVE_ZOMBIE_COUNT, 255)
+
+func _boss_hp_for_wave(number: int) -> float:
+    var boss_tier := maxi(1, floori(float(maxi(1, number)) / 10.0))
+    return BOSS_BASE_HP + float(boss_tier - 1) * BOSS_HP_PER_TIER
+
+func _zombie_max_hp_for(kind: int, for_wave: int = -1) -> float:
+    if kind == ZOMBIE_KIND_BOSS:
+        return _boss_hp_for_wave(wave_number if for_wave < 1 else for_wave)
+    return float(ZOMBIE_MAX_HP[clampi(kind, 0, ZOMBIE_KIND_BOSS - 1)])
+
 func _all_players_eliminated() -> bool:
     if players.is_empty():
         return false
@@ -659,15 +683,19 @@ func _all_players_eliminated() -> bool:
     return true
 
 func _spawn_wave_zombie() -> void:
-    var kind_roll := randi_range(0, 99)
     var zombie_kind := 0
-    if wave_number >= 2 and kind_roll < 10:
-        zombie_kind = 2 # Heavy
-    elif kind_roll < 31:
-        zombie_kind = 3 # Runner
-    elif kind_roll < 57:
-        zombie_kind = 1 # Worker
-    var zombie_hp := float(ZOMBIE_MAX_HP[zombie_kind])
+    if wave_number % 10 == 0 and wave_spawned == 0:
+        # One oversized, durable brute is included in the wave's displayed total.
+        zombie_kind = ZOMBIE_KIND_BOSS
+    else:
+        var kind_roll := randi_range(0, 99)
+        if wave_number >= 2 and kind_roll < 10:
+            zombie_kind = 2 # Heavy
+        elif kind_roll < 31:
+            zombie_kind = 3 # Runner
+        elif kind_roll < 57:
+            zombie_kind = 1 # Worker
+    var zombie_hp := _zombie_max_hp_for(zombie_kind, wave_number)
     var spawn_left := randf() < 0.5
     var spawn_y := randf_range(_arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - 50.0)
     var spawn_x := 34.0 if spawn_left else screen_size.x - 34.0
@@ -838,10 +866,14 @@ func _encode_snapshot() -> PackedByteArray:
         if bool(z.get("attacking", false)):
             zflags |= 4
         sp.put_u32(int(z.get("id", 0)) & 0xFFFFFFFF)
-        sp.put_u8(clampi(int(z.get("kind", 0)), 0, 3))
+        var zombie_kind := clampi(int(z.get("kind", 0)), 0, ZOMBIE_KIND_BOSS)
+        sp.put_u8(zombie_kind)
         sp.put_u16(_qpos(float(z.get("x", 0.0))))
         sp.put_u16(_qpos(float(z.get("y", 0.0))))
-        sp.put_u8(clampi(roundi(float(z.get("hp", 0.0)) * 20.0), 0, 255))
+        var zombie_hp := float(z.get("hp", 0.0))
+        var zombie_max_hp := maxf(1.0, float(z.get("max_hp", _zombie_max_hp_for(zombie_kind))))
+        var hp_wire := roundi(clampf(zombie_hp / zombie_max_hp, 0.0, 1.0) * 255.0) if zombie_kind == ZOMBIE_KIND_BOSS else roundi(zombie_hp * 20.0)
+        sp.put_u8(clampi(hp_wire, 0, 255))
         sp.put_u8(zflags)
         sp.put_u8(_qcenti(float(z.get("attack_timer", 0.0))))
         sp.put_u8(_qcenti(float(z.get("hit_timer", 0.0))))
@@ -971,10 +1003,11 @@ func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
     var zmap: Dictionary = {}
     for i in range(zcount):
         var zid := sp.get_u32()
-        var zkind := sp.get_u8()
+        var zkind := clampi(sp.get_u8(), 0, ZOMBIE_KIND_BOSS)
         var zx := float(sp.get_u16()) / POS_SCALE
         var zy := float(sp.get_u16()) / POS_SCALE
-        var zhp := float(sp.get_u8()) / 20.0
+        var zhp_wire := sp.get_u8()
+        var zhp := float(zhp_wire) / 255.0 * _boss_hp_for_wave(int(snap["wave"])) if zkind == ZOMBIE_KIND_BOSS else float(zhp_wire) / 20.0
         var zflags := sp.get_u8()
         var zattack := float(sp.get_u8()) * 0.01
         var zhit := float(sp.get_u8()) * 0.01
@@ -1636,7 +1669,7 @@ func _build_zombie(zid: int, rec: Dictionary, older: Dictionary, alpha: float, s
     shown["y"] = pos.y * sy
     shown["face_x"] = -1.0 if (flags & 1) != 0 else 1.0
     shown["hp"] = float(rec["hp"])
-    shown["max_hp"] = float(ZOMBIE_MAX_HP[kind])
+    shown["max_hp"] = _zombie_max_hp_for(kind, wave_number)
     shown["walking"] = (flags & 2) != 0
     shown["attacking"] = (flags & 4) != 0
     shown["attack_timer"] = float(rec["atk"])
@@ -1756,7 +1789,7 @@ func _start_offline(load_saved: bool = false) -> void:
     grenade_cooldowns.clear()
     build_cooldowns.clear()
     wave_number = 1
-    wave_total = WAVE_ZOMBIE_COUNT
+    wave_total = _zombie_count_for_wave(wave_number)
     wave_spawned = 0
     wave_kills = 0
     wave_spawn_timer = 0.9
@@ -2250,13 +2283,16 @@ func _update_airdrops(delta: float) -> void:
             if progress >= 1.0:
                 drop["landed"] = true
                 drop["y"] = float(drop.get("land_y", _arena_top() + 70.0))
+                var landing_ground := Vector2(float(drop.get("x", 0.0)), float(drop["y"]) + 35.0)
+                _add_combat_effect(8, landing_ground, landing_ground, AIRDROP_LANDING_EFFECT_DURATION)
                 _emit_sfx("airdrop")
+                ui_status = "SUPPLY DROP LANDED — smoke marking the cache"
         else:
             drop["despawn_timer"] = float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)) - delta
             if float(drop["despawn_timer"]) <= 0.0:
                 # The host removes the unclaimed crate and broadcasts a small dust/smoke puff.
                 # Drop expiry is authoritative; clients only render the synchronized effect.
-                var expired_pos := Vector2(float(drop.get("x", 0.0)), float(drop.get("y", 0.0)))
+                var expired_pos := Vector2(float(drop.get("x", 0.0)), float(drop.get("y", 0.0)) + 35.0)
                 _add_combat_effect(8, expired_pos, expired_pos, AIRDROP_DESPAWN_EFFECT_DURATION)
                 airdrops.remove_at(drop_index)
                 continue
@@ -2269,7 +2305,7 @@ func _update_airdrops(delta: float) -> void:
                 var player_pos := Vector2(float(p.get("x", 0.0)), float(p.get("y", 0.0)))
                 if player_pos.distance_to(drop_pos) <= 42.0:
                     _grant_airdrop_loot(id, drop)
-                    _add_combat_effect(7, drop_pos, drop_pos, 0.36)
+                    _add_combat_effect(7, drop_pos + Vector2(0.0, 35.0), drop_pos + Vector2(0.0, 35.0), 0.36)
                     airdrops.remove_at(drop_index)
                     picked_up = true
                     break
@@ -2338,7 +2374,7 @@ func _restart_run() -> void:
     world_seed = randi()
     seed(world_seed)
     wave_number = 1
-    wave_total = WAVE_ZOMBIE_COUNT
+    wave_total = _zombie_count_for_wave(wave_number)
     wave_spawned = 0
     wave_kills = 0
     wave_spawn_timer = 1.1
@@ -2423,7 +2459,8 @@ func _load_world() -> void:
     seed(world_seed)
     world_time = maxf(0.0, float(parsed.get("time", 0.0)))
     wave_number = maxi(1, int(parsed.get("wave_number", 1)))
-    wave_total = clampi(int(parsed.get("wave_total", WAVE_ZOMBIE_COUNT)), 1, 100)
+    # Recalculate the total from the current wave so older saves cannot keep the legacy fixed-25 horde.
+    wave_total = _zombie_count_for_wave(wave_number)
     wave_spawned = clampi(int(parsed.get("wave_spawned", 0)), 0, wave_total)
     wave_kills = clampi(int(parsed.get("wave_kills", 0)), 0, wave_total)
     wave_spawn_timer = maxf(0.0, float(parsed.get("wave_spawn_timer", 0.9)))
@@ -2441,7 +2478,7 @@ func _load_world() -> void:
         for z in saved_zombies:
             if typeof(z) == TYPE_DICTIONARY and z.has("x") and z.has("y"):
                 var kind := clampi(int(z.get("kind", 0)), 0, ZOMBIE_MAX_HP.size() - 1)
-                var max_hp := maxf(1.0, float(z.get("max_hp", ZOMBIE_MAX_HP[kind])))
+                var max_hp := maxf(1.0, float(z.get("max_hp", _zombie_max_hp_for(kind, wave_number))))
                 zombies.append({
                     "id": int(z.get("id", randi())),
                     "kind": kind,
@@ -2528,7 +2565,7 @@ func _start_host() -> void:
     grenade_cooldowns.clear()
     build_cooldowns.clear()
     wave_number = 1
-    wave_total = WAVE_ZOMBIE_COUNT
+    wave_total = _zombie_count_for_wave(wave_number)
     wave_spawned = 0
     wave_kills = 0
     wave_spawn_timer = 0.9
@@ -2646,7 +2683,7 @@ func _reset_network_state() -> void:
     grenade_cooldowns.clear()
     build_cooldowns.clear()
     wave_number = 1
-    wave_total = WAVE_ZOMBIE_COUNT
+    wave_total = _zombie_count_for_wave(wave_number)
     wave_spawned = 0
     wave_kills = 0
     wave_spawn_timer = 0.9
@@ -3003,6 +3040,7 @@ func _draw_game_world() -> void:
             draw_line(Vector2(sx, cover_y + 4.0), Vector2(sx + 5.0, cover_y + 11.0), Color("#b59b62"), 2.0, true)
         draw_rect(Rect2(cover_x, cover_y, cover_w, 13), Color("#171f20"), false, 1.0)
 
+    _draw_airdrop_dust_effects()
     var render_entries: Array[Dictionary] = []
     for id_variant in players.keys():
         var pid := int(id_variant)
@@ -3012,7 +3050,7 @@ func _draw_game_world() -> void:
     for wi in range(barricades.size()):
         render_entries.append({"y": float(barricades[wi].get("y", h * 0.68)) + 2.0, "type": "barricade", "index": wi})
     for di in range(airdrops.size()):
-        render_entries.append({"y": float(airdrops[di].get("y", h * 0.68)) + 8.0, "type": "airdrop", "index": di})
+        render_entries.append({"y": float(airdrops[di].get("y", h * 0.68)) + 35.0, "type": "airdrop", "index": di})
     for gi in range(active_grenades.size()):
         render_entries.append({"y": float(active_grenades[gi].get("y", h * 0.68)), "type": "grenade", "index": gi})
     render_entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.y) < float(b.y))
@@ -3053,8 +3091,9 @@ func _draw_game_world() -> void:
         elif entry_type == "zombie":
             var z: Dictionary = zombies[int(entry.index)]
             pos = Vector2(float(z.get("x", 0.0)), float(z.get("y", h * 0.68)))
-            var zombie_kind := clampi(int(z.get("kind", 0)), 0, 3)
-            var heavy := zombie_kind == 2
+            var zombie_kind := clampi(int(z.get("kind", 0)), 0, ZOMBIE_KIND_BOSS)
+            var boss := zombie_kind == ZOMBIE_KIND_BOSS
+            var heavy := zombie_kind == 2 or boss
             var moving := bool(z.get("walking", false))
             var attack_timer_value := float(z.get("attack_timer", 0.0))
             var attacking := bool(z.get("attacking", false)) and attack_timer_value > 0.02
@@ -3062,10 +3101,16 @@ func _draw_game_world() -> void:
             var facing_left := float(z.get("face_x", -1.0)) < 0.0
             var phase := float(int(z.get("id", int(entry.index))) % 47) * 0.29 + float(zombie_kind) * 0.8
             var visual_pos := _character_visual_position(pos, true, facing_left, moving, attacking, false, phase, hurt)
-            draw_circle(pos + Vector2(0, 28), 11.0 if heavy else 8.5, Color(0.005, 0.008, 0.01, 0.34))
+            if boss:
+                draw_ellipse_shadow(pos + Vector2(0.0, 29.0), 24.0, 6.0, 0.36)
+            else:
+                draw_circle(pos + Vector2(0, 28), 11.0 if heavy else 8.5, Color(0.005, 0.008, 0.01, 0.34))
             if moving:
                 _draw_footstep_dust(pos, phase, true)
-            _draw_atlas_character(pos, zombie_kind, true, 1.0, facing_left, moving, attacking, hurt, false, phase)
+            if boss:
+                _draw_boss_zombie(visual_pos, facing_left, moving, attacking, hurt, phase)
+            else:
+                _draw_atlas_character(pos, zombie_kind, true, 1.0, facing_left, moving, attacking, hurt, false, phase)
             if attacking:
                 _draw_zombie_attack_swipe(visual_pos, facing_left, attack_timer_value)
             _draw_zombie_health(z, visual_pos)
@@ -3176,31 +3221,30 @@ func draw_ellipse_shadow(center: Vector2, radius_x: float, radius_y: float, alph
 
 func _draw_airdrop(drop: Dictionary, pos: Vector2) -> void:
     var landed := bool(drop.get("landed", false))
+    var crate_width := 48.0
+    var crate_height := crate_width * (float(airdrop_crate_texture.get_height()) / maxf(1.0, float(airdrop_crate_texture.get_width()))) if airdrop_crate_texture != null else 44.0
+    var crate_ground_y := pos.y + 35.0 # Match the survivor foot line so the supply does not float above the road.
+    var crate_rect := Rect2(Vector2(pos.x - crate_width * 0.5, crate_ground_y - crate_height), Vector2(crate_width, crate_height))
+
     if not landed:
-        # Keep the canopy large enough to read at phone scale, with taut suspension lines.
-        var canopy_pos := pos + Vector2(0.0, -52.0)
+        # A single canopy texture is used (the previous PNG was an entire spritesheet, so both
+        # half-canopies were visibly clipped). Ropes attach to the actual lower edge of the canopy.
+        var canopy_pos := pos + Vector2(0.0, -66.0)
+        var chute_size := Vector2(96.0, 96.0 / maxf(1.0, float(parachute_texture.get_width()) / maxf(1.0, float(parachute_texture.get_height())))) if parachute_texture != null else Vector2(96.0, 42.0)
         if parachute_texture != null:
-            var chute_ratio := float(parachute_texture.get_width()) / maxf(1.0, float(parachute_texture.get_height()))
-            var chute_size := Vector2(108.0, 108.0 / maxf(1.0, chute_ratio))
             draw_texture_rect(parachute_texture, Rect2(canopy_pos - chute_size * 0.5, chute_size), false, Color(0.94, 0.93, 0.87, 1.0))
         else:
-            draw_colored_polygon(PackedVector2Array([canopy_pos + Vector2(-40, 7), canopy_pos + Vector2(-34, -9), canopy_pos + Vector2(-17, -22), canopy_pos + Vector2(0, -27), canopy_pos + Vector2(17, -22), canopy_pos + Vector2(34, -9), canopy_pos + Vector2(40, 7)]), Color("#9c9b82"))
-            draw_arc(canopy_pos + Vector2(0, 7), 40.0, PI, TAU, 24, Color("#c5bda0"), 2.0)
-        # Strings end at the sling above the crate rather than touching arbitrary points on its lid.
-        var sling_y := pos.y - 20.0
-        draw_line(canopy_pos + Vector2(-32.0, 5.0), Vector2(pos.x - 12.0, sling_y), Color(0.53, 0.50, 0.41, 0.92), 1.2, true)
-        draw_line(canopy_pos + Vector2(-16.0, 12.0), Vector2(pos.x - 5.0, sling_y), Color(0.70, 0.65, 0.52, 0.86), 1.0, true)
-        draw_line(canopy_pos + Vector2(16.0, 12.0), Vector2(pos.x + 5.0, sling_y), Color(0.70, 0.65, 0.52, 0.86), 1.0, true)
-        draw_line(canopy_pos + Vector2(32.0, 5.0), Vector2(pos.x + 12.0, sling_y), Color(0.53, 0.50, 0.41, 0.92), 1.2, true)
+            draw_colored_polygon(PackedVector2Array([canopy_pos + Vector2(-42, 9), canopy_pos + Vector2(-36, -9), canopy_pos + Vector2(-19, -23), canopy_pos + Vector2(0, -28), canopy_pos + Vector2(19, -23), canopy_pos + Vector2(36, -9), canopy_pos + Vector2(42, 9)]), Color("#9c9b82"))
+            draw_arc(canopy_pos + Vector2(0, 9), 42.0, PI, TAU, 24, Color("#c5bda0"), 2.0)
+        var sling_y := crate_rect.position.y + 2.0
+        draw_line(canopy_pos + Vector2(-31.0, 12.0), Vector2(pos.x - 12.0, sling_y), Color(0.36, 0.35, 0.29, 0.96), 1.5, true)
+        draw_line(canopy_pos + Vector2(-16.0, 17.0), Vector2(pos.x - 5.0, sling_y), Color(0.70, 0.65, 0.52, 0.94), 1.2, true)
+        draw_line(canopy_pos + Vector2(16.0, 17.0), Vector2(pos.x + 5.0, sling_y), Color(0.70, 0.65, 0.52, 0.94), 1.2, true)
+        draw_line(canopy_pos + Vector2(31.0, 12.0), Vector2(pos.x + 12.0, sling_y), Color(0.36, 0.35, 0.29, 0.96), 1.5, true)
     else:
-        # Small soft contact shadow directly under the crate; no floating halo.
-        draw_ellipse_shadow(pos + Vector2(0.0, 18.0), 24.0, 5.5, 0.36)
+        # Flattened contact shadow is aligned to the crate's real bottom edge.
+        draw_ellipse_shadow(Vector2(pos.x, crate_ground_y + 0.8), 25.0, 5.2, 0.46)
 
-    # Preserve the source texture's aspect ratio and align its bottom edge to the road contact point.
-    var crate_width := 50.0
-    var crate_height := crate_width * (float(airdrop_crate_texture.get_height()) / maxf(1.0, float(airdrop_crate_texture.get_width()))) if airdrop_crate_texture != null else 44.0
-    var crate_ground_y := pos.y + 17.0
-    var crate_rect := Rect2(Vector2(pos.x - crate_width * 0.5, crate_ground_y - crate_height), Vector2(crate_width, crate_height))
     if airdrop_crate_texture != null:
         draw_texture_rect(airdrop_crate_texture, crate_rect, false, Color(0.94, 0.91, 0.84, 1.0))
     else:
@@ -3209,7 +3253,6 @@ func _draw_airdrop(drop: Dictionary, pos: Vector2) -> void:
         draw_rect(crate_rect, Color("#242b25"), false, 2.0)
         draw_line(Vector2(crate_rect.position.x + 4.0, crate_rect.position.y + 4.0), Vector2(crate_rect.end.x - 4.0, crate_rect.end.y - 4.0), Color("#99784d"), 2.0, true)
 
-    # Use a single compact tag for loot and expiry, instead of stacked panels above and below the crate.
     var loot_kind := str(drop.get("loot_kind", "grenade"))
     var loot_quantity := maxi(1, int(drop.get("quantity", 1)))
     var loot_tag: String = "SUPPLY DROP"
@@ -3226,7 +3269,6 @@ func _draw_airdrop(drop: Dictionary, pos: Vector2) -> void:
                 loot_tag = "MEDKIT +%d" % loot_quantity
                 loot_color = Color("#c97868")
             "ammo":
-                # Legacy saved drops migrate to grenade loot because ammunition is unlimited.
                 loot_tag = "GREN +1"
                 loot_color = Color("#c6ae79")
 
@@ -3245,8 +3287,30 @@ func _draw_airdrop(drop: Dictionary, pos: Vector2) -> void:
         if progress_width > 0.0:
             draw_rect(Rect2(label_rect.position.x + 2.0, label_rect.end.y - 1.5, minf(label_rect.size.x - 4.0, progress_width), 1.5), tag_color)
         if warning:
-            # A gentle red tint is less intrusive than a box-shaped selection outline.
             draw_rect(crate_rect, Color(0.95, 0.24, 0.16, 0.08 * pulse))
+
+func _draw_airdrop_dust_effects() -> void:
+    # Landing/expiry dust is rendered before entities so the plume naturally curls behind the crate.
+    for effect in combat_effects:
+        if int(effect.get("kind", 0)) != 8:
+            continue
+        var ground_pos := Vector2(float(effect.get("x", 0.0)), float(effect.get("y", 0.0)))
+        var life := maxf(0.01, float(effect.get("life", AIRDROP_DESPAWN_EFFECT_DURATION)))
+        var ttl := clampf(float(effect.get("ttl", 0.0)), 0.0, life)
+        var progress := clampf(1.0 - ttl / life, 0.0, 1.0)
+        var alpha := clampf(ttl / life, 0.0, 1.0)
+        draw_ellipse_shadow(ground_pos + Vector2(0.0, 1.0), 14.0 + progress * 18.0, 3.0 + progress * 3.0, 0.20 * alpha)
+        if airdrop_landing_texture != null:
+            var dust_width := 88.0 * (0.80 + progress * 0.35)
+            var dust_height := dust_width * float(airdrop_landing_texture.get_height()) / maxf(1.0, float(airdrop_landing_texture.get_width()))
+            var dust_rect := Rect2(Vector2(ground_pos.x - dust_width * 0.5, ground_pos.y - dust_height * 0.88), Vector2(dust_width, dust_height))
+            draw_texture_rect(airdrop_landing_texture, dust_rect, false, Color(1.0, 1.0, 1.0, alpha * 0.66))
+        for puff_index in range(6):
+            var puff_side := -1.0 if puff_index % 2 == 0 else 1.0
+            var puff_offset := Vector2(puff_side * (8.0 + progress * (8.0 + float(puff_index % 3) * 3.0)), -progress * (2.0 + float(puff_index % 3) * 2.0))
+            var puff_radius := (2.0 + float(puff_index % 3) * 1.2) * (0.75 + progress * 0.4)
+            draw_circle(ground_pos + puff_offset + Vector2(0.0, 1.2), puff_radius + 0.8, Color(0.025, 0.028, 0.027, alpha * 0.27))
+            draw_circle(ground_pos + puff_offset, puff_radius, Color(0.38, 0.35, 0.29, alpha * 0.36))
 
 func _grenade_range_pixels() -> float:
     return screen_size.x * clampf(grenade_aim_range_ratio, GRENADE_MIN_RANGE_RATIO, GRENADE_MAX_RANGE_RATIO)
@@ -3332,7 +3396,9 @@ func _draw_game_hud() -> void:
     draw_rect(Rect2(wave_x + 3, 15, wave_w, 62), Color(0.0, 0.0, 0.0, 0.34))
     draw_rect(Rect2(wave_x, 12, wave_w, 61), Color(0.015, 0.025, 0.03, 0.95))
     draw_rect(Rect2(wave_x, 12, wave_w, 3), Color("#cf4b50"))
-    draw_string(ui_font, Vector2(wave_x + 12, 31), "WAVE %02d" % wave_number, HORIZONTAL_ALIGNMENT_LEFT, wave_w - 24, 15, Color("#f0d08d"))
+    var wave_title := "BOSS WAVE %02d" % wave_number if wave_number % 10 == 0 else "WAVE %02d" % wave_number
+    var wave_title_color := Color("#ed8171") if wave_number % 10 == 0 else Color("#f0d08d")
+    draw_string(ui_font, Vector2(wave_x + 12, 31), wave_title, HORIZONTAL_ALIGNMENT_LEFT, wave_w - 24, 15 if wave_number % 10 != 0 else 13, wave_title_color)
     draw_string(ui_font, Vector2(wave_x + 12, 43), "ELIMINATED  %02d / %02d" % [wave_kills, wave_total], HORIZONTAL_ALIGNMENT_LEFT, wave_w - 24, 8, Color("#c9d0c7"))
     var wave_seconds := ceili(wave_time_remaining)
     var wave_minutes := int(wave_seconds / 60)
@@ -3516,6 +3582,29 @@ func _character_visual_position(pos: Vector2, zombie: bool, facing_left: bool, m
     var hurt_shake := -facing_sign * 1.8 * sin(animation_clock * 54.0) if hurt else 0.0
     return pos + Vector2(facing_sign * lunge + hurt_shake, bob)
 
+func _draw_boss_zombie(pos: Vector2, facing_left: bool, moving: bool, attacking: bool, hurt: bool, phase: float) -> void:
+    if boss_texture == null:
+        _draw_atlas_character(pos, 2, true, 1.48, facing_left, moving, attacking, hurt, false, phase)
+        return
+    var cadence := animation_clock * (9.0 if moving else 2.2) + phase
+    var facing_sign := -1.0 if facing_left else 1.0
+    var rotation := sin(cadence) * (0.018 if moving else 0.004)
+    if attacking:
+        rotation -= facing_sign * 0.035
+    var sx := 1.0 + sin(cadence) * (0.009 if moving else 0.002)
+    var sy := 1.0 - sin(cadence) * (0.012 if moving else 0.003)
+    var tint := Color.WHITE
+    if hurt and int(animation_clock * 32.0) % 2 == 0:
+        tint = Color(1.0, 0.60, 0.56, 1.0)
+    var flip_x := -sx if facing_left else sx
+    draw_set_transform(pos, rotation, Vector2(flip_x, sy))
+    var boss_width := 92.0
+    var boss_size := Vector2(boss_width, boss_width * float(boss_texture.get_height()) / maxf(1.0, float(boss_texture.get_width())))
+    # Preserve the complete source aspect ratio; the transparent padding keeps the horns and mutated arm uncropped.
+    # Feet land on the same depth line as survivors for consistent world depth sorting.
+    draw_texture_rect(boss_texture, Rect2(Vector2(-boss_size.x * 0.5, -boss_size.y + 33.0), boss_size), false, tint)
+    draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
 func _draw_atlas_character(pos: Vector2, kind: int, zombie: bool, scale_value: float = 1.0, facing_left: bool = false, moving: bool = false, attacking: bool = false, hurt: bool = false, shooting: bool = false, phase: float = 0.0, opacity: float = 1.0) -> void:
     var visual_alpha := clampf(opacity, 0.0, 1.0)
     if sprite_atlas == null:
@@ -3589,20 +3678,27 @@ func _draw_survivor(pos: Vector2, color: Color, scale_value: float) -> void:
     _draw_atlas_character(pos, sprite_index, false, 0.65 * scale_value)
 
 func _draw_zombie_health(zombie: Dictionary, pos: Vector2) -> void:
-    var default_max_hp := float(ZOMBIE_MAX_HP[clampi(int(zombie.get("kind", 0)), 0, 3)])
+    var kind := clampi(int(zombie.get("kind", 0)), 0, ZOMBIE_KIND_BOSS)
+    var default_max_hp := _zombie_max_hp_for(kind, wave_number)
     var max_hp := maxf(1.0, float(zombie.get("max_hp", default_max_hp)))
     var hp := clampf(float(zombie.get("hp", max_hp)) / max_hp, 0.0, 1.0)
-    var bar_width := 38.0 if int(zombie.get("kind", 0)) != 2 else 44.0
-    var bar_rect := Rect2(pos.x - bar_width * 0.5, pos.y - 44.0, bar_width, 6.0)
-    draw_rect(Rect2(bar_rect.position - Vector2(2, 2), bar_rect.size + Vector2(4, 4)), Color(0.01, 0.012, 0.014, 0.86))
+    var is_boss := kind == ZOMBIE_KIND_BOSS
+    var bar_width := 72.0 if is_boss else (44.0 if kind == 2 else 38.0)
+    var bar_y := pos.y - 64.0 if is_boss else pos.y - 44.0
+    var bar_rect := Rect2(pos.x - bar_width * 0.5, bar_y, bar_width, 6.0)
+    if is_boss:
+        draw_string(ui_font, Vector2(pos.x - 22.0, pos.y - 67.0), "BOSS", HORIZONTAL_ALIGNMENT_CENTER, 44.0, 8, Color("#f0c677"))
+    draw_rect(Rect2(bar_rect.position - Vector2(2, 2), bar_rect.size + Vector2(4, 4)), Color(0.01, 0.012, 0.014, 0.90))
     draw_rect(bar_rect, Color("#4c2025"))
     var health_color := Color("#d0aa61") if hp > 0.55 else (Color("#d46a4f") if hp > 0.25 else Color("#dc414a"))
     draw_rect(Rect2(bar_rect.position + Vector2(1, 1), Vector2(maxf(0.0, (bar_width - 2.0) * hp), 4.0)), health_color)
-    draw_rect(bar_rect, Color("#c7b6a7"), false, 1.0)
+    draw_rect(bar_rect, Color("#e0c79b") if is_boss else Color("#c7b6a7"), false, 1.0)
 
 func _draw_combat_effects() -> void:
     for effect in combat_effects:
         var kind := clampi(int(effect.get("kind", 0)), 0, 8)
+        if kind == 8:
+            continue
         var start_pos := Vector2(float(effect.get("x", 0.0)), float(effect.get("y", 0.0)))
         var end_pos := Vector2(float(effect.get("x2", start_pos.x)), float(effect.get("y2", start_pos.y)))
         var life := maxf(0.01, float(effect.get("life", 0.18)))
@@ -3717,19 +3813,6 @@ func _draw_combat_effects() -> void:
             var pickup_radius := 8.0 + progress * 25.0
             draw_arc(start_pos, pickup_radius, 0, TAU, 24, Color(0.78, 0.89, 0.56, alpha), 2.0)
             draw_circle(start_pos, 3.0 + (1.0 - progress) * 4.0, Color(0.9, 0.96, 0.69, alpha))
-        elif kind == 8:
-            # Generated dust sprite anchors the expiry puff to the asphalt; procedural motes keep it alive.
-            var puff_alpha: float = clampf(1.0 - progress, 0.0, 1.0)
-            draw_ellipse_shadow(start_pos + Vector2(0.0, 4.0), 7.0 + progress * 19.0, 2.5 + progress * 4.0, 0.23 * puff_alpha)
-            if airdrop_landing_texture != null:
-                var dust_size := Vector2(100.0, 64.0) * (0.70 + progress * 0.40)
-                draw_texture_rect(airdrop_landing_texture, Rect2(start_pos + Vector2(-dust_size.x * 0.5, -dust_size.y * 0.78), dust_size), false, Color(1.0, 1.0, 1.0, puff_alpha * 0.72))
-            for puff_index in range(8):
-                var puff_angle := TAU * float(puff_index) / 8.0 + 0.31
-                var puff_offset := Vector2(cos(puff_angle) * (4.0 + progress * (7.0 + float(puff_index % 3) * 4.0)), -progress * (3.0 + float(puff_index % 4) * 3.0))
-                var puff_radius: float = (3.0 + float(puff_index % 3) * 1.5) * (0.65 + progress * 0.5)
-                draw_circle(start_pos + puff_offset + Vector2(0.0, 1.5), puff_radius + 1.0, Color(0.025, 0.028, 0.027, puff_alpha * 0.36))
-                draw_circle(start_pos + puff_offset, puff_radius, Color(0.36, 0.34, 0.30, puff_alpha * 0.48))
         elif sprite_atlas != null:
             var source_x := kind * 32
             var effect_size := Vector2(24, 24) if kind == 0 or kind == 2 or kind == 3 else Vector2(27, 27)

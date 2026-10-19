@@ -95,8 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=27' not in preset or 'version/name="0.4.15"' not in preset:
-              raise SystemExit('Android export preset must report version code 27 / version 0.4.15')
+          if 'version/code=28' not in preset or 'version/name="0.4.16"' not in preset:
+              raise SystemExit('Android export preset must report version code 28 / version 0.4.16')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -113,7 +113,7 @@ jobs:
               width, height = struct.unpack('>II', data[16:24])
               color_type = data[25]
               return width, height, color_type
-          for image_name in ['grenade_explosion_asset.png', 'airdrop_crate_generated.png', 'airdrop_parachute_generated.png', 'airdrop_landing_dust_generated.png']:
+          for image_name in ['grenade_explosion_asset.png', 'airdrop_crate_generated.png', 'airdrop_parachute_generated.png', 'airdrop_landing_dust_generated.png', 'boss_brute.png']:
               image_path = root / 'assets' / image_name
               if not image_path.is_file():
                   raise SystemExit('Missing generated VFX PNG: ' + str(image_path))
@@ -158,13 +158,15 @@ jobs:
               'const GRENADE_EXPLOSION_EFFECT_DURATION := 1.65',
               'const AIRDROP_LAND_LIFETIME := 22.0',
               'const AIRDROP_DESPAWN_EFFECT_DURATION := 1.15',
+              'const AIRDROP_LANDING_EFFECT_DURATION := 2.0',
+              '_add_combat_effect(8, landing_ground, landing_ground, AIRDROP_LANDING_EFFECT_DURATION)',
               'const PLAYER_DEATH_FADE_DURATION := 1.25',
               'func _update_player_death_visuals(delta: float) -> void:',
               'func _draw_player_death_remains(pos: Vector2, id: int, age: float, facing_left: bool) -> void:',
               'func _draw_death_bones(pos: Vector2, facing_left: bool, alpha: float, age: float) -> void:',
               'func _draw_bone_segment(start: Vector2, finish: Vector2, width: float, alpha: float) -> void:',
               '_add_combat_effect(8, expired_pos, expired_pos, AIRDROP_DESPAWN_EFFECT_DURATION)',
-              'elif kind == 8:',
+              'if kind == 8:',
               'var label_rect := Rect2(pos.x - 45.0, crate_rect.position.y - 16.0, 90.0, 12.0)',
               'draw_ellipse_shadow(grenade_ground_pos + Vector2(0.0, 5.0), 7.0, 2.6, 0.36)',
               'const MAX_BARRICADES := 8',
@@ -177,6 +179,12 @@ jobs:
               'func _draw_game_over_menu()',
               'func receive_game_over_snapshot(',
               'func _wave_duration_for(number: int)',
+              'const ZOMBIE_KIND_BOSS := 4',
+              'func _zombie_count_for_wave(number: int) -> int:',
+              'func _boss_hp_for_wave(number: int) -> float:',
+              'func _draw_boss_zombie(',
+              'func _draw_airdrop_dust_effects() -> void:',
+              'BOSS WAVE %02d',
               'func receive_sfx_event(',
               'var wave_time_remaining',
               'var animation_clock := 0.0',
@@ -312,7 +320,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.15-APK
+          name: PixelZombieLAN-v0.4.16-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -321,15 +329,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.15-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.16-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.15-source.zip
+          test -s build/PixelZombieLAN-v0.4.16-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.15-source
-          path: build/PixelZombieLAN-v0.4.15-source.zip
+          name: PixelZombieLAN-v0.4.16-source
+          path: build/PixelZombieLAN-v0.4.16-source.zip
           if-no-files-found: error
           retention-days: 14

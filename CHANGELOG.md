@@ -1,3 +1,9 @@
+## 0.4.16 — escalating waves, Brute boss, and grounded airdrop
+- Wave target counts rise by five each wave instead of remaining fixed at 25; the displayed counter remains within its one-byte network range.
+- Waves 10, 20, 30, etc. introduce the Brute boss, with dedicated art, health bar, higher durability per boss tier, slower chase speed and harder melee damage. Boss health uses a normalized field, preserving existing record lengths.
+- Corrected the parachute texture from a spritesheet to a single canopy. Reworked suspension-line attachment and crate grounding; landing smoke lasts two seconds and is drawn behind entities; a shorter dust puff still marks expiry.
+- Android version code/name: 28 / 0.4.16. Update all LAN peers together for the boss type.
+
 # Changelog
 
 ## 0.4.3 — infinite ammo, aimable grenades, and deployable barricades
