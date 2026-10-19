@@ -1,4 +1,11 @@
-# Implementation notes — v0.4.17
+## v0.4.18 airdrop weapons and ammunition
+- Weapon constants: 0 sidearm (infinite); 1 SMG; 2 shotgun; 3 rifle; 4 sniper; 5 rocket. Survivors have slots 0/1/2. Slots 1 and 2 carry type, magazine, reserve ammo, active slot and reload timer. Fire, damage and pickups are host-authoritative; clients predict only muzzle/tracer feedback.
+- Snapshot player record is 29 bytes: legacy 15-byte state, 10 bytes for loadout/reload state, and the existing 4-byte input acknowledgement. Airdrop record remains 27 bytes; weapon/ammo subtype is stored in its existing quantity byte when loot kind is `weapon` or `ammo`.
+- Profiles are defined in `_weapon_profile()`. Values are balance defaults: SMG 30/180 rounds, 110 ms interval; shotgun 6/36, five pellets with 720 ms interval; rifle 30/180, 190 ms; sniper 5/30, 900 ms; rocket 1/12, 1000 ms with 86 px blast radius. Magazine reloads consume only existing reserve ammo. Sidearm is infinite and active fallback if a gun has no rounds remaining.
+- Supply ammo rolls are chosen only from a squad-owned gun that can accept more rounds; a solo run without an owned gun (or a squad with all gun ammo full) receives a weapon instead of dead ammo. Ammo first fills reserve space, then uses any leftover pack rounds to top up a missing magazine; an entirely full cache remains on the ground. Tests cover weapon/ammo subtype round-trip, reserve-full top-up, partial reserve-space distribution and infinite sidearm fallback. Install v0.4.18 on all LAN devices because the player snapshot record changed length.
+- The local editing environment has no Godot executable. Static resource, asset, codec-layout and package checks can run here, but Godot 4.7.2 parsing/import, headless codec execution, network loopback and Android export must be verified through CI.
+
+# Implementation notes — v0.4.18
 
 ## v0.4.17 Brute animation / combat notes
 - Runtime attack sheets are `assets/boss_attack_slash_sheet.png`, `assets/boss_attack_slam_sheet.png`, and `assets/boss_attack_lunge_sheet.png`. Each is a 1680×226 RGBA strip of five 336×226 frames, sliced from the provided reference artwork in `art_source/boss_brute_spritesheet_source.jpg` by `tools/build_boss_attack_sheets.py`.

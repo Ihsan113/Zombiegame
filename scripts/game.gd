@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.17
+# Pixel Zombie LAN — wave defense prototype v0.4.18
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -28,7 +28,16 @@ const BOSS_HP_PER_TIER := 35.0
 const WAVE_BASE_DURATION := 90.0
 const SHOT_RANGE_MAX := 560.0
 const SHOT_LANE_TOLERANCE := 25.0
-const FIRE_REPEAT_INTERVAL := 0.30
+const FIRE_REPEAT_INTERVAL := 0.30 # Default sidearm interval; equipped weapons supply their own cadence.
+const WEAPON_SIDEARM := 0
+const WEAPON_SMG := 1
+const WEAPON_SHOTGUN := 2
+const WEAPON_RIFLE := 3
+const WEAPON_SNIPER := 4
+const WEAPON_ROCKET := 5
+const WEAPON_SLOT_EMPTY := 255
+const WEAPON_COUNT := 6
+const SHOTGUN_PELLET_OFFSETS: Array[float] = [-13.0, -6.5, 0.0, 6.5, 13.0]
 const ARENA_TOP_RATIO := 0.520
 const ARENA_BOTTOM_RATIO := 0.865
 const ARENA_TOP_CLEARANCE := 22.0 # Clamp character ground point just inside the asphalt below the curb.
@@ -71,10 +80,10 @@ const INPUT_INTERVAL := 0.0166   # 60 movement-command packets/second at most (a
 const SNAP_MAGIC := 0xB7
 const POS_SCALE := 8.0            # wire positions are uint16 in 1/8 px units
 const NO_SOURCE := 255
-const LOOT_KINDS := ["grenade", "wall", "medkit"]
+const LOOT_KINDS := ["grenade", "wall", "medkit", "weapon", "ammo"]
 const MAX_SNAPSHOT_BYTES := 1180  # stays below the ENet fragment size so a snapshot is never split
 const SNAPSHOT_HEADER_BYTES := 31
-const PLAYER_RECORD_BYTES := 19
+const PLAYER_RECORD_BYTES := 29
 const ZOMBIE_RECORD_BYTES := 13
 const WALL_RECORD_BYTES := 10
 const DROP_RECORD_BYTES := 27
@@ -138,6 +147,8 @@ var parachute_texture: Texture2D
 var airdrop_landing_texture: Texture2D
 var boss_texture: Texture2D
 var boss_attack_textures: Array[Texture2D] = []
+var weapon_icon_textures: Dictionary = {}
+var active_projectiles: Array[Dictionary] = []
 var combat_effects: Array[Dictionary] = []
 # Local-only presentation state. Kept out of snapshots so v0.4.11 LAN packet layout stays unchanged.
 var player_death_visuals: Dictionary = {}
@@ -282,6 +293,12 @@ func _ready() -> void:
         "res://assets/boss_attack_lunge_sheet.png"
     ]:
         boss_attack_textures.append(load(attack_path) as Texture2D)
+    weapon_icon_textures.clear()
+    weapon_icon_textures[WEAPON_SMG] = load("res://assets/weapons/smg.png") as Texture2D
+    weapon_icon_textures[WEAPON_SHOTGUN] = load("res://assets/weapons/shotgun.png") as Texture2D
+    weapon_icon_textures[WEAPON_RIFLE] = load("res://assets/weapons/rifle.png") as Texture2D
+    weapon_icon_textures[WEAPON_SNIPER] = load("res://assets/weapons/sniper.png") as Texture2D
+    weapon_icon_textures[WEAPON_ROCKET] = load("res://assets/weapons/rocket.png") as Texture2D
     if sprite_atlas == null:
         push_warning("Pixel Zombie LAN: neither PNG nor SVG sprite atlas loaded; simple fallback characters will be drawn.")
     if background_texture == null:
@@ -441,16 +458,21 @@ func _request_fire_once() -> void:
     else:
         ui_status = "Tap HOST to start a survival world"
 
+func _current_fire_interval_seconds() -> float:
+    var p: Dictionary = players.get(local_player_id, {})
+    var profile := _weapon_profile(_active_weapon_id(p))
+    return maxf(0.07, float(profile.get("interval_ms", FIRE_COOLDOWN_MS)) / 1000.0)
+
 func _process_action_requests(delta: float) -> void:
     if fire_requested:
         fire_requested = false
         _request_fire_once()
-        fire_repeat_timer = FIRE_REPEAT_INTERVAL
+        fire_repeat_timer = _current_fire_interval_seconds()
     elif fire_held:
         fire_repeat_timer -= delta
         if fire_repeat_timer <= 0.0:
             _request_fire_once()
-            fire_repeat_timer = FIRE_REPEAT_INTERVAL
+            fire_repeat_timer = _current_fire_interval_seconds()
     else:
         fire_repeat_timer = 0.0
 
@@ -514,6 +536,11 @@ func _host_simulate(delta: float) -> void:
                 p["walking"] = false
         p["shoot_timer"] = maxf(0.0, float(p.get("shoot_timer", 0.0)) - delta)
         p["hurt_timer"] = maxf(0.0, float(p.get("hurt_timer", 0.0)) - delta)
+        var reload_before := float(p.get("reload_timer", 0.0))
+        var reload_after := maxf(0.0, reload_before - delta)
+        p["reload_timer"] = reload_after
+        if reload_before > 0.0 and reload_after <= 0.0:
+            _finish_weapon_reload(p)
         players[id] = p
     _update_host_view()
 
@@ -743,6 +770,7 @@ func _host_simulate(delta: float) -> void:
         zombies[zi] = z
 
     _update_grenades(delta)
+    _update_projectiles(delta)
     _update_airdrops(delta)
 
     if _all_players_eliminated():
@@ -907,6 +935,14 @@ func _make_player(id: int) -> Dictionary:
         "ammo": -1,
         "grenades": 3,
         "wall_kits": 2,
+        "active_slot": 0,
+        "slot1_type": -1,
+        "slot1_mag": 0,
+        "slot1_reserve": 0,
+        "slot2_type": -1,
+        "slot2_mag": 0,
+        "slot2_reserve": 0,
+        "reload_timer": 0.0,
         "face_x": 1.0,
         "name": "P%d" % id,
         "walking": false,
@@ -1027,6 +1063,16 @@ func _encode_snapshot() -> PackedByteArray:
         sp.put_u8(clampi(int(p.get("wall_kits", 0)), 0, 255))
         sp.put_u8(_qcenti(float(p.get("shoot_timer", 0.0))))
         sp.put_u8(_qcenti(float(p.get("hurt_timer", 0.0))))
+        sp.put_u8(clampi(int(p.get("active_slot", 0)), 0, 2))
+        var slot1_type := int(p.get("slot1_type", -1))
+        var slot2_type := int(p.get("slot2_type", -1))
+        sp.put_u8(slot1_type if slot1_type >= WEAPON_SMG and slot1_type <= WEAPON_ROCKET else WEAPON_SLOT_EMPTY)
+        sp.put_u8(clampi(int(p.get("slot1_mag", 0)), 0, 255))
+        sp.put_u16(clampi(int(p.get("slot1_reserve", 0)), 0, 65535))
+        sp.put_u8(slot2_type if slot2_type >= WEAPON_SMG and slot2_type <= WEAPON_ROCKET else WEAPON_SLOT_EMPTY)
+        sp.put_u8(clampi(int(p.get("slot2_mag", 0)), 0, 255))
+        sp.put_u16(clampi(int(p.get("slot2_reserve", 0)), 0, 65535))
+        sp.put_u8(_qcenti(float(p.get("reload_timer", 0.0))))
         sp.put_u32(int(cmd_last_seq.get(pid, 0)) & 0xFFFFFFFF)
 
     var zcount := mini(zombies.size(), MAX_ZOMBIES_PER_SNAPSHOT)
@@ -1069,7 +1115,11 @@ func _encode_snapshot() -> PackedByteArray:
     sp.put_u8(dcount)
     for i in range(dcount):
         var drop: Dictionary = airdrops[i]
-        var loot_index := maxi(0, LOOT_KINDS.find(str(drop.get("loot_kind", "grenade"))))
+        var drop_kind := str(drop.get("loot_kind", "grenade"))
+        var loot_index := maxi(0, LOOT_KINDS.find(drop_kind))
+        var quantity_wire := clampi(int(drop.get("quantity", 1)), 0, 255)
+        if drop_kind == "weapon" or drop_kind == "ammo":
+            quantity_wire = clampi(int(drop.get("weapon_id", quantity_wire)), WEAPON_SMG, WEAPON_ROCKET)
         sp.put_u32(int(drop.get("id", 0)) & 0xFFFFFFFF)
         sp.put_u16(_qpos(float(drop.get("x", 0.0))))
         sp.put_u16(_qpos(float(drop.get("y", 0.0))))
@@ -1080,7 +1130,7 @@ func _encode_snapshot() -> PackedByteArray:
         sp.put_float(float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)))
         sp.put_u8(1 if bool(drop.get("landed", false)) else 0)
         sp.put_u8(loot_index)
-        sp.put_u8(clampi(int(drop.get("quantity", 1)), 0, 255))
+        sp.put_u8(quantity_wire)
 
     var gcount := mini(active_grenades.size(), MAX_GRENADES_PER_SNAPSHOT)
     sp.put_u8(gcount)
@@ -1167,9 +1217,19 @@ func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
         var pwall := sp.get_u8()
         var pshoot := float(sp.get_u8()) * 0.01
         var phurt := float(sp.get_u8()) * 0.01
+        var active_slot := clampi(sp.get_u8(), 0, 2)
+        var slot1_type_wire := sp.get_u8()
+        var slot1_type := slot1_type_wire if slot1_type_wire >= WEAPON_SMG and slot1_type_wire <= WEAPON_ROCKET else -1
+        var slot1_mag := sp.get_u8()
+        var slot1_reserve := sp.get_u16()
+        var slot2_type_wire := sp.get_u8()
+        var slot2_type := slot2_type_wire if slot2_type_wire >= WEAPON_SMG and slot2_type_wire <= WEAPON_ROCKET else -1
+        var slot2_mag := sp.get_u8()
+        var slot2_reserve := sp.get_u16()
+        var reload_timer := float(sp.get_u8()) * 0.01
         var pack := sp.get_u32()
         pids.append(pid)
-        pmap[pid] = {"x": px, "y": py, "hp": php, "fl": pflags, "med": pmed, "gren": pgren, "wall": pwall, "shoot": pshoot, "hurt": phurt, "ack": pack}
+        pmap[pid] = {"x": px, "y": py, "hp": php, "fl": pflags, "med": pmed, "gren": pgren, "wall": pwall, "shoot": pshoot, "hurt": phurt, "active_slot": active_slot, "slot1_type": slot1_type, "slot1_mag": slot1_mag, "slot1_reserve": slot1_reserve, "slot2_type": slot2_type, "slot2_mag": slot2_mag, "slot2_reserve": slot2_reserve, "reload_timer": reload_timer, "ack": pack}
     snap["pids"] = pids
     snap["players"] = pmap
 
@@ -1222,8 +1282,11 @@ func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
         var ddespawn := sp.get_float()
         var dlanded := sp.get_u8() != 0
         var dloot := sp.get_u8()
-        var dqty := sp.get_u8()
-        drops.append({"id": did, "x": dx, "y": dy, "start_y": dstart, "land_y": dland, "elapsed": delapsed, "fall_duration": dfall, "despawn_timer": ddespawn, "landed": dlanded, "loot_kind": str(LOOT_KINDS[clampi(dloot, 0, LOOT_KINDS.size() - 1)]), "quantity": dqty})
+        var dqty := maxi(1, sp.get_u8())
+        var decoded_kind: String = LOOT_KINDS[clampi(dloot, 0, LOOT_KINDS.size() - 1)]
+        var decoded_quantity := 1 if decoded_kind == "weapon" or decoded_kind == "ammo" else dqty
+        var decoded_weapon := dqty if decoded_kind == "weapon" or decoded_kind == "ammo" else 0
+        drops.append({"id": did, "x": dx, "y": dy, "start_y": dstart, "land_y": dland, "elapsed": delapsed, "fall_duration": dfall, "despawn_timer": ddespawn, "landed": dlanded, "loot_kind": decoded_kind, "quantity": decoded_quantity, "weapon_id": decoded_weapon})
     snap["drops"] = drops
 
     var gcount := sp.get_u8()
@@ -1657,26 +1720,48 @@ func _push_local_effect(kind: int, start_pos: Vector2, end_pos: Vector2, lifetim
 
 func _predict_local_fire() -> bool:
     var now := Time.get_ticks_msec()
-    if now - local_fire_ms < FIRE_COOLDOWN_MS or not players.has(local_player_id):
+    if not players.has(local_player_id):
         return false
     var p: Dictionary = players[local_player_id]
-    if float(p.get("hp", 0.0)) <= 0.0:
+    if float(p.get("hp", 0.0)) <= 0.0 or float(p.get("reload_timer", 0.0)) > 0.0:
         return false
+    var weapon_id := _active_weapon_id(p)
+    var active_slot := clampi(int(p.get("active_slot", 0)), 0, 2)
+    var profile := _weapon_profile(weapon_id)
+    var shot_interval_ms := int(profile.get("interval_ms", FIRE_COOLDOWN_MS))
+    if now - local_fire_ms < shot_interval_ms:
+        return false
+    if weapon_id != WEAPON_SIDEARM and _slot_mag(p, active_slot) <= 0:
+        # Send the input so the host can start a reload or switch to the infinite sidearm.
+        local_fire_ms = now
+        if _slot_reserve(p, active_slot) > 0:
+            return true
+        weapon_id = WEAPON_SIDEARM
+        profile = _weapon_profile(WEAPON_SIDEARM)
     local_fire_ms = now
-    local_shoot_timer = 0.19
+    local_shoot_timer = 0.19 if weapon_id == WEAPON_SIDEARM else (0.22 if weapon_id == WEAPON_SNIPER else 0.14)
     _play_sfx("shot")
     var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
     var facing := Vector2.LEFT if local_face < 0.0 else Vector2.RIGHT
     var muzzle := player_pos + facing * 24.0 + Vector2(0.0, -5.0)
-    var closest_projection := minf(SHOT_RANGE_MAX, screen_size.x * 0.78)
+    var max_range := minf(float(profile.get("range", SHOT_RANGE_MAX)), screen_size.x * 0.90)
+    var closest_projection := max_range
     for zombie in zombies:
         var offset := Vector2(float(zombie.get("x", 0.0)), float(zombie.get("y", 0.0))) - player_pos
         var projection := offset.dot(facing)
-        if projection > 16.0 and projection <= closest_projection and absf(offset.y) <= SHOT_LANE_TOLERANCE:
+        if projection > 16.0 and projection <= closest_projection and absf(offset.y) <= float(profile.get("lane", SHOT_LANE_TOLERANCE)):
             closest_projection = projection
     var tracer_end := player_pos + facing * closest_projection + Vector2(0.0, -5.0)
-    _push_local_effect(0, muzzle, muzzle, 0.15)
-    _push_local_effect(1, muzzle, tracer_end, 0.16)
+    _push_local_effect(0, muzzle, muzzle, 0.13 if weapon_id != WEAPON_SNIPER else 0.22)
+    if weapon_id == WEAPON_SHOTGUN:
+        for spread in SHOTGUN_PELLET_OFFSETS:
+            var pellet_end := tracer_end + Vector2(0.0, spread)
+            _push_local_effect(10, muzzle + Vector2(0.0, spread * 0.35), pellet_end, 0.14)
+    elif weapon_id == WEAPON_ROCKET:
+        var travel_time := clampf(player_pos.distance_to(tracer_end) / 920.0, 0.16, 0.44)
+        _push_local_effect(12, muzzle, tracer_end, travel_time)
+    else:
+        _push_local_effect(int(profile.get("effect", 1)), muzzle, tracer_end, 0.12 if weapon_id == WEAPON_SMG else (0.22 if weapon_id == WEAPON_SNIPER else 0.16))
     return true
 
 # --- client: render-state construction --------------------------------------
@@ -1757,6 +1842,14 @@ func _client_update_render(delta: float) -> void:
         shown["ammo"] = -1
         shown["grenades"] = int(stats["gren"])
         shown["wall_kits"] = int(stats["wall"])
+        shown["active_slot"] = int(stats.get("active_slot", 0))
+        shown["slot1_type"] = int(stats.get("slot1_type", -1))
+        shown["slot1_mag"] = int(stats.get("slot1_mag", 0))
+        shown["slot1_reserve"] = int(stats.get("slot1_reserve", 0))
+        shown["slot2_type"] = int(stats.get("slot2_type", -1))
+        shown["slot2_mag"] = int(stats.get("slot2_mag", 0))
+        shown["slot2_reserve"] = int(stats.get("slot2_reserve", 0))
+        shown["reload_timer"] = float(stats.get("reload_timer", 0.0))
         shown["face_x"] = -1.0 if face_left else 1.0
         shown["walking"] = walking
         shown["shoot_timer"] = shoot_timer
@@ -1798,7 +1891,7 @@ func _client_update_render(delta: float) -> void:
         var drop_y := float(drop["land_y"])
         if not landed:
             drop_y = lerpf(float(drop["start_y"]), float(drop["land_y"]), clampf(drop_elapsed / maxf(0.1, float(drop["fall_duration"])), 0.0, 1.0))
-        airdrops.append({"id": int(drop["id"]), "x": float(drop["x"]) * sx, "y": drop_y * sy, "start_y": float(drop["start_y"]) * sy, "land_y": float(drop["land_y"]) * sy, "elapsed": drop_elapsed, "fall_duration": float(drop["fall_duration"]), "despawn_timer": float(drop["despawn_timer"]), "landed": landed, "loot_kind": str(drop["loot_kind"]), "quantity": int(drop["quantity"])})
+        airdrops.append({"id": int(drop["id"]), "x": float(drop["x"]) * sx, "y": drop_y * sy, "start_y": float(drop["start_y"]) * sy, "land_y": float(drop["land_y"]) * sy, "elapsed": drop_elapsed, "fall_duration": float(drop["fall_duration"]), "despawn_timer": float(drop["despawn_timer"]), "landed": landed, "loot_kind": str(drop["loot_kind"]), "quantity": int(drop["quantity"]), "weapon_id": int(drop.get("weapon_id", WEAPON_SMG))})
     active_grenades.clear()
     var from_nades: Array = from_snap["nades"]
     for nade in to_snap["nades"]:
@@ -1960,6 +2053,7 @@ func _start_offline(load_saved: bool = false) -> void:
     airdrops.clear()
     barricades.clear()
     active_grenades.clear()
+    active_projectiles.clear()
     airdrop_spawn_timer = 28.0
     airdrop_sequence = 1
     combat_effects.clear()
@@ -2014,59 +2108,295 @@ func _add_combat_effect(kind: int, start_pos: Vector2, end_pos: Vector2, lifetim
     if combat_effects.size() > 36:
         combat_effects.pop_front()
 
-func _host_fire(id: int) -> void:
+func _weapon_profile(weapon_id: int) -> Dictionary:
+    match clampi(weapon_id, WEAPON_SIDEARM, WEAPON_ROCKET):
+        WEAPON_SMG:
+            return {"name": "SMG", "damage": 1.0, "range": 450.0, "lane": 25.0, "interval_ms": 110, "mag_size": 30, "reserve_cap": 180, "spawn_reserve": 90, "ammo_pack": 45, "reload_time": 1.15, "radius": 0.0, "effect": 14}
+        WEAPON_SHOTGUN:
+            return {"name": "SHOTGUN", "damage": 1.15, "range": 245.0, "lane": 10.0, "interval_ms": 720, "mag_size": 6, "reserve_cap": 36, "spawn_reserve": 18, "ammo_pack": 12, "reload_time": 1.45, "radius": 0.0, "effect": 10}
+        WEAPON_RIFLE:
+            return {"name": "RIFLE", "damage": 2.0, "range": 530.0, "lane": 20.0, "interval_ms": 190, "mag_size": 30, "reserve_cap": 180, "spawn_reserve": 90, "ammo_pack": 45, "reload_time": 1.30, "radius": 0.0, "effect": 13}
+        WEAPON_SNIPER:
+            return {"name": "SNIPER", "damage": 7.0, "range": 760.0, "lane": 13.0, "interval_ms": 900, "mag_size": 5, "reserve_cap": 30, "spawn_reserve": 10, "ammo_pack": 5, "reload_time": 1.85, "radius": 0.0, "effect": 11}
+        WEAPON_ROCKET:
+            return {"name": "ROCKET", "damage": 8.0, "range": 520.0, "lane": 28.0, "interval_ms": 1000, "mag_size": 1, "reserve_cap": 12, "spawn_reserve": 3, "ammo_pack": 2, "reload_time": 1.75, "radius": 86.0, "effect": 12}
+        _:
+            return {"name": "SIDEARM", "damage": 1.0, "range": SHOT_RANGE_MAX, "lane": SHOT_LANE_TOLERANCE, "interval_ms": FIRE_COOLDOWN_MS, "mag_size": -1, "reserve_cap": 0, "spawn_reserve": 0, "ammo_pack": 0, "reload_time": 0.0, "radius": 0.0, "effect": 1}
+
+func _weapon_name(weapon_id: int) -> String:
+    return str(_weapon_profile(weapon_id).get("name", "SIDEARM"))
+
+func _active_weapon_id(p: Dictionary) -> int:
+    var slot := clampi(int(p.get("active_slot", 0)), 0, 2)
+    if slot == 1:
+        var first := int(p.get("slot1_type", -1))
+        return first if first >= WEAPON_SMG and first <= WEAPON_ROCKET else WEAPON_SIDEARM
+    if slot == 2:
+        var second := int(p.get("slot2_type", -1))
+        return second if second >= WEAPON_SMG and second <= WEAPON_ROCKET else WEAPON_SIDEARM
+    return WEAPON_SIDEARM
+
+func _slot_type(p: Dictionary, slot: int) -> int:
+    if slot == 1:
+        return int(p.get("slot1_type", -1))
+    if slot == 2:
+        return int(p.get("slot2_type", -1))
+    return WEAPON_SIDEARM
+
+func _slot_mag(p: Dictionary, slot: int) -> int:
+    return maxi(0, int(p.get("slot1_mag" if slot == 1 else "slot2_mag", 0))) if slot > 0 else -1
+
+func _slot_reserve(p: Dictionary, slot: int) -> int:
+    return maxi(0, int(p.get("slot1_reserve" if slot == 1 else "slot2_reserve", 0))) if slot > 0 else 0
+
+func _set_slot_ammo(p: Dictionary, slot: int, mag: int, reserve: int) -> void:
+    if slot == 1:
+        p["slot1_mag"] = maxi(0, mag)
+        p["slot1_reserve"] = maxi(0, reserve)
+    elif slot == 2:
+        p["slot2_mag"] = maxi(0, mag)
+        p["slot2_reserve"] = maxi(0, reserve)
+
+func _find_weapon_slot(p: Dictionary, weapon_id: int) -> int:
+    if int(p.get("slot1_type", -1)) == weapon_id:
+        return 1
+    if int(p.get("slot2_type", -1)) == weapon_id:
+        return 2
+    return 0
+
+func _can_collect_ammo(p: Dictionary, weapon_id: int) -> bool:
+    var slot := _find_weapon_slot(p, weapon_id)
+    if slot <= 0:
+        return false
+    var profile := _weapon_profile(weapon_id)
+    return _slot_reserve(p, slot) < int(profile["reserve_cap"]) or _slot_mag(p, slot) < int(profile["mag_size"])
+
+func _start_weapon_reload(p: Dictionary, slot: int) -> void:
+    if slot < 1 or slot > 2:
+        return
+    var weapon_id := _slot_type(p, slot)
+    var profile := _weapon_profile(weapon_id)
+    if weapon_id < WEAPON_SMG or _slot_mag(p, slot) >= int(profile["mag_size"]) or _slot_reserve(p, slot) <= 0:
+        return
+    p["reload_timer"] = float(profile["reload_time"])
+    ui_status = "RELOADING %s" % _weapon_name(weapon_id)
+
+func _finish_weapon_reload(p: Dictionary) -> void:
+    var slot := clampi(int(p.get("active_slot", 0)), 0, 2)
+    var weapon_id := _slot_type(p, slot)
+    if slot < 1 or slot > 2 or weapon_id < WEAPON_SMG:
+        p["reload_timer"] = 0.0
+        return
+    var profile := _weapon_profile(weapon_id)
+    var missing := maxi(0, int(profile["mag_size"]) - _slot_mag(p, slot))
+    var taken := mini(missing, _slot_reserve(p, slot))
+    _set_slot_ammo(p, slot, _slot_mag(p, slot) + taken, _slot_reserve(p, slot) - taken)
+    p["reload_timer"] = 0.0
+
+func _request_weapon_switch(slot: int) -> void:
+    if is_host:
+        _host_switch_weapon(local_player_id, slot)
+    elif _is_connected_client():
+        rpc_id(1, "request_switch_weapon", clampi(slot, 0, 2))
+    else:
+        ui_status = "Pick up a weapon during a world session"
+
+@rpc("any_peer", "call_remote", "reliable", 1)
+func request_switch_weapon(slot: int) -> void:
+    if not is_host:
+        return
+    var sender_id := multiplayer.get_remote_sender_id()
+    if players.has(sender_id):
+        _host_switch_weapon(sender_id, slot)
+
+func _host_switch_weapon(id: int, slot: int) -> void:
     if game_over or not players.has(id):
         return
-    var now := Time.get_ticks_msec()
-    var cooldown_ms := FIRE_COOLDOWN_MS if id == local_player_id else FIRE_REMOTE_TOLERANCE_MS
-    if now - int(fire_cooldowns.get(id, 0)) < cooldown_ms:
+    slot = clampi(slot, 0, 2)
+    var p: Dictionary = players[id]
+    if float(p.get("hp", 0.0)) <= 0.0:
+        return
+    if slot > 0 and _slot_type(p, slot) < WEAPON_SMG:
+        ui_status = "WEAPON SLOT EMPTY"
+        return
+    if int(p.get("active_slot", 0)) == slot:
+        return
+    p["active_slot"] = slot
+    p["reload_timer"] = 0.0 # Switching cancels the in-progress reload; the empty magazine remains empty.
+    players[id] = p
+    var weapon_id := _active_weapon_id(p)
+    ui_status = "WEAPON: %s%s" % [_weapon_name(weapon_id), " · INFINITE AMMO" if weapon_id == WEAPON_SIDEARM else " · %d/%d" % [_slot_mag(p, slot), _slot_reserve(p, slot)]]
+
+func _give_weapon(p: Dictionary, weapon_id: int) -> int:
+    weapon_id = clampi(weapon_id, WEAPON_SMG, WEAPON_ROCKET)
+    var profile := _weapon_profile(weapon_id)
+    var slot := _find_weapon_slot(p, weapon_id)
+    if slot > 0:
+        _set_slot_ammo(p, slot, int(profile["mag_size"]), int(profile["reserve_cap"]))
+        p["active_slot"] = slot
+        p["reload_timer"] = 0.0
+        return slot
+    slot = 1 if int(p.get("slot1_type", -1)) < WEAPON_SMG else (2 if int(p.get("slot2_type", -1)) < WEAPON_SMG else 2)
+    var replaced_type := _slot_type(p, slot)
+    p["slot%d_type" % slot] = weapon_id
+    _set_slot_ammo(p, slot, int(profile["mag_size"]), int(profile["spawn_reserve"]))
+    p["active_slot"] = slot
+    p["reload_timer"] = 0.0
+    if replaced_type >= WEAPON_SMG and replaced_type != weapon_id:
+        ui_status = "SWAPPED %s → %s" % [_weapon_name(replaced_type), _weapon_name(weapon_id)]
+    return slot
+
+func _apply_weapon_damage(index: int, damage: float, impact_pos: Vector2) -> void:
+    if index < 0 or index >= zombies.size():
+        return
+    var zombie: Dictionary = zombies[index]
+    zombie["hit_timer"] = 0.16
+    zombie["walking"] = false
+    zombie["hp"] = float(zombie.get("hp", 1.0)) - damage
+    _add_combat_effect(2, impact_pos, impact_pos, 0.18)
+    _emit_sfx("hit")
+    if float(zombie["hp"]) <= 0.0:
+        _add_combat_effect(4, impact_pos, impact_pos, 0.30)
+        _emit_sfx("death")
+        wave_kills = mini(wave_total, wave_kills + 1)
+        zombies.remove_at(index)
+    else:
+        zombies[index] = zombie
+
+func _host_fire(id: int) -> void:
+    if game_over or not players.has(id):
         return
     var p: Dictionary = players[id]
     if float(p.get("hp", 0.0)) <= 0.0:
         return
+    var weapon_id := _active_weapon_id(p)
+    var active_slot := clampi(int(p.get("active_slot", 0)), 0, 2)
+    if float(p.get("reload_timer", 0.0)) > 0.0:
+        return
+    if weapon_id != WEAPON_SIDEARM and _slot_mag(p, active_slot) <= 0:
+        if _slot_reserve(p, active_slot) > 0:
+            _start_weapon_reload(p, active_slot)
+            players[id] = p
+            return
+        p["active_slot"] = 0
+        p["reload_timer"] = 0.0
+        weapon_id = WEAPON_SIDEARM
+        active_slot = 0
+        ui_status = "AMMO EMPTY — SWITCHED TO SIDEARM"
+    var profile := _weapon_profile(weapon_id)
+    var now := Time.get_ticks_msec()
+    var shot_delay := int(profile["interval_ms"])
+    var cooldown_ms := shot_delay if id == local_player_id else maxi(70, shot_delay - mini(60, shot_delay / 4))
+    if now - int(fire_cooldowns.get(id, 0)) < cooldown_ms:
+        players[id] = p
+        return
     fire_cooldowns[id] = now
-    p["ammo"] = -1 # Unlimited ammunition; -1 is the canonical infinite-ammo sentinel.
-    p["shoot_timer"] = 0.19
+    p["ammo"] = -1
+    p["shoot_timer"] = 0.19 if weapon_id == WEAPON_SIDEARM else 0.14
+    if weapon_id != WEAPON_SIDEARM:
+        _set_slot_ammo(p, active_slot, _slot_mag(p, active_slot) - 1, _slot_reserve(p, active_slot))
     players[id] = p
     _emit_sfx("shot", id)
 
-    # Straight horizontal shot: aim is fixed by the last left/right movement, never auto-aimed at a zombie.
     var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.5)))
     var facing := Vector2.LEFT if float(p.get("face_x", 1.0)) < 0.0 else Vector2.RIGHT
     var muzzle := player_pos + facing * 24.0 + Vector2(0.0, -5.0)
-    var shot_range := minf(SHOT_RANGE_MAX, screen_size.x * 0.78)
+    var shot_range := minf(float(profile["range"]), screen_size.x * 0.90)
     var closest_index := -1
     var closest_projection := shot_range
-
-    for zi in range(zombies.size()):
-        var zombie: Dictionary = zombies[zi]
-        var zombie_pos := Vector2(float(zombie.get("x", 0.0)), float(zombie.get("y", 0.0)))
-        var offset := zombie_pos - player_pos
-        var projection := offset.dot(facing)
-        var lane_offset := absf(offset.y)
-        if projection > 16.0 and projection <= closest_projection and lane_offset <= SHOT_LANE_TOLERANCE:
-            closest_projection = projection
-            closest_index = zi
-
-    var tracer_end := player_pos + facing * closest_projection + Vector2(0.0, -5.0)
-    _add_combat_effect(0, muzzle, muzzle, 0.15, id)
-    _add_combat_effect(1, muzzle, tracer_end, 0.16, id)
-    if closest_index >= 0:
-        var zombie: Dictionary = zombies[closest_index]
-        var impact_pos := Vector2(float(zombie.get("x", tracer_end.x)), player_pos.y - 5.0)
-        _add_combat_effect(2, impact_pos, impact_pos, 0.18)
-        _add_combat_effect(3, Vector2(float(zombie.get("x", tracer_end.x)), float(zombie.get("y", tracer_end.y))), impact_pos, 0.26)
-        zombie["hit_timer"] = 0.16
-        zombie["walking"] = false
-        zombie["hp"] = float(zombie.get("hp", 1.0)) - 1.0
-        _emit_sfx("hit")
-        if float(zombie["hp"]) <= 0.0:
-            _add_combat_effect(4, impact_pos, impact_pos, 0.30)
-            _emit_sfx("death")
-            wave_kills = mini(wave_total, wave_kills + 1)
-            zombies.remove_at(closest_index)
+    var target_pos := player_pos + facing * shot_range
+    if weapon_id == WEAPON_SHOTGUN:
+        _add_combat_effect(0, muzzle, muzzle, 0.18, id)
+        var pellet_hits: Dictionary = {}
+        var pellet_impact: Dictionary = {}
+        for spread in SHOTGUN_PELLET_OFFSETS:
+            var pellet_index := -1
+            var pellet_projection := shot_range
+            for zi in range(zombies.size()):
+                var zombie: Dictionary = zombies[zi]
+                var zombie_pos := Vector2(float(zombie.get("x", 0.0)), float(zombie.get("y", 0.0)))
+                var offset := zombie_pos - player_pos
+                var projection := offset.dot(facing)
+                if projection > 16.0 and projection <= pellet_projection and absf(offset.y - spread) <= float(profile["lane"]) * 0.75:
+                    pellet_projection = projection
+                    pellet_index = zi
+            var pellet_end := player_pos + facing * pellet_projection + Vector2(0.0, -5.0 + spread)
+            _add_combat_effect(10, muzzle + Vector2(0.0, spread * 0.35), pellet_end, 0.14, id)
+            if pellet_index >= 0:
+                pellet_hits[pellet_index] = int(pellet_hits.get(pellet_index, 0)) + 1
+                var hit_zombie: Dictionary = zombies[pellet_index]
+                pellet_impact[pellet_index] = Vector2(float(hit_zombie.get("x", pellet_end.x)), float(hit_zombie.get("y", pellet_end.y)))
+        var hit_indices: Array = pellet_hits.keys()
+        hit_indices.sort()
+        hit_indices.reverse()
+        for hit_index_value in hit_indices:
+            var hit_index := int(hit_index_value)
+            var hit_count := int(pellet_hits[hit_index])
+            _apply_weapon_damage(hit_index, float(profile["damage"]) * float(hit_count), pellet_impact[hit_index])
+    else:
+        for zi in range(zombies.size()):
+            var zombie: Dictionary = zombies[zi]
+            var zombie_pos := Vector2(float(zombie.get("x", 0.0)), float(zombie.get("y", 0.0)))
+            var offset := zombie_pos - player_pos
+            var projection := offset.dot(facing)
+            if projection > 16.0 and projection <= closest_projection and absf(offset.y) <= float(profile["lane"]):
+                closest_projection = projection
+                closest_index = zi
+        if closest_index >= 0:
+            var closest_zombie: Dictionary = zombies[closest_index]
+            target_pos = Vector2(float(closest_zombie.get("x", target_pos.x)), float(closest_zombie.get("y", player_pos.y)))
         else:
-            zombies[closest_index] = zombie
+            target_pos = player_pos + facing * shot_range
+        var tracer_end := Vector2(target_pos.x, player_pos.y - 5.0)
+        _add_combat_effect(0, muzzle, muzzle, 0.13 if weapon_id != WEAPON_SNIPER else 0.22, id)
+        if weapon_id == WEAPON_ROCKET:
+            var travel_time := clampf(player_pos.distance_to(target_pos) / 920.0, 0.16, 0.44)
+            _add_combat_effect(12, muzzle, tracer_end, travel_time, id)
+            active_projectiles.append({"kind": "rocket", "owner_id": id, "target": target_pos, "timer": travel_time, "damage": float(profile["damage"]), "radius": float(profile["radius"])})
+        else:
+            _add_combat_effect(int(profile["effect"]), muzzle, tracer_end, 0.12 if weapon_id == WEAPON_SMG else (0.22 if weapon_id == WEAPON_SNIPER else 0.16), id)
+            if closest_index >= 0:
+                _add_combat_effect(2, target_pos, target_pos, 0.18)
+                _add_combat_effect(3, target_pos, Vector2(target_pos.x, player_pos.y - 5.0), 0.26)
+                _apply_weapon_damage(closest_index, float(profile["damage"]), target_pos)
+    if weapon_id != WEAPON_SIDEARM and _slot_mag(p, active_slot) <= 0 and _slot_reserve(p, active_slot) > 0:
+        _start_weapon_reload(p, active_slot)
+    elif weapon_id != WEAPON_SIDEARM and _slot_mag(p, active_slot) <= 0 and _slot_reserve(p, active_slot) <= 0:
+        p["active_slot"] = 0
+        p["reload_timer"] = 0.0
+        ui_status = "AMMO EMPTY — SIDEARM READY"
+    players[id] = p
+
+func _update_projectiles(delta: float) -> void:
+    for projectile_index in range(active_projectiles.size() - 1, -1, -1):
+        var projectile: Dictionary = active_projectiles[projectile_index]
+        var timer := float(projectile.get("timer", 0.0)) - delta
+        projectile["timer"] = timer
+        if timer > 0.0:
+            active_projectiles[projectile_index] = projectile
+            continue
+        var blast_pos: Vector2 = projectile.get("target", Vector2.ZERO)
+        var blast_radius := float(projectile.get("radius", 86.0))
+        _add_combat_effect(6, blast_pos, blast_pos, 1.1)
+        _emit_sfx("explosion")
+        for zombie_index in range(zombies.size() - 1, -1, -1):
+            var zombie: Dictionary = zombies[zombie_index]
+            var zombie_pos := Vector2(float(zombie.get("x", 0.0)), float(zombie.get("y", 0.0)))
+            var distance := zombie_pos.distance_to(blast_pos)
+            if distance > blast_radius:
+                continue
+            var falloff := clampf(1.0 - 0.35 * distance / maxf(1.0, blast_radius), 0.55, 1.0)
+            zombie["hp"] = float(zombie.get("hp", 1.0)) - float(projectile.get("damage", 8.0)) * falloff
+            zombie["hit_timer"] = 0.28
+            _add_combat_effect(2, zombie_pos, zombie_pos, 0.2)
+            if float(zombie["hp"]) <= 0.0:
+                _add_combat_effect(4, zombie_pos, zombie_pos, 0.32)
+                wave_kills = mini(wave_total, wave_kills + 1)
+                zombies.remove_at(zombie_index)
+                _emit_sfx("death")
+            else:
+                zombies[zombie_index] = zombie
+        active_projectiles.remove_at(projectile_index)
 
 @rpc("any_peer", "call_remote", "reliable")
 func request_heal() -> void:
@@ -2362,10 +2692,31 @@ func _spawn_airdrop() -> void:
     var loot_roll := randi_range(0, 99)
     var loot_kind := "grenade"
     var quantity := randi_range(1, 2)
-    if loot_roll >= 82:
+    var weapon_id := 0
+    if loot_roll >= 88:
+        var owned_weapon_types: Array[int] = []
+        for player_variant in players.keys():
+            var owned_player: Dictionary = players[int(player_variant)]
+            for slot_index in [1, 2]:
+                var owned_type := _slot_type(owned_player, slot_index)
+                if owned_type >= WEAPON_SMG and owned_type <= WEAPON_ROCKET and _can_collect_ammo(owned_player, owned_type) and not owned_weapon_types.has(owned_type):
+                    owned_weapon_types.append(owned_type)
+        if owned_weapon_types.is_empty():
+            # Avoid unusable ammo in a solo run where no limited-ammo gun has been found yet.
+            loot_kind = "weapon"
+            weapon_id = randi_range(WEAPON_SMG, WEAPON_ROCKET)
+        else:
+            loot_kind = "ammo"
+            weapon_id = owned_weapon_types[randi_range(0, owned_weapon_types.size() - 1)]
+        quantity = 1
+    elif loot_roll >= 70:
+        loot_kind = "weapon"
+        weapon_id = randi_range(WEAPON_SMG, WEAPON_ROCKET)
+        quantity = 1
+    elif loot_roll >= 58:
         loot_kind = "medkit"
         quantity = 1
-    elif loot_roll >= 48:
+    elif loot_roll >= 40:
         loot_kind = "wall"
         quantity = randi_range(1, 2)
     var start_x := randf_range(58.0, maxf(59.0, screen_size.x - 58.0))
@@ -2381,10 +2732,11 @@ func _spawn_airdrop() -> void:
         "despawn_timer": AIRDROP_LAND_LIFETIME,
         "landed": false,
         "loot_kind": loot_kind,
-        "quantity": quantity
+        "quantity": quantity,
+        "weapon_id": weapon_id
     })
     airdrop_sequence += 1
-    ui_status = "SUPPLY DROP INCOMING — grenade, wall kit, or medkit"
+    ui_status = "SUPPLY DROP INCOMING — weapon, compatible ammo, or field supplies"
 
 func _grant_airdrop_loot(id: int, drop: Dictionary) -> void:
     if not players.has(id):
@@ -2431,16 +2783,37 @@ func _grant_airdrop_loot(id: int, drop: Dictionary) -> void:
                 ui_status = "MEDKIT CAPACITY FULL — emergency +%.0f HP" % healed
             else:
                 ui_status = "SUPPLY LOOT: +%d medkit(s)" % received_medkits
+        "weapon":
+            var weapon_drop_id := clampi(int(drop.get("weapon_id", WEAPON_SMG)), WEAPON_SMG, WEAPON_ROCKET)
+            _give_weapon(p, weapon_drop_id)
+            var active_weapon := _active_weapon_id(p)
+            ui_status = "AIRDROP: %s · %d/%d" % [_weapon_name(active_weapon), _slot_mag(p, int(p.get("active_slot", 0))), _slot_reserve(p, int(p.get("active_slot", 0)))]
         "ammo":
-            # Backward compatibility for caches saved by v0.4.2 before ammunition became infinite.
-            var before_grenades := int(p.get("grenades", 0))
-            if before_grenades < GRENADE_MAX_CARRY:
-                p["grenades"] = before_grenades + 1
-                ui_status = "LEGACY CACHE converted to +1 grenade"
+            var ammo_weapon_id := clampi(int(drop.get("weapon_id", WEAPON_SMG)), WEAPON_SMG, WEAPON_ROCKET)
+            var ammo_slot := _find_weapon_slot(p, ammo_weapon_id)
+            if ammo_slot <= 0:
+                # A compatible-ammo drop is not consumed unless a squad member owns that weapon.
+                ui_status = "AMMO CACHE: NEED %s" % _weapon_name(ammo_weapon_id)
+                players[id] = p
+                return
+            var ammo_profile := _weapon_profile(ammo_weapon_id)
+            var before_reserve := _slot_reserve(p, ammo_slot)
+            var current_mag := _slot_mag(p, ammo_slot)
+            var ammo_pack := int(ammo_profile["ammo_pack"])
+            var received_reserve := mini(ammo_pack, maxi(0, int(ammo_profile["reserve_cap"]) - before_reserve))
+            var leftover_pack := ammo_pack - received_reserve
+            var received_magazine := mini(leftover_pack, maxi(0, int(ammo_profile["mag_size"]) - current_mag))
+            _set_slot_ammo(p, ammo_slot, current_mag + received_magazine, before_reserve + received_reserve)
+            if received_reserve > 0 or received_magazine > 0:
+                p["active_slot"] = ammo_slot
+                if received_reserve > 0 and received_magazine > 0:
+                    ui_status = "AMMO CACHE: %s +%d reserve / +%d mag" % [_weapon_name(ammo_weapon_id), received_reserve, received_magazine]
+                elif received_reserve > 0:
+                    ui_status = "AMMO CACHE: %s +%d reserve" % [_weapon_name(ammo_weapon_id), received_reserve]
+                else:
+                    ui_status = "AMMO CACHE: %s +%d mag" % [_weapon_name(ammo_weapon_id), received_magazine]
             else:
-                p["hp"] = minf(100.0, float(p.get("hp", 100.0)) + 25.0)
-                ui_status = "LEGACY CACHE converted to +25 HP"
-    p["ammo"] = -1
+                ui_status = "%s AMMO FULL" % _weapon_name(ammo_weapon_id)
     players[id] = p
     _emit_sfx("pickup")
 
@@ -2483,6 +2856,9 @@ func _update_airdrops(delta: float) -> void:
                     continue
                 var player_pos := Vector2(float(p.get("x", 0.0)), float(p.get("y", 0.0)))
                 if player_pos.distance_to(drop_pos) <= 42.0:
+                    var drop_kind := str(drop.get("loot_kind", "grenade"))
+                    if drop_kind == "ammo" and not _can_collect_ammo(p, int(drop.get("weapon_id", WEAPON_SMG))):
+                        continue # Wrong weapon or both reserve and magazine are already full: leave the cache in the world.
                     _grant_airdrop_loot(id, drop)
                     _add_combat_effect(7, drop_pos + Vector2(0.0, 35.0), drop_pos + Vector2(0.0, 35.0), 0.36)
                     airdrops.remove_at(drop_index)
@@ -2541,6 +2917,7 @@ func _restart_run() -> void:
     airdrops.clear()
     barricades.clear()
     active_grenades.clear()
+    active_projectiles.clear()
     combat_effects.clear()
     input_vectors.clear()
     fire_cooldowns.clear()
@@ -2572,6 +2949,14 @@ func _restart_run() -> void:
         p["ammo"] = -1
         p["grenades"] = 3
         p["wall_kits"] = 2
+        p["active_slot"] = 0
+        p["slot1_type"] = -1
+        p["slot1_mag"] = 0
+        p["slot1_reserve"] = 0
+        p["slot2_type"] = -1
+        p["slot2_mag"] = 0
+        p["slot2_reserve"] = 0
+        p["reload_timer"] = 0.0
         p["walking"] = false
         p["shoot_timer"] = 0.0
         p["hurt_timer"] = 0.0
@@ -2597,7 +2982,7 @@ func _save_world(announce: bool = true) -> void:
     if not is_host:
         return
     var data := {
-        "version": 3,
+        "version": 5,
         "seed": world_seed,
         "time": world_time,
         "wave_number": wave_number,
@@ -2634,6 +3019,7 @@ func _load_world() -> void:
     if typeof(parsed) != TYPE_DICTIONARY:
         ui_status = "Save file invalid; starting new world"
         return
+    var saved_version := int(parsed.get("version", 0))
     world_seed = int(parsed.get("seed", randi()))
     seed(world_seed)
     world_time = maxf(0.0, float(parsed.get("time", 0.0)))
@@ -2652,6 +3038,7 @@ func _load_world() -> void:
     airdrops.clear()
     barricades.clear()
     active_grenades.clear()
+    active_projectiles.clear()
     var saved_zombies = parsed.get("zombies", [])
     if typeof(saved_zombies) == TYPE_ARRAY:
         for z in saved_zombies:
@@ -2688,8 +3075,9 @@ func _load_world() -> void:
                     "fall_duration": maxf(0.1, float(drop.get("fall_duration", 2.6))),
                     "despawn_timer": clampf(float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)), 0.0, AIRDROP_LAND_LIFETIME),
                     "landed": bool(drop.get("landed", false)),
-                    "loot_kind": "grenade" if str(drop.get("loot_kind", "ammo")) == "ammo" else str(drop.get("loot_kind", "grenade")),
-                    "quantity": 1 if str(drop.get("loot_kind", "ammo")) == "ammo" else maxi(1, int(drop.get("quantity", 1)))
+                    "loot_kind": "grenade" if saved_version < 4 and str(drop.get("loot_kind", "grenade")) == "ammo" else str(drop.get("loot_kind", "grenade")),
+                    "quantity": 1 if saved_version < 4 and str(drop.get("loot_kind", "grenade")) == "ammo" else maxi(1, int(drop.get("quantity", 1))),
+                    "weapon_id": clampi(int(drop.get("weapon_id", WEAPON_SMG)), WEAPON_SMG, WEAPON_ROCKET)
                 })
     var saved_walls = parsed.get("barricades", [])
     if typeof(saved_walls) == TYPE_ARRAY:
@@ -2738,6 +3126,7 @@ func _start_host() -> void:
     airdrops.clear()
     barricades.clear()
     active_grenades.clear()
+    active_projectiles.clear()
     airdrop_spawn_timer = 28.0
     airdrop_sequence = 1
     combat_effects.clear()
@@ -2856,6 +3245,7 @@ func _reset_network_state() -> void:
     airdrops.clear()
     barricades.clear()
     active_grenades.clear()
+    active_projectiles.clear()
     airdrop_spawn_timer = 28.0
     airdrop_sequence = 1
     combat_effects.clear()
@@ -3003,7 +3393,7 @@ func _draw_help() -> void:
     var card_h := 150.0
     var cards := [
         {"title": "01  MOVE", "body": "Use the left\nvirtual analog to\nwalk around the city.", "color": Color("#a9b77f")},
-        {"title": "02  FIGHT", "body": "Hold FIRE for endless shots.\nHold + drag GREN, release to throw.\nHold + drag WALL, release to place.", "color": Color("#cc5151")},
+        {"title": "02  FIGHT", "body": "Default sidearm has infinite ammo.\nAirdrops can grant limited-ammo guns.\nTap the 0/1/2 slots to switch weapons.", "color": Color("#cc5151")},
         {"title": "03  HEAL", "body": "HEAL consumes one\nmedkit and restores\nhealth when needed.", "color": Color("#c19a68")}
     ]
     for i in range(cards.size()):
@@ -3259,6 +3649,7 @@ func _draw_game_world() -> void:
             if moving:
                 _draw_footstep_dust(pos, phase, false)
             _draw_atlas_character(pos, _player_sprite_index(id), false, 1.0, float(p.get("face_x", 1.0)) < 0.0, moving, false, hurt, shooting, phase)
+            _draw_player_weapon(pos, p)
             var label := _player_label(id)
             var label_pos := visual_pos + Vector2(-22, -43)
             draw_rect(Rect2(label_pos.x - 1, label_pos.y - 12, 44, 16), Color(0.01, 0.015, 0.02, 0.74))
@@ -3449,9 +3840,12 @@ func _draw_airdrop(drop: Dictionary, pos: Vector2) -> void:
             "medkit":
                 loot_tag = "MEDKIT +%d" % loot_quantity
                 loot_color = Color("#c97868")
+            "weapon":
+                loot_tag = "%s DROP" % _weapon_name(int(drop.get("weapon_id", WEAPON_SMG)))
+                loot_color = Color("#e4bd66")
             "ammo":
-                loot_tag = "GREN +1"
-                loot_color = Color("#c6ae79")
+                loot_tag = "%s AMMO" % _weapon_name(int(drop.get("weapon_id", WEAPON_SMG)))
+                loot_color = Color("#9fd0dc")
 
     if landed:
         var remaining := clampf(float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)), 0.0, AIRDROP_LAND_LIFETIME)
@@ -3557,6 +3951,67 @@ func _draw_wall_placement_preview() -> void:
     draw_rect(Rect2(label_rect.position, Vector2(2.0, label_rect.size.y)), placement_color)
     draw_string(ui_font, Vector2(label_rect.position.x + 4.0, label_rect.position.y + 11.5), preview_label, HORIZONTAL_ALIGNMENT_CENTER, label_rect.size.x - 8.0, 8, placement_color)
 
+func _draw_weapon_slots(p: Dictionary, control_scale: float) -> void:
+    var slot_w := 54.0 * control_scale
+    var slot_h := 43.0 * control_scale
+    var gap := 4.0 * control_scale
+    var total_w := slot_w * 3.0 + gap * 2.0
+    var start_x := (screen_size.x - total_w) * 0.5
+    var y := screen_size.y - 53.0 * control_scale
+    var active_slot := clampi(int(p.get("active_slot", 0)), 0, 2)
+    for slot in range(3):
+        var rect := Rect2(start_x + float(slot) * (slot_w + gap), y, slot_w, slot_h)
+        var weapon_id := WEAPON_SIDEARM if slot == 0 else _slot_type(p, slot)
+        var selected := slot == active_slot
+        button_rects["game_weapon_%d" % slot] = rect
+        draw_rect(Rect2(rect.position + Vector2(1.5, 2.0), rect.size), Color(0.0, 0.0, 0.0, 0.35))
+        draw_rect(rect, Color(0.015, 0.025, 0.029, 0.94 if selected else 0.82))
+        var edge_color := Color("#e6b75b") if selected else Color("#67716a")
+        draw_rect(rect, edge_color, false, 1.7 if selected else 1.0)
+        if weapon_id < WEAPON_SMG:
+            if slot == 0:
+                draw_line(rect.position + Vector2(10.0, 17.0), rect.position + Vector2(43.0, 17.0), Color("#c1c8bd"), 3.0, true)
+                draw_line(rect.position + Vector2(22.0, 17.0), rect.position + Vector2(18.0, 25.0), Color("#7c847a"), 3.0, true)
+                draw_string(ui_font, rect.position + Vector2(4.0, slot_h - 5.0), "0 SIDEARM", HORIZONTAL_ALIGNMENT_CENTER, slot_w - 8.0, 7, edge_color)
+            else:
+                draw_string(ui_font, rect.position + Vector2(3.0, slot_h * 0.6), "EMPTY", HORIZONTAL_ALIGNMENT_CENTER, slot_w - 6.0, 8, Color("#818981"))
+                draw_string(ui_font, rect.position + Vector2(3.0, slot_h - 5.0), str(slot), HORIZONTAL_ALIGNMENT_CENTER, slot_w - 6.0, 7, Color("#a9b2aa"))
+            continue
+        var texture: Texture2D = weapon_icon_textures.get(weapon_id) as Texture2D
+        if texture != null:
+            var icon_rect := Rect2(rect.position + Vector2(5.0, 3.0), Vector2(slot_w - 10.0, 21.0 * control_scale))
+            var icon_fit := minf(icon_rect.size.x / maxf(1.0, float(texture.get_width())), icon_rect.size.y / maxf(1.0, float(texture.get_height())))
+            var icon_size := Vector2(float(texture.get_width()) * icon_fit, float(texture.get_height()) * icon_fit)
+            var fitted := Rect2(icon_rect.position + (icon_rect.size - icon_size) * 0.5, icon_size)
+            draw_texture_rect(texture, fitted, false, Color.WHITE)
+        var mag := _slot_mag(p, slot)
+        var reserve := _slot_reserve(p, slot)
+        var caption := "%s %d/%d" % [str(slot), mag, reserve]
+        draw_string(ui_font, rect.position + Vector2(2.0, slot_h - 5.0), caption, HORIZONTAL_ALIGNMENT_CENTER, slot_w - 4.0, 7, edge_color)
+
+func _draw_player_weapon(pos: Vector2, p: Dictionary) -> void:
+    var weapon_id := _active_weapon_id(p)
+    if weapon_id == WEAPON_SIDEARM:
+        var facing := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
+        var hand := pos + Vector2(facing * 11.0, -5.0)
+        draw_line(hand, hand + Vector2(facing * 17.0, -1.0), Color("#333632"), 4.0, true)
+        draw_line(hand + Vector2(facing * 3.0, -1.0), hand + Vector2(facing * 13.0, -1.0), Color("#8d9690"), 1.0, true)
+        return
+    var texture: Texture2D = weapon_icon_textures.get(weapon_id) as Texture2D
+    if texture == null:
+        return
+    var facing_left := float(p.get("face_x", 1.0)) < 0.0
+    var ratio := float(texture.get_width()) / maxf(1.0, float(texture.get_height()))
+    var draw_w := 25.0 if weapon_id != WEAPON_ROCKET else 28.0
+    var draw_h := draw_w / maxf(1.0, ratio)
+    var pos_rect := Rect2(pos + Vector2(-draw_w * 0.5, -11.0), Vector2(draw_w, draw_h))
+    if facing_left:
+        draw_set_transform(pos_rect.position + Vector2(draw_w, 0.0), 0.0, Vector2(-1.0, 1.0))
+        draw_texture_rect(texture, Rect2(Vector2.ZERO, pos_rect.size), false, Color.WHITE)
+        draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+    else:
+        draw_texture_rect(texture, pos_rect, false, Color.WHITE)
+
 func _draw_game_hud() -> void:
     var w := screen_size.x
     var h := screen_size.y
@@ -3608,7 +4063,11 @@ func _draw_game_hud() -> void:
     var hp_rect := Rect2(w - 260, 37, 211.0, 6.0)
     draw_rect(hp_rect, Color("#45292b"))
     draw_rect(Rect2(hp_rect.position, Vector2(hp_rect.size.x * float(hp) / 100.0, hp_rect.size.y)), hp_color)
-    draw_string(ui_font, Vector2(w - 260, 62), "AMMO ∞  •  GREN %d  •  MED %d  •  WALL %d" % [grenades, medkits, wall_kits], HORIZONTAL_ALIGNMENT_LEFT, 219, 8, Color("#d5c7a9"))
+    var active_weapon := _active_weapon_id(local_p)
+    var ammo_text := "AMMO ∞" if active_weapon == WEAPON_SIDEARM else "AMMO %d/%d" % [_slot_mag(local_p, int(local_p.get("active_slot", 0))), _slot_reserve(local_p, int(local_p.get("active_slot", 0)))]
+    if float(local_p.get("reload_timer", 0.0)) > 0.0:
+        ammo_text = "RELOAD %.1fs" % float(local_p.get("reload_timer", 0.0))
+    draw_string(ui_font, Vector2(w - 260, 62), "%s • G%d M%d W%d" % [ammo_text, grenades, medkits, wall_kits], HORIZONTAL_ALIGNMENT_LEFT, 219, 7, Color("#d5c7a9"))
 
     var control_scale := _control_scale()
     var joystick_radius := _joystick_radius()
@@ -3632,6 +4091,7 @@ func _draw_game_hud() -> void:
     var wall_label := "DRAG" if wall_place_active else "WALL %d" % wall_kits
     _draw_action_button("game_grenade", grenade_pos, 29.0 * control_scale, grenade_label, Color("#d0a14b") if grenade_aim_active else Color("#8b7850"))
     _draw_action_button("game_build", wall_pos, 29.0 * control_scale, wall_label, Color("#8bb775") if wall_place_active else Color("#69756b"))
+    _draw_weapon_slots(local_p, control_scale)
     _draw_ui_button("game_pause", Rect2(w - 65.0, 72.0, 49.0, 41.0), "Ⅱ", "", Color("#c19a68"), false)
     if SHOW_NET_STATS and _is_connected_client():
         _draw_net_stats()
@@ -3906,7 +4366,7 @@ func _draw_zombie_health(zombie: Dictionary, pos: Vector2) -> void:
 
 func _draw_combat_effects() -> void:
     for effect in combat_effects:
-        var kind := clampi(int(effect.get("kind", 0)), 0, 9)
+        var kind := clampi(int(effect.get("kind", 0)), 0, 14)
         if kind == 8:
             continue
         var start_pos := Vector2(float(effect.get("x", 0.0)), float(effect.get("y", 0.0)))
@@ -3916,7 +4376,48 @@ func _draw_combat_effects() -> void:
         var progress := clampf(1.0 - ttl / life, 0.0, 1.0)
         var alpha := clampf(ttl / minf(0.20, life), 0.0, 1.0)
 
-        if kind == 1:
+        if kind == 10:
+            var pellet_dir := (end_pos - start_pos).normalized()
+            if pellet_dir.length_squared() < 0.01:
+                pellet_dir = Vector2.RIGHT
+            var pellet_pos := start_pos.lerp(end_pos, progress)
+            draw_line(pellet_pos - pellet_dir * 8.0, pellet_pos + pellet_dir * 2.0, Color(1.0, 0.78, 0.43, alpha * 0.9), 1.7, true)
+            draw_circle(pellet_pos, 1.4, Color(1.0, 0.92, 0.67, alpha))
+        elif kind == 11:
+            var scope_dir := (end_pos - start_pos).normalized()
+            if scope_dir.length_squared() < 0.01:
+                scope_dir = Vector2.RIGHT
+            var scope_end := start_pos.lerp(end_pos, progress)
+            draw_line(start_pos, scope_end, Color(1.0, 0.83, 0.56, alpha * 0.26), 1.0, true)
+            draw_line(scope_end - scope_dir * 10.0, scope_end + scope_dir * 3.0, Color(1.0, 0.95, 0.77, alpha), 2.2, true)
+            draw_circle(scope_end, 1.8, Color(1.0, 0.96, 0.79, alpha))
+        elif kind == 12:
+            var rocket_dir := (end_pos - start_pos).normalized()
+            if rocket_dir.length_squared() < 0.01:
+                rocket_dir = Vector2.RIGHT
+            var rocket_pos := start_pos.lerp(end_pos, progress)
+            draw_line(start_pos, rocket_pos, Color(0.94, 0.44, 0.17, alpha * 0.4), 2.0, true)
+            draw_line(rocket_pos - rocket_dir * 13.0, rocket_pos - rocket_dir * 5.0, Color(0.92, 0.43, 0.16, alpha), 3.0, true)
+            draw_line(rocket_pos - rocket_dir * 9.0 + Vector2(0.0, -2.0), rocket_pos - rocket_dir * 2.0 + Vector2(0.0, -2.0), Color(1.0, 0.82, 0.43, alpha * 0.9), 1.2, true)
+            draw_circle(rocket_pos, 2.7, Color(0.52, 0.53, 0.43, alpha))
+            for smoke_index in range(3):
+                var smoke_pos := rocket_pos - rocket_dir * (7.0 + float(smoke_index) * 4.0) + Vector2(0.0, sin(progress * 28.0 + float(smoke_index)) * 2.0)
+                draw_circle(smoke_pos, 1.7 + float(smoke_index) * 0.45, Color(0.28, 0.28, 0.24, alpha * (0.62 - float(smoke_index) * 0.12)))
+        elif kind == 13:
+            var rifle_dir := (end_pos - start_pos).normalized()
+            if rifle_dir.length_squared() < 0.01:
+                rifle_dir = Vector2.RIGHT
+            var rifle_pos := start_pos.lerp(end_pos, progress)
+            draw_line(start_pos, rifle_pos, Color(1.0, 0.61, 0.22, alpha * 0.24), 2.0, true)
+            draw_line(rifle_pos - rifle_dir * 7.0, rifle_pos + rifle_dir * 1.5, Color(1.0, 0.86, 0.53, alpha), 2.0, true)
+        elif kind == 14:
+            var smg_dir := (end_pos - start_pos).normalized()
+            if smg_dir.length_squared() < 0.01:
+                smg_dir = Vector2.RIGHT
+            var smg_pos := start_pos.lerp(end_pos, progress)
+            draw_line(smg_pos - smg_dir * 4.0, smg_pos, Color(1.0, 0.64, 0.24, alpha), 1.0, true)
+            draw_circle(smg_pos, 1.2, Color(1.0, 0.85, 0.48, alpha))
+        elif kind == 1:
             # Move actual atlas ammunition across the lane with only a short tracer.
             var bullet_dir := (end_pos - start_pos).normalized()
             if bullet_dir.length_squared() < 0.01:
@@ -4063,6 +4564,10 @@ func _player_label(id: int) -> String:
     return "P%d" % (index + 1 if index >= 0 else 1)
 
 func _handle_ui_button(id: String) -> void:
+    if id.begins_with("game_weapon_"):
+        var selected_slot := clampi(int(id.trim_prefix("game_weapon_")), 0, 2)
+        _request_weapon_switch(selected_slot)
+        return
     match id:
         "home_lan":
             screen_mode = "lobby"

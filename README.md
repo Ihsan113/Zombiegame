@@ -1,4 +1,4 @@
-# Pixel Zombie LAN — v0.4.17
+# Pixel Zombie LAN — v0.4.18
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
 
@@ -40,14 +40,14 @@ A landscape Android zombie wave-defense game made with Godot 4. It supports solo
 
 ## Controls
 - Left virtual analog: move in the lower defense lane.
-- Hold FIRE: repeat horizontal shots in the last left/right facing direction. Ammo is unlimited.
+- Hold FIRE: repeat shots in the last left/right facing direction. The sidearm has infinite ammo; airdrop weapons use finite magazines and reserve ammo.
 - HEAL: consume one medkit to restore up to 35 HP.
 - GREN: hold and drag to the landing point, then release to throw. The dotted arc and landing marker show the aim.
 - WALL: hold and drag the A-frame barricade preview, then release when it is green. Red indicates invalid placement. Barricades block aligned zombies, have HP and can be destroyed.
 - Pause: resume, manually save, or leave the session.
 
 ## Supply drops
-Supply crates descend under a parachute. Loot is randomized between grenades, wall kits and medkits. If a category is full, excess loot converts to a useful alternative rather than ammunition, because ammunition is unlimited.
+Supply crates descend under a parachute and can contain grenades, wall kits, medkits, one of five limited-ammo guns (SMG, shotgun, rifle, sniper or rocket launcher), or ammunition compatible with a gun already owned by the squad. Weapon drops equip the gun and fill its magazine with starting reserve ammo. Ammo drops are matched to a gun already owned by a squad member who still has room for rounds; if nobody can use an ammo cache, the roll becomes a weapon drop instead. A compatible cache fills reserve space first, then uses leftover rounds to top up a missing magazine. Fully stocked players leave the cache on the ground for later. If all weapon slots are occupied, a new gun replaces slot 2. Tap the 0, 1 or 2 weapon tiles to switch; 0 is the infinite sidearm. Holding FIRE while a gun is empty starts a reload when reserve ammo remains, or falls back to the sidearm when no ammo remains. Reload is cancelled when manually switching slots.
 
 ## LAN setup
 The host selects **Multiplayer LAN → Create World** and shares the hotspot IPv4 address. Other devices must join the same hotspot, select **Join World**, and enter that address. Wi-Fi hotspot isolation and device performance vary, so test the actual phones together. Client prediction/interpolation reduces perceived input delay and snapshot stepping; it cannot compensate for a poor hotspot or a heavily loaded device.
@@ -77,6 +77,15 @@ v0.4.10 was parsed and run in Godot 4.7.2 (netcode checked at v0.4.9, barricade 
 The project now includes `assets/grenade_explosion_asset.png`, `assets/airdrop_parachute_generated.png`, `assets/airdrop_crate_generated.png`, and `assets/airdrop_landing_dust_generated.png`. Full generated source sheets are retained in `assets/grenade_explosion_spritesheet_source.png` and `assets/airdrop_spritesheet_source.png`. The in-game grenade blast still uses the existing synchronized effect lifetime and host authority.
 
 
+
+## v0.4.18 — Airdrop weapons, matching ammunition and weapon-specific combat
+- Added five limited-ammo weapon types with separate damage, effective range, lane tolerance, fire cadence, magazine size, reserve limit and reload duration: SMG, shotgun, rifle, sniper and rocket launcher. The sidearm remains infinite-ammo and is the fallback when the active firearm has no magazine or reserve rounds.
+- Added two selectable firearm slots next to the default sidearm. Weapon pickup equips the new gun; when both firearm slots are full, a newly collected weapon replaces slot 2. Tapping a slot switches weapons and cancels an in-progress reload without restoring rounds.
+- Airdrops can roll a weapon or matching ammunition. Ammo is selected from gun types owned by a squad member who can still accept it; if no firearm is owned or all magazines/reserves are full, the roll becomes a weapon drop instead. Ammo only replenishes its matching gun. When reserve capacity is full, a compatible cache fills missing magazine rounds; if the magazine and reserve are both full, the crate remains on the ground until someone can use it. Legacy loot categories remain available.
+- Added five transparent weapon sprites from the supplied reference sheet, a weapon tile HUD, on-character gun art, weapon-dependent muzzle/tracer/pellet effects, a five-pellet shotgun spread, a long precision sniper streak and a timed rocket projectile with radial falloff damage.
+- Expanded player snapshot records from 19 to 29 bytes for the two firearm slots, ammo counts, active slot and reload timer. Weapon and ammo subtype share the existing airdrop quantity byte, so the drop record remains 27 bytes and no new snapshot section/RPC was introduced. All LAN devices must update to v0.4.18 together.
+- Added codec tests for weapon loadout/ammo round-trip, weapon/ammo airdrop subtype round-trip, sidearm infinite ammunition and partial reload handling. Runtime Godot parser/import, codec execution and APK export still require the provided CI/Godot 4.7.2 environment.
+- Android version code/name: 30 / 0.4.18.
 
 ## v0.4.17 — Brute attack animations
 - Added three dedicated five-frame transparent pixel-art animation strips based on the supplied Brute reference: heavy claw slash, overhead ground slam, and forward lunge. The frames keep a common ground baseline and preserve their intended action silhouettes.

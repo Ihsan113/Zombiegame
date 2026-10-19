@@ -95,8 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=29' not in preset or 'version/name="0.4.17"' not in preset:
-              raise SystemExit('Android export preset must report version code 29 / version 0.4.17')
+          if 'version/code=30' not in preset or 'version/name="0.4.18"' not in preset:
+              raise SystemExit('Android export preset must report version code 30 / version 0.4.18')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -124,6 +124,15 @@ jobs:
                   raise SystemExit('Unexpected generated VFX dimensions: ' + str(image_path))
               if image_name.startswith('boss_attack_') and (image_width != 1680 or image_height != 226):
                   raise SystemExit('Boss attack sheets must be 5 RGBA frames of 336x226: ' + str(image_path))
+          weapon_assets = ['smg.png', 'shotgun.png', 'rifle.png', 'sniper.png', 'rocket.png']
+          weapon_dir = root / 'assets' / 'weapons'
+          for weapon_asset in weapon_assets:
+              weapon_path = weapon_dir / weapon_asset
+              if not weapon_path.is_file():
+                  raise SystemExit('Missing firearm sprite: ' + str(weapon_path))
+              width, height, color_type = png_metadata(weapon_path)
+              if color_type != 6 or width < 128 or height < 64 or width > 4096 or height > 2048:
+                  raise SystemExit('Firearm sprites must be valid RGBA cutouts with expected dimensions: ' + str(weapon_path))
           script = (root / 'scripts/game.gd').read_text()
           required_markers = [
               'const ARENA_TOP_RATIO := 0.520',
@@ -223,7 +232,13 @@ jobs:
               '"wall_kits": 2',
               '"ammo": -1',
               'var loot_kind := "grenade"',
-              'p["ammo"] = -1 # Unlimited ammunition; -1 is the canonical infinite-ammo sentinel.',
+              'p["ammo"] = -1',
+              'func _weapon_profile(weapon_id: int) -> Dictionary:',
+              'func _can_collect_ammo(p: Dictionary, weapon_id: int) -> bool:',
+              'func _start_weapon_reload(p: Dictionary, slot: int) -> void:',
+              'func _host_switch_weapon(id: int, slot: int) -> void:',
+              'func _update_projectiles(delta: float) -> void:',
+              'AMMO EMPTY — SIDEARM READY',
               'loot_tag = "GREN +%d"',
               'loot_kind = "medkit"',
               'loot_kind = "wall"',
@@ -233,8 +248,8 @@ jobs:
           missing_markers = [marker for marker in required_markers if marker not in script]
           if 'ENetMultiplayerPeer.COMPRESS_FASTLZ' in script or 'peer.compression_mode' in script:
               raise SystemExit('Invalid Godot 4.7 compression API: configure peer.host.compress(ENetConnection.COMPRESS_FASTLZ) after creating the peer.')
-          if 'const SNAPSHOT_HEADER_BYTES := 31' not in script or 'const PLAYER_RECORD_BYTES := 19' not in script or 'const EFFECT_RECORD_BYTES := 16' not in script:
-              raise SystemExit('The v0.4.11 snapshot wire layout must remain unchanged in this visual-effects update.')
+          if 'const SNAPSHOT_HEADER_BYTES := 31' not in script or 'const PLAYER_RECORD_BYTES := 29' not in script or 'const DROP_RECORD_BYTES := 27' not in script or 'const EFFECT_RECORD_BYTES := 16' not in script:
+              raise SystemExit('The v0.4.18 snapshot layout must use a 29-byte player record while keeping the 27-byte drop record.')
           if 'rpc("receive_world", _encode_snapshot()' not in script:
               raise SystemExit('Host snapshot broadcast is missing.')
           if script.count('peer.host.compress(ENetConnection.COMPRESS_FASTLZ)') != 2:
@@ -268,8 +283,14 @@ jobs:
                   ET.parse(svg_path)
               except ET.ParseError as exc:
                   raise SystemExit('Malformed SVG ' + str(svg_path) + ': ' + str(exc))
-          if 'var loot_kind := "ammo"' in script or 'if int(p.get("ammo", 120)) <= 0' in script:
-              raise SystemExit('Infinite-ammo build must not retain ammo-consuming gameplay or new ammo drops')
+          if 'if int(p.get("ammo", 120)) <= 0' in script:
+              raise SystemExit('Legacy generic-ammo counter must not gate finite firearm ammo')
+          weapon_markers = ['loot_kind = "ammo"', 'loot_kind = "weapon"', 'WEAPON_SIDEARM := 0', 'WEAPON_ROCKET := 5', 'func _give_weapon(p: Dictionary, weapon_id: int) -> int:', 'slot1_reserve', 'slot2_reserve', 'AMMO EMPTY — SWITCHED TO SIDEARM']
+          codec_test = (root / 'tests/codec_test.gd').read_text()
+          if '_can_collect_ammo' not in codec_test or 'reserve-full ammo cache tops up the magazine' not in codec_test or 'partial reserve space is filled before excess ammo tops up the magazine' not in codec_test or 'empty firearm with no reserve switches to default sidearm' not in codec_test or 'weapon airdrop subtype round-trips' not in codec_test or 'has a dedicated firing effect' not in codec_test:
+              raise SystemExit('Weapon profile, codec, fallback and ammo pickup regression tests are missing')
+          if any(marker not in script for marker in weapon_markers):
+              raise SystemExit('Finite-ammo weapon and airdrop flow is incomplete')
           if 'draw_line(pos + Vector2(-4.0, 10.0), grenade_visual_pos' in script:
               raise SystemExit('Legacy grenade-to-ground tether returned; use ground shadow and directional sparks instead')
           if 'func _predict_local_player(delta: float) -> void:' not in script or 'func _client_update_render(delta: float) -> void:' not in script:
@@ -282,7 +303,7 @@ jobs:
               raise SystemExit('Legacy grenade slider still present; v0.4.6 requires hold-drag-release aiming')
           if 'func _update_grenade_target_from_pointer(pointer_pos: Vector2) -> void' not in script or 'HOLD & DRAG GREN' not in script or 'HOLD & DRAG WALL' not in script:
               raise SystemExit('Hold-drag-release interaction markers are missing')
-          print(f'Validated {len(refs)} resource references, landscape/version settings, infinite ammo, hold-drag controls, death/bone visuals, grenade blast, 22-second airdrop expiry, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
+          print(f'Validated {len(refs)} resource references, landscape/version settings, five RGBA firearm sprites, finite firearm ammo with infinite sidearm fallback, compatible ammo pickup, hold-drag controls, death/bone visuals, grenade blast, airdrop expiry, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
           PYCODE
 
       - name: Import and validate project scripts
@@ -330,7 +351,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.17-APK
+          name: PixelZombieLAN-v0.4.18-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -339,15 +360,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.17-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.18-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.17-source.zip
+          test -s build/PixelZombieLAN-v0.4.18-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.17-source
-          path: build/PixelZombieLAN-v0.4.17-source.zip
+          name: PixelZombieLAN-v0.4.18-source
+          path: build/PixelZombieLAN-v0.4.18-source.zip
           if-no-files-found: error
           retention-days: 14

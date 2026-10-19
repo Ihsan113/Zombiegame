@@ -66,6 +66,25 @@ func _initialize() -> void:
         for i in range(int(sc.g)):
             game.active_grenades.append({"id": rng.randi(), "owner_id": 1, "start_x": 100.0, "start_y": 380.0, "target_x": 300.0, "target_y": 390.0, "x": 150.0, "y": 382.0, "elapsed": 0.2, "travel_time": 0.6, "flight_height": 70.0, "fuse": 0.8})
 
+        # Exercise the expanded loadout and packed weapon subtype fields in a busy LAN packet.
+        if str(sc.name).contains("worst case"):
+            var test_player: Dictionary = game.players[ids[0]]
+            test_player["active_slot"] = 2
+            test_player["slot1_type"] = game.WEAPON_SMG
+            test_player["slot1_mag"] = 21
+            test_player["slot1_reserve"] = 63
+            test_player["slot2_type"] = game.WEAPON_ROCKET
+            test_player["slot2_mag"] = 1
+            test_player["slot2_reserve"] = 3
+            test_player["reload_timer"] = 0.73
+            game.players[ids[0]] = test_player
+            game.airdrops[0]["loot_kind"] = "weapon"
+            game.airdrops[0]["weapon_id"] = game.WEAPON_SNIPER
+            game.airdrops[0]["quantity"] = 1
+            game.airdrops[1]["loot_kind"] = "ammo"
+            game.airdrops[1]["weapon_id"] = game.WEAPON_ROCKET
+            game.airdrops[1]["quantity"] = 1
+
         var buf: PackedByteArray = game._encode_snapshot()
         max_bytes = maxi(max_bytes, buf.size())
         check(buf.size() <= game.MAX_SNAPSHOT_BYTES, "%s: %d bytes exceeds cap" % [sc.name, buf.size()])
@@ -82,6 +101,11 @@ func _initialize() -> void:
             check(near(float(a.hp), float(b.hp), 0.26), "player hp")
             check((int(b.fl) & 1) != 0 and (int(b.fl) & 2) != 0, "player flags")
             check(int(b.ack) == int(game.cmd_last_seq[pid]), "player ack")
+            if str(sc.name).contains("worst case") and pid == ids[0]:
+                check(int(b.active_slot) == 2, "active weapon slot round-trips")
+                check(int(b.slot1_type) == game.WEAPON_SMG and int(b.slot1_mag) == 21 and int(b.slot1_reserve) == 63, "slot 1 weapon/ammo round-trip")
+                check(int(b.slot2_type) == game.WEAPON_ROCKET and int(b.slot2_mag) == 1 and int(b.slot2_reserve) == 3, "slot 2 weapon/ammo round-trip")
+                check(near(float(b.reload_timer), 0.73, 0.02), "reload timer round-trips")
         for z in game.zombies:
             var zr: Dictionary = snap.zombies[int(z.id) & 0xFFFFFFFF]
             check(near(float(z.x), float(zr.x), 0.07) and near(float(z.y), float(zr.y), 0.07), "zombie pos")
@@ -91,13 +115,63 @@ func _initialize() -> void:
         check(snap.walls.size() == int(sc.w), sc.name + ": walls")
         check(snap.drops.size() == int(sc.d), sc.name + ": drops")
         if int(sc.d) > 0:
-            check(str(snap.drops[0].loot_kind) == "wall" and int(snap.drops[0].quantity) == 2, "drop loot decode")
+            if str(sc.name).contains("worst case"):
+                check(str(snap.drops[0].loot_kind) == "weapon" and int(snap.drops[0].weapon_id) == game.WEAPON_SNIPER, "weapon airdrop subtype round-trips")
+                check(str(snap.drops[1].loot_kind) == "ammo" and int(snap.drops[1].weapon_id) == game.WEAPON_ROCKET, "compatible ammo airdrop subtype round-trips")
+            else:
+                check(str(snap.drops[0].loot_kind) == "wall" and int(snap.drops[0].quantity) == 2, "drop loot decode")
         check(snap.nades.size() == int(sc.g), sc.name + ": nades")
         var expected_fx := mini(int(sc.fx), game.MAX_EFFECTS_PER_SNAPSHOT)
         check(snap.fx.size() == expected_fx, "%s: effects %d != %d" % [sc.name, snap.fx.size(), expected_fx])
         if snap.fx.size() > 0:
             check(int(snap.fx[0].src) == ids[0], "effect src mapping")
         print("%-40s %5d bytes  (players %d, zombies %d, effects %d)" % [sc.name, buf.size(), snap.players.size(), snap.zids.size(), snap.fx.size()])
+
+    # Weapon profiles and reload arithmetic are deterministic and bounded.
+    var sidearm_profile: Dictionary = game._weapon_profile(game.WEAPON_SIDEARM)
+    check(int(sidearm_profile.mag_size) == -1 and int(sidearm_profile.interval_ms) == 280, "default sidearm keeps infinite ammo")
+    var seen_weapon_effects: Array[int] = []
+    for weapon_id in range(game.WEAPON_SMG, game.WEAPON_ROCKET + 1):
+        var profile: Dictionary = game._weapon_profile(weapon_id)
+        check(float(profile.damage) > 0.0 and float(profile.range) > 0.0 and int(profile.interval_ms) > 0, "weapon %d has positive damage/range/cadence" % weapon_id)
+        check(int(profile.mag_size) > 0 and int(profile.reserve_cap) >= int(profile.spawn_reserve) and int(profile.ammo_pack) > 0, "weapon %d has coherent finite ammunition" % weapon_id)
+        check(not seen_weapon_effects.has(int(profile.effect)), "weapon %d has a dedicated firing effect" % weapon_id)
+        seen_weapon_effects.append(int(profile.effect))
+    var weapon_inventory := {"active_slot": 0, "slot1_type": -1, "slot1_mag": 0, "slot1_reserve": 0, "slot2_type": -1, "slot2_mag": 0, "slot2_reserve": 0, "reload_timer": 0.0}
+    var sniper_slot: int = game._give_weapon(weapon_inventory, game.WEAPON_SNIPER)
+    check(sniper_slot == 1 and int(weapon_inventory.slot1_type) == game.WEAPON_SNIPER, "weapon pickup fills first limited-ammo slot")
+    check(int(weapon_inventory.slot1_mag) == 5 and int(weapon_inventory.slot1_reserve) == 10, "weapon pickup receives correct sniper ammunition")
+    game._set_slot_ammo(weapon_inventory, sniper_slot, 0, 4)
+    game._start_weapon_reload(weapon_inventory, sniper_slot)
+    check(float(weapon_inventory.reload_timer) > 0.0, "reload starts only with reserve ammo")
+    game._finish_weapon_reload(weapon_inventory)
+    check(int(weapon_inventory.slot1_mag) == 4 and int(weapon_inventory.slot1_reserve) == 0, "partial magazine reload transfers only available ammo")
+    check(int(weapon_inventory.slot1_reserve) >= 0, "weapon reserve never becomes negative")
+
+    # Ammo airdrops must match an owned firearm and never be wasted at a full reserve.
+    var ammo_profile: Dictionary = game._weapon_profile(game.WEAPON_SMG)
+    var ammo_inventory := {"active_slot": 0, "slot1_type": game.WEAPON_SMG, "slot1_mag": 0, "slot1_reserve": int(ammo_profile.reserve_cap), "slot2_type": -1, "slot2_mag": 0, "slot2_reserve": 0, "reload_timer": 0.0}
+    check(game._can_collect_ammo(ammo_inventory, game.WEAPON_SMG), "ammo cache can refill a missing magazine when reserve is capped")
+    check(not game._can_collect_ammo(ammo_inventory, game.WEAPON_SHOTGUN), "ammo cache cannot be collected for an unowned weapon")
+    game.players.clear()
+    game.players[1] = {"x": 320.0, "y": 390.0, "hp": 100.0, "medkits": 2, "ammo": -1, "grenades": 3, "wall_kits": 2, "active_slot": 0, "slot1_type": game.WEAPON_SMG, "slot1_mag": 0, "slot1_reserve": int(ammo_profile.reserve_cap), "slot2_type": -1, "slot2_mag": 0, "slot2_reserve": 0, "reload_timer": 0.0}
+    game._grant_airdrop_loot(1, {"loot_kind": "ammo", "weapon_id": game.WEAPON_SMG, "quantity": 1})
+    var ammo_after_pickup: Dictionary = game.players[1]
+    check(int(ammo_after_pickup.slot1_mag) == int(ammo_profile.mag_size), "reserve-full ammo cache tops up the magazine")
+    check(int(ammo_after_pickup.slot1_reserve) == int(ammo_profile.reserve_cap), "magazine top-up preserves full reserve ammo")
+    check(not game._can_collect_ammo(ammo_after_pickup, game.WEAPON_SMG), "full magazine and reserve leave ammo cache collectible disabled")
+    game.players[1] = {"x": 320.0, "y": 390.0, "hp": 100.0, "medkits": 2, "ammo": -1, "grenades": 3, "wall_kits": 2, "active_slot": 0, "slot1_type": game.WEAPON_SMG, "slot1_mag": 10, "slot1_reserve": 175, "slot2_type": -1, "slot2_mag": 0, "slot2_reserve": 0, "reload_timer": 0.0}
+    game._grant_airdrop_loot(1, {"loot_kind": "ammo", "weapon_id": game.WEAPON_SMG, "quantity": 1})
+    var split_ammo_result: Dictionary = game.players[1]
+    check(int(split_ammo_result.slot1_reserve) == 180 and int(split_ammo_result.slot1_mag) == 30, "partial reserve space is filled before excess ammo tops up the magazine")
+
+    # A depleted firearm with no reserve must reliably return to the infinite-ammo sidearm.
+    game.players.clear()
+    game.zombies.clear()
+    game.fire_cooldowns.clear()
+    game.players[1] = {"x": 320.0, "y": 390.0, "hp": 100.0, "medkits": 2, "ammo": -1, "grenades": 3, "wall_kits": 2, "active_slot": 2, "slot1_type": -1, "slot1_mag": 0, "slot1_reserve": 0, "slot2_type": game.WEAPON_ROCKET, "slot2_mag": 0, "slot2_reserve": 0, "reload_timer": 0.0, "face_x": 1.0, "shoot_timer": 0.0, "hurt_timer": 0.0}
+    game._host_fire(1)
+    check(int(game.players[1].active_slot) == 0, "empty firearm with no reserve switches to default sidearm")
 
     # Boss attack type reuses spare flags bits without changing the 13-byte zombie record.
     game.players.clear()
