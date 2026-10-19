@@ -1,3 +1,12 @@
+## v0.4.34 Cancel modal fix
+
+- Centralized weapon-replacement cancellation in `_cancel_weapon_replacement_from_ui()`; all paths clear pending flags and stale modal hitboxes then queue a redraw.
+- `_touch_start()` dispatches a press directly from freshly rebuilt modal geometry. Other taps are consumed while the modal is open.
+- The host clears reservation and sends an immediate world snapshot. Clients optimistically dismiss and ignore old pending snapshots until acknowledgement (up to 1.8s, then retry is possible).
+- Added codec regressions for visible modal state after touch, reserved-crate release, stale packet suppression and acknowledgement.
+- No LAN packet or save schema change. Android version code/name 46 / 0.4.34.
+- Godot runtime test and APK export must be confirmed by GitHub Actions.
+
 ## v0.4.33 facing-regression correction
 
 - The failed assertion was a test setup bug: `_begin_turret_placement()` intentionally initializes facing from the player, but the test re-entered placement after cancel without selecting AIM LEFT again. The test now re-selects left before moving the preview to the right.

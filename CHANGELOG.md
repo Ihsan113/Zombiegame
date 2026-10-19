@@ -1,3 +1,13 @@
+# Pixel Zombie LAN v0.4.34
+
+## v0.4.34 — weapon replacement Cancel closes reliably
+- Cancel now clears the local modal state in a single common handler for host, offline and connected-client paths.
+- The weapon modal rebuilds hitboxes and dispatches the first touch directly, so the press cannot fall through to a gameplay control or leave the overlay open.
+- Connected clients suppress stale in-flight snapshots for up to 1.8 seconds while the reliable cancellation is acknowledged; a missing acknowledgement then permits retry instead of trapping the UI.
+- Host releases the airdrop reservation and broadcasts the cleared state immediately.
+- Added regression coverage for immediate modal dismissal, reservation release, stale snapshot suppression and acknowledgement cleanup.
+- Android version code/name: 46 / 0.4.34. LAN snapshot and save schemas are unchanged.
+
 # Pixel Zombie LAN v0.4.33
 
 ## v0.4.33 — AIM-facing test setup correction

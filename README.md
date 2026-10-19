@@ -1,3 +1,12 @@
+# Pixel Zombie LAN v0.4.34
+
+## v0.4.34 — reliable weapon replacement Cancel
+- Cancel immediately dismisses the modal for host/offline/client input paths and clears stale hitboxes.
+- Touches are dispatched against live modal hitboxes directly; gameplay taps cannot intercept the Cancel press.
+- Stale client snapshots are suppressed until host acknowledgement, with a timeout for retry if the response is missing.
+- Host releases the airdrop reservation and immediately broadcasts the updated world state.
+- Android version code/name: 46 / 0.4.34. Runtime validation through Godot 4.7.2 GitHub Actions remains required.
+
 # Pixel Zombie LAN v0.4.33
 
 ## v0.4.33 — turret-facing test setup fix

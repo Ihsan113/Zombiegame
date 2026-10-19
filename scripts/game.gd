@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.33
+# Pixel Zombie LAN — wave defense prototype v0.4.34
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -87,6 +87,7 @@ const TURRET_DAMAGE := 1.35
 const TURRET_FIRE_INTERVAL := 0.20
 const TURRET_TURN_SPEED := 3.8
 const AIM_TOGGLE_DEBOUNCE_MS := 220
+const WEAPON_REPLACE_CANCEL_ACK_TIMEOUT_MS := 1800
 const TURRET_ARC_HALF_ANGLE := PI * 0.5
 const TURRET_BODY_HALF_WIDTH := 35.0
 const TURRET_BODY_TOP := -5.0
@@ -230,6 +231,8 @@ var turret_place_touch_id := -1
 var turret_requested := false
 var aim_marker_enabled := true
 var aim_toggle_last_msec := -1000
+var weapon_replace_cancel_pending := false
+var weapon_replace_cancel_started_msec := -1
 var settings_return_mode := "home"
 var client_input_timer := 0.0
 var snapshot_seq := 0
@@ -1810,6 +1813,8 @@ func receive_game_over_snapshot(buf: PackedByteArray) -> void:
     ui_status = "SQUAD ELIMINATED"
 
 func _reset_client_interpolation() -> void:
+    weapon_replace_cancel_pending = false
+    weapon_replace_cancel_started_msec = -1
     snap_buffer.clear()
     pending_effects.clear()
     pending_sfx.clear()
@@ -2141,8 +2146,11 @@ func _client_update_render(delta: float) -> void:
         shown["slot2_mag"] = int(stats.get("slot2_mag", 0))
         shown["slot2_reserve"] = int(stats.get("slot2_reserve", 0))
         shown["reload_timer"] = float(stats.get("reload_timer", 0.0))
-        shown["weapon_replace_pending"] = bool(stats.get("replace_pending", false))
-        shown["pending_weapon_id"] = clampi(int(stats.get("pending_weapon_id", 0)), WEAPON_SMG, WEAPON_ROCKET) if bool(stats.get("replace_pending", false)) else 0
+        var snapshot_replace_pending: bool = bool(stats.get("replace_pending", false))
+        if id == local_player_id:
+            snapshot_replace_pending = _resolve_weapon_replace_snapshot_state(snapshot_replace_pending, Time.get_ticks_msec())
+        shown["weapon_replace_pending"] = snapshot_replace_pending
+        shown["pending_weapon_id"] = clampi(int(stats.get("pending_weapon_id", 0)), WEAPON_SMG, WEAPON_ROCKET) if snapshot_replace_pending else 0
         shown["face_x"] = -1.0 if face_left else 1.0
         shown["walking"] = walking
         shown["shoot_timer"] = shoot_timer
@@ -2547,6 +2555,8 @@ func _host_cancel_weapon_replacement(id: int) -> void:
     players[id] = p
     if id == local_player_id:
         ui_status = "WEAPON PICKUP CANCELLED — DROP LEFT ON GROUND"
+    # Push the cleared pending flag right away instead of waiting for the next snapshot tick.
+    _broadcast_world()
 
 func _host_resolve_weapon_replacement(id: int, slot: int) -> void:
     if not is_host or not players.has(id) or (slot != 1 and slot != 2):
@@ -5267,8 +5277,57 @@ func _draw_settings() -> void:
     draw_string(ui_font, Vector2(panel.position.x + 26.0, panel.position.y + 220.0), "Saved on this device. Tap anywhere on the switch row to change it.", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 52.0, 10, Color("#9eaaa0"))
     _draw_ui_button("settings_back", Rect2(panel.position.x + 26.0, panel.position.y + panel.size.y - 64.0, panel.size.x - 52.0, 42.0), "‹  BACK", "Return to " + ("lobby" if settings_return_mode == "lobby" else "safehouse"), Color("#c18a55"), false)
 
+func _resolve_weapon_replace_snapshot_state(snapshot_pending: bool, now_msec: int) -> bool:
+    # A cancel request is reliable, but a newer render snapshot can still be in flight.
+    # Keep the modal closed until the host acknowledges the cancellation; if the ACK never
+    # arrives, allow the prompt back after a short timeout so the player can retry.
+    if not weapon_replace_cancel_pending:
+        return snapshot_pending
+    if not snapshot_pending:
+        weapon_replace_cancel_pending = false
+        weapon_replace_cancel_started_msec = -1
+        return false
+    if now_msec - weapon_replace_cancel_started_msec < WEAPON_REPLACE_CANCEL_ACK_TIMEOUT_MS:
+        return false
+    weapon_replace_cancel_pending = false
+    weapon_replace_cancel_started_msec = -1
+    return true
+
+func _dismiss_weapon_replace_prompt_locally() -> void:
+    var local_p: Dictionary = players.get(local_player_id, {})
+    if not local_p.is_empty():
+        local_p["weapon_replace_pending"] = false
+        local_p["pending_weapon_drop_id"] = -1
+        local_p["pending_weapon_id"] = 0
+        players[local_player_id] = local_p
+    for prompt_id in ["weapon_replace_1", "weapon_replace_2", "weapon_replace_cancel"]:
+        button_rects.erase(prompt_id)
+    queue_redraw()
+
+func _cancel_weapon_replacement_from_ui() -> void:
+    # Close immediately in every mode. On clients, suppress stale in-flight snapshots while
+    # the reliable host cancellation is processed, otherwise interpolation can reopen it.
+    if _is_connected_client():
+        weapon_replace_cancel_pending = true
+        weapon_replace_cancel_started_msec = Time.get_ticks_msec()
+        rpc_id(1, "request_cancel_airdrop_weapon")
+        ui_status = "WEAPON PICKUP CANCELLED — DROP LEFT ON GROUND"
+    elif is_host:
+        weapon_replace_cancel_pending = false
+        weapon_replace_cancel_started_msec = -1
+        _host_cancel_weapon_replacement(local_player_id)
+    else:
+        # A disconnected client still gets an immediate visual close; it can retry pickup
+        # after reconnecting if the host did not receive the request.
+        weapon_replace_cancel_pending = false
+        weapon_replace_cancel_started_msec = -1
+        ui_status = "WEAPON PICKUP CANCELLED LOCALLY"
+    _dismiss_weapon_replace_prompt_locally()
+
 func _weapon_replace_prompt_visible() -> bool:
     if screen_mode != "game" or not players.has(local_player_id):
+        return false
+    if weapon_replace_cancel_pending and Time.get_ticks_msec() - weapon_replace_cancel_started_msec < WEAPON_REPLACE_CANCEL_ACK_TIMEOUT_MS:
         return false
     return bool(players[local_player_id].get("weapon_replace_pending", false))
 
@@ -5843,19 +5902,7 @@ func _handle_ui_button(id: String) -> void:
             elif _is_connected_client():
                 rpc_id(1, "request_replace_airdrop_weapon", 2)
         "weapon_replace_cancel":
-            if is_host:
-                _host_cancel_weapon_replacement(local_player_id)
-            elif _is_connected_client():
-                rpc_id(1, "request_cancel_airdrop_weapon")
-                # Dismiss locally at once instead of making the user wait for a LAN snapshot.
-                var local_p: Dictionary = players.get(local_player_id, {})
-                if not local_p.is_empty():
-                    local_p["weapon_replace_pending"] = false
-                    local_p["pending_weapon_drop_id"] = -1
-                    local_p["pending_weapon_id"] = 0
-                    players[local_player_id] = local_p
-                ui_status = "WEAPON PICKUP CANCELLED — DROP LEFT ON GROUND"
-            queue_redraw()
+            _cancel_weapon_replacement_from_ui()
 
 func _handle_press(pos: Vector2, touch_id: int = -1) -> bool:
     if _weapon_replace_prompt_visible():
@@ -5967,11 +6014,17 @@ func _touch_start(index: int, pos: Vector2) -> void:
             _handle_ui_button("settings_toggle_aim")
             return
     if _weapon_replace_prompt_visible():
-        var prompt_hitboxes := _weapon_replace_hitboxes()
-        for prompt_id in prompt_hitboxes.keys():
-            button_rects[str(prompt_id)] = prompt_hitboxes[prompt_id]
-        _handle_press(pos, index)
-        return
+        # Rebuild modal hitboxes synchronously and dispatch the matching button directly.
+        # A click must never fall through to an underlying gameplay control or only play
+        # its generic press sound while leaving the replacement modal active.
+        var prompt_hitboxes: Dictionary = _weapon_replace_hitboxes()
+        for prompt_id in ["weapon_replace_1", "weapon_replace_2", "weapon_replace_cancel"]:
+            var prompt_rect: Rect2 = prompt_hitboxes[prompt_id]
+            button_rects[str(prompt_id)] = prompt_rect
+            if prompt_rect.has_point(pos):
+                _handle_ui_button(str(prompt_id))
+                return
+        return # Modal consumes all other touches until a slot is chosen or Cancel is pressed.
     if screen_mode == "game" and turret_place_active:
         # Check placement controls before the arena and before the general HUD. This
         # supports the first touch immediately after TUR is pressed, before _draw runs.

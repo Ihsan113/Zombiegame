@@ -270,7 +270,15 @@ func _initialize() -> void:
     game.button_rects.clear()
     game._touch_start(30, cancel_rect.position + cancel_rect.size * 0.5)
     check(not bool(game.players[1].get("weapon_replace_pending", true)), "first touch on replacement Cancel dismisses the prompt")
+    check(not game._weapon_replace_prompt_visible(), "first touch on Cancel closes the visible replacement modal immediately")
     check(int(game.airdrops.back().get("reserved_by", -1)) != 1, "replacement Cancel releases the crate reservation")
+    # A client may receive one older snapshot after its reliable cancel RPC. It must not
+    # reopen the modal during that short acknowledgement window.
+    game.weapon_replace_cancel_pending = true
+    game.weapon_replace_cancel_started_msec = Time.get_ticks_msec()
+    check(not game._resolve_weapon_replace_snapshot_state(true, Time.get_ticks_msec() + 250), "stale in-flight snapshot cannot reopen a cancelled weapon modal")
+    check(not game._resolve_weapon_replace_snapshot_state(false, Time.get_ticks_msec() + 300), "host cancellation acknowledgement clears modal suppression")
+    check(not game.weapon_replace_cancel_pending, "cancel acknowledgement releases the temporary snapshot guard")
     game.screen_mode = previous_replace_screen
     print("[codec checkpoint] PASS: host replacement selection and cancellation")
     # Ammo airdrops must match an owned firearm and never be wasted at a full reserve.
