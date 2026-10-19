@@ -1,6 +1,12 @@
-# Pixel Zombie LAN — v0.4.18
+# Pixel Zombie LAN — v0.4.19
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
+
+## v0.4.19 — movement animation, more frequent airdrops, and combat audio
+- Walking visuals split the source sprite at the hips and animate the lower-body layer with a stronger gait; player weapon placement sways with movement, adds a grip-hand overlay, recoil and a brief pixel muzzle flash. Zombie and boss movement use stronger stride sway, with the Brute retaining its dedicated attack-frame sheets.
+- Added an original 42-second looping combat ambience, a Brute roar/attack sound, and an incoming-airdrop cue. Music plays only during a match, pauses on Pause, and stops when leaving the match. New SFX use the existing LAN synchronization path.
+- First airdrop arrives after 10 seconds, later drops spawn every 24–34 seconds, and a full active-drop limit retries after 4 seconds. Landed crates remain for 28 seconds; weapon/ammo loot now occupies 36% of rolls combined.
+- The rifle slot is tuned and labeled as the Renbo LMG without changing packed weapon IDs or the multiplayer snapshot layout. Android version code/name: 31 / 0.4.19.
 
 ## v0.4.12 — grenade blast, survivor death remains, and supply expiry
 - Grenade detonation now has a brief white-hot flash, a flattened expanding shockwave, deterministic radial embers and fragments, then a rising clumped smoke plume. Visual effects stay compatible with the existing effect id and compact snapshot record.

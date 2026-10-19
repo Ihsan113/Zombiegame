@@ -1,3 +1,15 @@
+# Changelog
+
+## 0.4.19 — Animation, Airdrop & Audio Pass
+
+- Added an original looping survival-combat ambience track; it starts during gameplay, pauses with the pause screen, and stops when leaving the match.
+- Added original boss roar/attack sounds and an airdrop incoming cue, using the existing synchronized SFX event path for LAN sessions.
+- Made player/zombie walking more visible with an animated lower-body layer, stronger gait, dust footsteps, improved weapon grip placement, recoil, and muzzle flashes.
+- Made the boss movement more substantial with stride sway, a pulsing red aura, and stronger slam/lunge deformation.
+- Reduced initial airdrop wait to 10 seconds, then set future drops to 24–34 seconds; full slots retry after 4 seconds and landed drops remain available for 28 seconds.
+- Increased weapon loot frequency and renamed the existing rifle role to Renbo LMG without changing the packed weapon IDs or LAN snapshot layout.
+- Updated Android version metadata to 0.4.19 / version code 31.
+
 ## 0.4.18 — airdrop weapon system and finite ammunition
 - Added five limited-ammo guns (SMG, shotgun, rifle, sniper and rocket launcher), with individual stats, muzzle/tracer effects, shotgun pellet spread, sniper precision streak, and delayed rocket splash damage.
 - Added a two-firearm-slot loadout plus an infinite-ammo default sidearm. Weapon drops auto-equip; ammo drops only target squad-owned guns that can accept rounds, fill reserve space first, and use leftover pack rounds to top up a missing magazine. Fully stocked caches remain in the world. Empty firearms auto-reload when reserve ammo exists or fall back to the sidearm when empty.

@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.18
+# Pixel Zombie LAN — wave defense prototype v0.4.19
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -45,7 +45,7 @@ const ARENA_BOTTOM_CLEARANCE := 40.0
 const GRENADE_BLAST_RADIUS := 112.0
 const GRENADE_DAMAGE := 5.0
 const GRENADE_EXPLOSION_EFFECT_DURATION := 1.65
-const AIRDROP_LAND_LIFETIME := 22.0 # Seconds after landing before an unclaimed supply crate fades out.
+const AIRDROP_LAND_LIFETIME := 28.0 # Extra time to reach the crate on mobile; unclaimed loot then fades out.
 const AIRDROP_DESPAWN_EFFECT_DURATION := 1.15
 const AIRDROP_LANDING_EFFECT_DURATION := 2.0
 const PLAYER_DEATH_FADE_DURATION := 1.25
@@ -169,7 +169,11 @@ var zombies: Array[Dictionary] = []
 var airdrops: Array[Dictionary] = []
 var barricades: Array[Dictionary] = []
 var active_grenades: Array[Dictionary] = []
-var airdrop_spawn_timer := 28.0
+const AIRDROP_FIRST_DELAY := 10.0
+const AIRDROP_INTERVAL_MIN := 24.0
+const AIRDROP_INTERVAL_MAX := 34.0
+const AIRDROP_FULL_RETRY := 4.0
+var airdrop_spawn_timer := AIRDROP_FIRST_DELAY
 var airdrop_sequence := 1
 var world_seed: int = 0
 var world_time := 0.0
@@ -252,6 +256,7 @@ var last_save_time := 0.0
 var animation_clock := 0.0
 var sfx_players: Dictionary = {}
 var sfx_last_played: Dictionary = {}
+var music_player: AudioStreamPlayer
 
 func _ready() -> void:
     randomize()
@@ -261,6 +266,7 @@ func _ready() -> void:
     world_seed = randi()
     ui_font = ThemeDB.fallback_font
     _setup_sfx()
+    _setup_music()
     if ui_font == null:
         push_warning("Pixel Zombie LAN: theme fallback font was not available at startup.")
     # Prefer detailed raster assets. Draw functions retain a visible fallback if a texture is missing.
@@ -313,6 +319,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
     screen_size = get_viewport_rect().size
     animation_clock += delta
+    _sync_music_state()
 
     if screen_mode == "game":
         if is_host:
@@ -352,7 +359,10 @@ func _setup_sfx() -> void:
         {"id": "airdrop", "path": "res://assets/audio/airdrop.wav"},
         {"id": "wall_build", "path": "res://assets/audio/wall_build.wav"},
         {"id": "wall_break", "path": "res://assets/audio/wall_break.wav"},
-        {"id": "pickup", "path": "res://assets/audio/pickup.wav"}
+        {"id": "pickup", "path": "res://assets/audio/pickup.wav"},
+        {"id": "boss_roar", "path": "res://assets/audio/boss_roar.wav"},
+        {"id": "boss_attack", "path": "res://assets/audio/boss_attack.wav"},
+        {"id": "airdrop_incoming", "path": "res://assets/audio/airdrop_incoming.wav"}
     ]
     for clip_data in clips:
         var clip: String = str(clip_data.get("id", ""))
@@ -366,6 +376,33 @@ func _setup_sfx() -> void:
         player.volume_db = _sfx_volume_db(clip)
         add_child(player)
         sfx_players[clip] = player
+
+func _setup_music() -> void:
+    var music_stream := load("res://assets/audio/combat_ambience_loop.wav") as AudioStreamWAV
+    if music_stream == null:
+        push_warning("Pixel Zombie LAN: gameplay ambience could not be loaded; continuing without music.")
+        return
+    music_stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
+    music_player = AudioStreamPlayer.new()
+    music_player.name = "GameplayMusic"
+    music_player.stream = music_stream
+    music_player.volume_db = -18.0
+    add_child(music_player)
+
+func _sync_music_state() -> void:
+    if music_player == null or music_player.stream == null:
+        return
+    if screen_mode == "game":
+        music_player.stream_paused = false
+        if not music_player.playing:
+            music_player.play()
+    elif screen_mode == "pause":
+        if music_player.playing:
+            music_player.stream_paused = true
+    else:
+        music_player.stream_paused = false
+        if music_player.playing:
+            music_player.stop()
 
 func _sfx_volume_db(clip: String) -> float:
     match clip:
@@ -397,6 +434,12 @@ func _sfx_volume_db(clip: String) -> float:
             return -5.0
         "pickup":
             return -8.0
+        "boss_roar":
+            return -4.0
+        "boss_attack":
+            return -5.0
+        "airdrop_incoming":
+            return -10.0
         _:
             return -8.0
 
@@ -407,7 +450,7 @@ func _play_sfx(clip: String) -> void:
     if player == null or player.stream == null:
         return
     var now := Time.get_ticks_msec()
-    var min_gap := 55 if clip == "shot" else (75 if clip == "hit" else (170 if clip == "attack" else 0))
+    var min_gap := 55 if clip == "shot" else (75 if clip == "hit" else (170 if clip == "attack" else (4200 if clip == "boss_roar" else 0)))
     if min_gap > 0 and now - int(sfx_last_played.get(clip, 0)) < min_gap:
         return
     sfx_last_played[clip] = now
@@ -643,6 +686,7 @@ func _host_simulate(delta: float) -> void:
                         attack_cooldown = _boss_attack_cooldown(attack_type)
                         attack_hit_applied = false
                         z["attack_type"] = attack_type
+                        _emit_sfx("boss_roar")
                     z["attacking"] = attack_timer > 0.0
                     if attack_timer > 0.0:
                         var wall_attack_progress := clampf(1.0 - attack_timer / _boss_attack_duration(attack_type), 0.0, 1.0)
@@ -655,7 +699,7 @@ func _host_simulate(delta: float) -> void:
                             else:
                                 _add_combat_effect(5, zombie_pos + Vector2(float(z.get("face_x", 1.0)) * 19.0, -5.0), wall_hit_pos, 0.26)
                             attack_hit_applied = true
-                            _emit_sfx("attack")
+                            _emit_sfx("boss_attack")
                             if float(wall.get("hp", 0.0)) <= 0.0:
                                 barricades.remove_at(blocking_wall_index)
                                 _emit_sfx("wall_break")
@@ -701,6 +745,7 @@ func _host_simulate(delta: float) -> void:
                         attack_cooldown = _boss_attack_cooldown(attack_type)
                         attack_hit_applied = false
                         z["attack_type"] = attack_type
+                        _emit_sfx("boss_roar")
                     z["attacking"] = attack_timer > 0.0
                     if attack_timer > 0.0:
                         var attack_progress := clampf(1.0 - attack_timer / _boss_attack_duration(attack_type), 0.0, 1.0)
@@ -731,7 +776,7 @@ func _host_simulate(delta: float) -> void:
                                         slam_target["hurt_timer"] = 0.42
                                         players[slam_id] = slam_target
                                         _add_combat_effect(2, slam_target_pos + Vector2(0.0, -7.0), slam_target_pos + Vector2(0.0, -7.0), 0.24)
-                                _emit_sfx("attack")
+                                _emit_sfx("boss_attack")
                             else:
                                 var impact_target: Dictionary = players.get(target_id, {})
                                 if not impact_target.is_empty() and float(impact_target.get("hp", 0.0)) > 0.0:
@@ -747,7 +792,7 @@ func _host_simulate(delta: float) -> void:
                                     else:
                                         var miss_dir := -1.0 if float(z.get("face_x", 1.0)) < 0.0 else 1.0
                                         _add_combat_effect(5, boss_impact_pos + Vector2(miss_dir * 18.0, -8.0), boss_impact_pos + Vector2(miss_dir * 60.0, -7.0), 0.18)
-                                _emit_sfx("attack")
+                                _emit_sfx("boss_attack")
                 else:
                     z["walking"] = false
                     z["attacking"] = attack_timer > 0.0
@@ -916,6 +961,9 @@ func _spawn_wave_zombie() -> void:
         "attack_hit_applied": false,
         "hit_timer": 0.0
     })
+    if zombie_kind == ZOMBIE_KIND_BOSS:
+        ui_status = "BOSS ARRIVAL — BRUTE ROARS!"
+        _emit_sfx("boss_roar")
 
 func _spawn_local_player() -> void:
     var id := multiplayer.get_unique_id() if multiplayer.multiplayer_peer != null else 1
@@ -2054,7 +2102,7 @@ func _start_offline(load_saved: bool = false) -> void:
     barricades.clear()
     active_grenades.clear()
     active_projectiles.clear()
-    airdrop_spawn_timer = 28.0
+    airdrop_spawn_timer = AIRDROP_FIRST_DELAY
     airdrop_sequence = 1
     combat_effects.clear()
     fire_cooldowns.clear()
@@ -2115,7 +2163,7 @@ func _weapon_profile(weapon_id: int) -> Dictionary:
         WEAPON_SHOTGUN:
             return {"name": "SHOTGUN", "damage": 1.15, "range": 245.0, "lane": 10.0, "interval_ms": 720, "mag_size": 6, "reserve_cap": 36, "spawn_reserve": 18, "ammo_pack": 12, "reload_time": 1.45, "radius": 0.0, "effect": 10}
         WEAPON_RIFLE:
-            return {"name": "RIFLE", "damage": 2.0, "range": 530.0, "lane": 20.0, "interval_ms": 190, "mag_size": 30, "reserve_cap": 180, "spawn_reserve": 90, "ammo_pack": 45, "reload_time": 1.30, "radius": 0.0, "effect": 13}
+            return {"name": "RENBO LMG", "damage": 1.55, "range": 535.0, "lane": 22.0, "interval_ms": 135, "mag_size": 45, "reserve_cap": 225, "spawn_reserve": 135, "ammo_pack": 60, "reload_time": 1.55, "radius": 0.0, "effect": 13}
         WEAPON_SNIPER:
             return {"name": "SNIPER", "damage": 7.0, "range": 760.0, "lane": 13.0, "interval_ms": 900, "mag_size": 5, "reserve_cap": 30, "spawn_reserve": 10, "ammo_pack": 5, "reload_time": 1.85, "radius": 0.0, "effect": 11}
         WEAPON_ROCKET:
@@ -2709,7 +2757,7 @@ func _spawn_airdrop() -> void:
             loot_kind = "ammo"
             weapon_id = owned_weapon_types[randi_range(0, owned_weapon_types.size() - 1)]
         quantity = 1
-    elif loot_roll >= 70:
+    elif loot_roll >= 64:
         loot_kind = "weapon"
         weapon_id = randi_range(WEAPON_SMG, WEAPON_ROCKET)
         quantity = 1
@@ -2737,6 +2785,7 @@ func _spawn_airdrop() -> void:
     })
     airdrop_sequence += 1
     ui_status = "SUPPLY DROP INCOMING — weapon, compatible ammo, or field supplies"
+    _emit_sfx("airdrop_incoming")
 
 func _grant_airdrop_loot(id: int, drop: Dictionary) -> void:
     if not players.has(id):
@@ -2822,7 +2871,10 @@ func _update_airdrops(delta: float) -> void:
     if airdrop_spawn_timer <= 0.0:
         if airdrops.size() < 2:
             _spawn_airdrop()
-        airdrop_spawn_timer = randf_range(55.0, 76.0)
+            airdrop_spawn_timer = randf_range(AIRDROP_INTERVAL_MIN, AIRDROP_INTERVAL_MAX)
+        else:
+            # Retry soon once a slot becomes available instead of silently losing an interval.
+            airdrop_spawn_timer = AIRDROP_FULL_RETRY
     for drop_index in range(airdrops.size() - 1, -1, -1):
         var drop: Dictionary = airdrops[drop_index]
         var picked_up := false
@@ -2924,7 +2976,7 @@ func _restart_run() -> void:
     heal_cooldowns.clear()
     grenade_cooldowns.clear()
     build_cooldowns.clear()
-    airdrop_spawn_timer = 28.0
+    airdrop_spawn_timer = AIRDROP_FIRST_DELAY
     airdrop_sequence = 1
     world_time = 0.0
     world_seed = randi()
@@ -3033,7 +3085,7 @@ func _load_world() -> void:
     wave_time_remaining = maxf(0.0, float(parsed.get("wave_time_remaining", _wave_duration_for(wave_number))))
     wave_timed_out = bool(parsed.get("wave_timed_out", false))
     game_over = false
-    airdrop_spawn_timer = maxf(2.0, float(parsed.get("airdrop_spawn_timer", 28.0)))
+    airdrop_spawn_timer = maxf(2.0, float(parsed.get("airdrop_spawn_timer", AIRDROP_FIRST_DELAY)))
     zombies.clear()
     airdrops.clear()
     barricades.clear()
@@ -3127,7 +3179,7 @@ func _start_host() -> void:
     barricades.clear()
     active_grenades.clear()
     active_projectiles.clear()
-    airdrop_spawn_timer = 28.0
+    airdrop_spawn_timer = AIRDROP_FIRST_DELAY
     airdrop_sequence = 1
     combat_effects.clear()
     fire_cooldowns.clear()
@@ -3246,7 +3298,7 @@ func _reset_network_state() -> void:
     barricades.clear()
     active_grenades.clear()
     active_projectiles.clear()
-    airdrop_spawn_timer = 28.0
+    airdrop_spawn_timer = AIRDROP_FIRST_DELAY
     airdrop_sequence = 1
     combat_effects.clear()
     fire_cooldowns.clear()
@@ -3991,26 +4043,56 @@ func _draw_weapon_slots(p: Dictionary, control_scale: float) -> void:
 
 func _draw_player_weapon(pos: Vector2, p: Dictionary) -> void:
     var weapon_id := _active_weapon_id(p)
-    if weapon_id == WEAPON_SIDEARM:
-        var facing := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
-        var hand := pos + Vector2(facing * 11.0, -5.0)
-        draw_line(hand, hand + Vector2(facing * 17.0, -1.0), Color("#333632"), 4.0, true)
-        draw_line(hand + Vector2(facing * 3.0, -1.0), hand + Vector2(facing * 13.0, -1.0), Color("#8d9690"), 1.0, true)
-        return
-    var texture: Texture2D = weapon_icon_textures.get(weapon_id) as Texture2D
-    if texture == null:
-        return
     var facing_left := float(p.get("face_x", 1.0)) < 0.0
-    var ratio := float(texture.get_width()) / maxf(1.0, float(texture.get_height()))
-    var draw_w := 25.0 if weapon_id != WEAPON_ROCKET else 28.0
-    var draw_h := draw_w / maxf(1.0, ratio)
-    var pos_rect := Rect2(pos + Vector2(-draw_w * 0.5, -11.0), Vector2(draw_w, draw_h))
-    if facing_left:
-        draw_set_transform(pos_rect.position + Vector2(draw_w, 0.0), 0.0, Vector2(-1.0, 1.0))
-        draw_texture_rect(texture, Rect2(Vector2.ZERO, pos_rect.size), false, Color.WHITE)
-        draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+    var facing_sign := -1.0 if facing_left else 1.0
+    var phase := float(p.get("id", local_player_id)) * 1.37
+    var moving := bool(p.get("walking", false))
+    var gait := sin(animation_clock * 14.0 + phase) if moving else sin(animation_clock * 2.2 + phase) * 0.22
+    var bob := gait * (1.2 if moving else 0.35)
+    var shoot_timer := float(p.get("shoot_timer", 0.0))
+    var recoil := clampf(shoot_timer / 0.19, 0.0, 1.0)
+    var weapon_y := -12.0 + bob - recoil * 1.1
+    var draw_w := 39.0
+    if weapon_id == WEAPON_SIDEARM:
+        draw_w = 20.0
+    elif weapon_id == WEAPON_SMG:
+        draw_w = 36.0
+    elif weapon_id == WEAPON_SHOTGUN:
+        draw_w = 38.0
+    elif weapon_id == WEAPON_RIFLE:
+        draw_w = 42.0
+    elif weapon_id == WEAPON_SNIPER:
+        draw_w = 47.0
+    elif weapon_id == WEAPON_ROCKET:
+        draw_w = 42.0
+    var weapon_center := pos + Vector2(facing_sign * (17.0 - recoil * 3.0), weapon_y)
+    if weapon_id == WEAPON_SIDEARM:
+        var hand := pos + Vector2(facing_sign * 7.0, -6.0 + bob)
+        draw_line(hand, hand + Vector2(facing_sign * 19.0, -1.0 - recoil), Color("#333632"), 4.0, true)
+        draw_line(hand + Vector2(facing_sign * 3.0, -1.0), hand + Vector2(facing_sign * 15.0, -1.0), Color("#a9b2aa"), 1.0, true)
     else:
-        draw_texture_rect(texture, pos_rect, false, Color.WHITE)
+        var texture: Texture2D = weapon_icon_textures.get(weapon_id) as Texture2D
+        if texture != null:
+            var ratio := float(texture.get_width()) / maxf(1.0, float(texture.get_height()))
+            var draw_h := draw_w / maxf(1.0, ratio)
+            var pos_rect := Rect2(weapon_center - Vector2(draw_w * 0.5, draw_h * 0.5), Vector2(draw_w, draw_h))
+            if facing_left:
+                draw_set_transform(pos_rect.position + Vector2(draw_w, 0.0), 0.0, Vector2(-1.0, 1.0))
+                draw_texture_rect(texture, Rect2(Vector2.ZERO, pos_rect.size), false, Color.WHITE)
+                draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+            else:
+                draw_texture_rect(texture, pos_rect, false, Color.WHITE)
+    # Small skin-toned grip hand overlays the stock/handle so the weapon reads as held, not floating.
+    var grip := pos + Vector2(facing_sign * 8.5, -6.4 + bob - recoil * 0.6)
+    draw_circle(grip, 2.2, Color("#b9825a"))
+    draw_rect(Rect2(grip + Vector2(-1.4, -0.3), Vector2(2.8, 1.5)), Color("#e0b07a"))
+    if recoil > 0.12:
+        var muzzle := pos + Vector2(facing_sign * (draw_w + 1.0 - recoil * 2.4), weapon_y)
+        var strength := clampf(recoil * 1.2, 0.0, 1.0)
+        draw_circle(muzzle, 3.2 * strength, Color(1.0, 0.35, 0.06, 0.80 * strength))
+        draw_line(muzzle + Vector2(-2.0, 0.0), muzzle + Vector2(facing_sign * 7.0, -1.0), Color(1.0, 0.82, 0.31, 0.95 * strength), 2.0, true)
+        draw_line(muzzle + Vector2(0.0, -1.0), muzzle + Vector2(facing_sign * 4.0, -5.0), Color(1.0, 0.55, 0.15, 0.85 * strength), 1.3, true)
+        draw_line(muzzle + Vector2(0.0, 1.0), muzzle + Vector2(facing_sign * 4.0, 4.0), Color(1.0, 0.68, 0.22, 0.85 * strength), 1.2, true)
 
 func _draw_game_hud() -> void:
     var w := screen_size.x
@@ -4211,9 +4293,11 @@ func _player_sprite_index(id: int) -> int:
     return posmod(id - 1, 4)
 
 func _character_visual_position(pos: Vector2, zombie: bool, facing_left: bool, moving: bool, attacking: bool, shooting: bool, phase: float, hurt: bool = false) -> Vector2:
-    var cadence := animation_clock * (11.5 if moving else 2.35) + phase
-    var bob_amount := 2.25 if moving else 0.55
+    var cadence := animation_clock * (14.0 if moving else 2.35) + phase
+    var bob_amount := 2.9 if moving else 0.55
     var bob := sin(cadence) * bob_amount
+    if moving:
+        bob -= absf(sin(cadence * 0.5)) * 1.0
     var facing_sign := -1.0 if facing_left else 1.0
     var lunge := 0.0
     if zombie and attacking:
@@ -4221,7 +4305,8 @@ func _character_visual_position(pos: Vector2, zombie: bool, facing_left: bool, m
     elif shooting:
         lunge = -2.0
     var hurt_shake := -facing_sign * 1.8 * sin(animation_clock * 54.0) if hurt else 0.0
-    return pos + Vector2(facing_sign * lunge + hurt_shake, bob)
+    var stride_sway := sin(cadence) * 0.85 if moving else 0.0
+    return pos + Vector2(facing_sign * lunge + hurt_shake + stride_sway, bob)
 
 func _draw_boss_zombie(pos: Vector2, facing_left: bool, moving: bool, attacking: bool, hurt: bool, phase: float, attack_timer: float = 0.0, attack_type: int = BOSS_ATTACK_SLASH) -> void:
     if boss_texture == null:
@@ -4230,11 +4315,17 @@ func _draw_boss_zombie(pos: Vector2, facing_left: bool, moving: bool, attacking:
     attack_type = clampi(attack_type, BOSS_ATTACK_SLASH, BOSS_ATTACK_LUNGE)
     var duration := _boss_attack_duration(attack_type)
     var attack_progress := clampf(1.0 - attack_timer / duration, 0.0, 1.0) if attacking else 0.0
-    var cadence := animation_clock * (9.0 if moving else 2.2) + phase
+    var cadence := animation_clock * (10.5 if moving else 2.2) + phase
+    var gait := sin(cadence)
     var facing_sign := -1.0 if facing_left else 1.0
-    var rotation := sin(cadence) * (0.018 if moving else 0.004)
-    var sx := 1.0 + sin(cadence) * (0.009 if moving else 0.002)
-    var sy := 1.0 - sin(cadence) * (0.012 if moving else 0.003)
+    var rotation := gait * (0.043 if moving else 0.004)
+    var sx := 1.0 + gait * (0.017 if moving else 0.002)
+    var sy := 1.0 - gait * (0.021 if moving else 0.003)
+    var visual_pos := pos + Vector2(gait * (2.2 if moving else 0.0), -absf(sin(cadence * 0.5)) * (1.7 if moving else 0.0))
+    var pulse := 0.5 + 0.5 * sin(animation_clock * 5.2 + phase)
+    draw_circle(pos + Vector2(0.0, -5.0), 31.0 + pulse * 4.0, Color(0.92, 0.035, 0.055, 0.045 + pulse * 0.035))
+    if moving:
+        draw_arc(pos + Vector2(0.0, 29.0), 26.0 + pulse * 2.0, 0.0, TAU, 28, Color(0.91, 0.10, 0.12, 0.18), 1.2)
     if attacking:
         match attack_type:
             BOSS_ATTACK_SLASH:
@@ -4242,7 +4333,7 @@ func _draw_boss_zombie(pos: Vector2, facing_left: bool, moving: bool, attacking:
                 sx += 0.018 * sin(attack_progress * PI)
             BOSS_ATTACK_SLAM:
                 rotation += facing_sign * (0.025 if attack_progress < 0.42 else -0.035)
-                sy += 0.012 * sin(attack_progress * PI)
+                sy += 0.035 * sin(attack_progress * PI)
             BOSS_ATTACK_LUNGE:
                 rotation -= facing_sign * 0.052
                 sx += 0.035 * sin(attack_progress * PI)
@@ -4251,7 +4342,7 @@ func _draw_boss_zombie(pos: Vector2, facing_left: bool, moving: bool, attacking:
     if hurt and int(animation_clock * 32.0) % 2 == 0:
         tint = Color(1.0, 0.60, 0.56, 1.0)
     var flip_x := -sx if facing_left else sx
-    draw_set_transform(pos, rotation, Vector2(flip_x, sy))
+    draw_set_transform(visual_pos, rotation, Vector2(flip_x, sy))
 
     var frame_texture: Texture2D = null
     var frame_index := 0
@@ -4263,7 +4354,6 @@ func _draw_boss_zombie(pos: Vector2, facing_left: bool, moving: bool, attacking:
         var frame_height := BOSS_ATTACK_FRAME_HEIGHT
         var drawn_height := 92.0
         var drawn_width := drawn_height * frame_width / frame_height
-        # Generated frame alpha bounds end at y=215 (last visible row y=214); pin that baseline to the normal ground line (pos.y + 33).
         var drawn_top := 33.0 - drawn_height * BOSS_ATTACK_BASELINE_Y / frame_height
         var dest := Rect2(Vector2(-drawn_width * 0.5, drawn_top), Vector2(drawn_width, drawn_height))
         var source := Rect2(float(frame_index) * frame_width, 0.0, frame_width, frame_height)
@@ -4271,7 +4361,6 @@ func _draw_boss_zombie(pos: Vector2, facing_left: bool, moving: bool, attacking:
     else:
         var boss_width := 92.0
         var boss_size := Vector2(boss_width, boss_width * float(boss_texture.get_height()) / maxf(1.0, float(boss_texture.get_width())))
-        # Preserve the complete source aspect ratio; feet stay on the survivor depth line.
         draw_texture_rect(boss_texture, Rect2(Vector2(-boss_size.x * 0.5, -boss_size.y + 33.0), boss_size), false, tint)
     draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
@@ -4281,9 +4370,11 @@ func _draw_atlas_character(pos: Vector2, kind: int, zombie: bool, scale_value: f
         var fallback_pos := _character_visual_position(pos, zombie, facing_left, moving, attacking, shooting, phase, hurt)
         var fallback_color := Color("#ac4b4d") if hurt else _player_color(kind + 1)
         fallback_color.a = visual_alpha
-        draw_rect(Rect2(fallback_pos + Vector2(-8, -9), Vector2(16, 18)), fallback_color)
+        var stride := sin(animation_clock * 14.0 + phase) * (2.0 if moving else 0.0)
+        draw_rect(Rect2(fallback_pos + Vector2(-8.0, -9.0 + stride), Vector2(16.0, 18.0)), fallback_color)
         return
-    # PNG atlas: 64x80 cells (320x192). SVG fallback: 80x80 cells (320x240).
+    # The atlas contains one pose per character; animate the lower-body layer around the hips
+    # while retaining the original clean pixel silhouette for idle/attack poses.
     var svg_layout := sprite_atlas.get_height() >= 240
     var cell_width := 80 if svg_layout else 64
     var source_y := 80 if zombie else 0
@@ -4292,38 +4383,57 @@ func _draw_atlas_character(pos: Vector2, kind: int, zombie: bool, scale_value: f
     if zombie and kind == 2:
         size = Vector2(64.0, 70.0) * scale_value
 
-    var cadence := animation_clock * (11.5 if moving else 2.35) + phase
+    var cadence := animation_clock * (14.0 if moving else 2.35) + phase
+    var gait := sin(cadence)
     var facing_sign := -1.0 if facing_left else 1.0
     var visual_pos := _character_visual_position(pos, zombie, facing_left, moving, attacking, shooting, phase, hurt)
-    var rotation := sin(cadence) * (0.035 if moving else 0.009)
-    var scale_x := 1.0 + sin(cadence) * (0.012 if moving else 0.003)
-    var scale_y := 1.0 - sin(cadence) * (0.018 if moving else 0.004)
+    var rotation := gait * (0.041 if moving else 0.009)
+    var scale_x := 1.0 + gait * (0.018 if moving else 0.003)
+    var scale_y := 1.0 - absf(gait) * (0.022 if moving else 0.004)
     if zombie and attacking:
-        # Quick shoulder-first lunge and recoil, noticeably stronger than the walking sway.
-        rotation = -facing_sign * 0.075 + sin(animation_clock * 21.0 + phase) * 0.025
-        scale_x += 0.035 * sin(animation_clock * 21.0 + phase)
-        scale_y -= 0.018 * sin(animation_clock * 21.0 + phase)
+        rotation = -facing_sign * 0.09 + sin(animation_clock * 21.0 + phase) * 0.028
+        scale_x += 0.045 * sin(animation_clock * 21.0 + phase)
+        scale_y -= 0.024 * sin(animation_clock * 21.0 + phase)
     elif shooting:
-        rotation -= facing_sign * 0.035
-        scale_y += 0.014
+        rotation -= facing_sign * (0.055 + clampf(sin(animation_clock * 34.0 + phase), 0.0, 1.0) * 0.012)
+        scale_y += 0.018
     var tint := Color(1.0, 1.0, 1.0, visual_alpha)
     if hurt and int(animation_clock * 32.0) % 2 == 0:
         tint = Color(1.0, 0.57, 0.54, visual_alpha)
 
     var flip_x := -scale_x if facing_left else scale_x
-    draw_set_transform(visual_pos, rotation, Vector2(flip_x, scale_y))
-    var dest := Rect2(-size.x * 0.5, -size.y * 0.5, size.x, size.y)
-    var source_rect := Rect2(source_x, source_y, cell_width, 80)
-    draw_texture_rect_region(sprite_atlas, dest, source_rect, tint, false, true)
+    if moving and not attacking:
+        var upper_source_height := 53.0
+        var lower_source_y := 48.0
+        var lower_source_height := 80.0 - lower_source_y
+        var pivot_y := -size.y * 0.5 + lower_source_y * size.y / 80.0
+        var upper_source := Rect2(source_x, source_y, cell_width, upper_source_height)
+        var upper_dest := Rect2(-size.x * 0.5, -size.y * 0.5, size.x, size.y * upper_source_height / 80.0)
+        draw_set_transform(visual_pos, rotation, Vector2(flip_x, scale_y))
+        draw_texture_rect_region(sprite_atlas, upper_dest, upper_source, tint, false, true)
+
+        var lower_source := Rect2(source_x, source_y + lower_source_y, cell_width, lower_source_height)
+        var lower_height := size.y * lower_source_height / 80.0
+        var leg_angle := -gait * (0.19 if zombie else 0.155)
+        var leg_shift_x := gait * (2.6 if zombie else 2.2)
+        var foot_lift := absf(gait) * (1.1 if zombie else 0.85)
+        var lower_dest := Rect2(-size.x * 0.5, 0.0, size.x, lower_height)
+        draw_set_transform(visual_pos + Vector2(leg_shift_x, pivot_y + foot_lift), rotation + leg_angle, Vector2(flip_x, scale_y))
+        draw_texture_rect_region(sprite_atlas, lower_dest, lower_source, tint, false, true)
+    else:
+        draw_set_transform(visual_pos, rotation, Vector2(flip_x, scale_y))
+        var dest := Rect2(-size.x * 0.5, -size.y * 0.5, size.x, size.y)
+        var source_rect := Rect2(source_x, source_y, cell_width, 80)
+        draw_texture_rect_region(sprite_atlas, dest, source_rect, tint, false, true)
     draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 func _draw_footstep_dust(pos: Vector2, phase: float, zombie: bool) -> void:
-    var cadence := animation_clock * 11.5 + phase
+    var cadence := animation_clock * 14.0 + phase
     var step := sin(cadence)
-    var fade := 0.10 + 0.14 * absf(cos(cadence))
+    var fade := 0.12 + 0.17 * absf(cos(cadence))
     var color := Color(0.48, 0.58, 0.44, fade) if zombie else Color(0.67, 0.63, 0.53, fade * 0.72)
-    draw_circle(pos + Vector2(-8.0 + step * 5.0, 27.0), 2.0 + absf(step), color)
-    draw_circle(pos + Vector2(7.0 - step * 4.0, 29.0), 1.5 + absf(step) * 0.65, Color(color.r, color.g, color.b, fade * 0.72))
+    draw_circle(pos + Vector2(-8.0 + step * 5.5, 29.0), 2.2 + absf(step) * 1.2, color)
+    draw_circle(pos + Vector2(7.0 - step * 4.5, 30.0), 1.7 + absf(step) * 0.8, Color(color.r, color.g, color.b, fade * 0.72))
 
 func _draw_zombie_attack_swipe(pos: Vector2, facing_left: bool, attack_timer: float) -> void:
     var phase := clampf(1.0 - attack_timer / 0.38, 0.0, 1.0)

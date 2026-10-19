@@ -130,6 +130,10 @@ func _initialize() -> void:
     # Weapon profiles and reload arithmetic are deterministic and bounded.
     var sidearm_profile: Dictionary = game._weapon_profile(game.WEAPON_SIDEARM)
     check(int(sidearm_profile.mag_size) == -1 and int(sidearm_profile.interval_ms) == 280, "default sidearm keeps infinite ammo")
+    var renbo_profile: Dictionary = game._weapon_profile(game.WEAPON_RIFLE)
+    check(str(renbo_profile.name) == "RENBO LMG", "rifle slot is the Renbo/LMG airdrop role")
+    check(int(renbo_profile.mag_size) >= 40 and int(renbo_profile.interval_ms) < 160, "Renbo LMG has sustained automatic-fire tuning")
+    check(game.AIRDROP_FIRST_DELAY < game.AIRDROP_INTERVAL_MIN and game.AIRDROP_INTERVAL_MAX <= 35.0, "airdrops are more frequent than the previous 55-76 second interval")
     var seen_weapon_effects: Array[int] = []
     for weapon_id in range(game.WEAPON_SMG, game.WEAPON_ROCKET + 1):
         var profile: Dictionary = game._weapon_profile(weapon_id)
