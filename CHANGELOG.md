@@ -3,6 +3,7 @@
 - Added a two-firearm-slot loadout plus an infinite-ammo default sidearm. Weapon drops auto-equip; ammo drops only target squad-owned guns that can accept rounds, fill reserve space first, and use leftover pack rounds to top up a missing magazine. Fully stocked caches remain in the world. Empty firearms auto-reload when reserve ammo exists or fall back to the sidearm when empty.
 - Added matching transparent weapon sprites from the supplied reference, tap-to-switch HUD tiles, reload status, and ammo/magazine counts. Bumped player snapshot records to 29 bytes and Android version code/name to 30 / 0.4.18. All LAN devices must use the same version.
 - Added codec coverage for loadout, ammo, reload timer and weapon/ammo airdrop subtype round-trip. Runtime compile/startup and APK export remain to be confirmed by Godot 4.7.2 CI.
+- Fixed Godot 4.7.2 codec-test parse errors by explicitly typing the boss maximum-HP and boss attack-frame local variables (`float` and `int`); these values came through dynamically typed `Node` calls in the test.
 
 ## 0.4.17 — Brute attack animations
 - Added five-frame transparent pixel-art strips for the Brute's claw slash, overhead ground slam, and forward lunge, with consistent ground anchoring and detached edge-fragment cleanup.

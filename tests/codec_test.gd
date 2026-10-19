@@ -185,7 +185,7 @@ func _initialize() -> void:
     for attack_type in range(game.BOSS_ATTACK_LUNGE + 1):
         game.zombies.clear()
         var boss_id := 42420 + attack_type
-        var boss_max_hp := game._boss_hp_for_wave(10)
+        var boss_max_hp: float = game._boss_hp_for_wave(10)
         game.zombies.append({"id": boss_id, "kind": game.ZOMBIE_KIND_BOSS, "x": 500.0, "y": 390.0, "face_x": 1.0, "hp": boss_max_hp * 0.75, "max_hp": boss_max_hp, "walking": false, "attacking": true, "attack_timer": 0.4, "attack_cooldown": 0.8, "attack_type": attack_type, "hit_timer": 0.0})
         var boss_packet: PackedByteArray = game._encode_snapshot()
         var boss_snapshot: Dictionary = game._decode_snapshot(boss_packet)
@@ -197,7 +197,7 @@ func _initialize() -> void:
         check(boss_packet.size() <= game.MAX_SNAPSHOT_BYTES, "boss attack animation leaves snapshot under cap")
         var previous_frame := -1
         for frame_step in range(11):
-            var attack_frame := game._boss_attack_frame(attack_type, float(frame_step) / 10.0)
+            var attack_frame: int = game._boss_attack_frame(attack_type, float(frame_step) / 10.0)
             check(attack_frame >= 0 and attack_frame < game.BOSS_ATTACK_FRAME_COUNT, "boss attack frame stays inside sheet")
             check(attack_frame >= previous_frame, "boss attack frames are ordered")
             previous_frame = attack_frame
