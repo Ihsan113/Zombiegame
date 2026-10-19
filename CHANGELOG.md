@@ -1,4 +1,10 @@
-# Pixel Zombie LAN v0.4.34
+# Pixel Zombie LAN v0.4.35
+
+## v0.4.35 — Cancel prevents immediate re-trigger for same nearby airdrop
+- After Cancel, the host ignores that exact crate for the cancelling player while they remain nearby; the crate remains on the ground and other players can still claim it.
+- The ignore clears after walking beyond 62 px (pickup radius remains 42 px), so returning to the crate can deliberately reopen the choice. Death, disconnect, world reset, and crate removal clear the ignore.
+- Added a regression for prompt -> Cancel -> stay nearby -> leave -> return. LAN snapshot/save schemas are unchanged.
+- Android version code/name: 47 / 0.4.35.
 
 ## v0.4.34 — weapon replacement Cancel closes reliably
 - Cancel now clears the local modal state in a single common handler for host, offline and connected-client paths.

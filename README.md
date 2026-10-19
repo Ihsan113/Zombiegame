@@ -1,4 +1,10 @@
-# Pixel Zombie LAN v0.4.34
+# Pixel Zombie LAN v0.4.35
+
+## v0.4.35 — Cancel prevents immediate re-trigger for same nearby airdrop
+- Root cause fixed: canceling an occupied weapon crate now records a host-local per-player ignore for that exact drop while the player remains close. The crate stays on the ground, is not deleted, and other players can still claim it.
+- Ignore clears after the player leaves a 62 px release radius (pickup radius remains 42 px), allowing a later deliberate return to reopen the choice. Player death, disconnect, world reset, and crate removal also clear the ignore.
+- Added an end-to-end codec-test regression: initial prompt -> Cancel -> same-position update stays closed -> walk away -> return -> prompt can reopen. LAN snapshot/save schemas unchanged.
+- Android version code/name: 47 / 0.4.35. Runtime Godot 4.7.2 pass must still be confirmed in CI.
 
 ## v0.4.34 — reliable weapon replacement Cancel
 - Cancel immediately dismisses the modal for host/offline/client input paths and clears stale hitboxes.

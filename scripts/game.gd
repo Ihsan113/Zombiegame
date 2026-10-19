@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.34
+# Pixel Zombie LAN — wave defense prototype v0.4.35
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -46,6 +46,8 @@ const GRENADE_BLAST_RADIUS := 112.0
 const GRENADE_DAMAGE := 5.0
 const GRENADE_EXPLOSION_EFFECT_DURATION := 1.65
 const AIRDROP_LAND_LIFETIME := 28.0 # Extra time to reach the crate on mobile; unclaimed loot then fades out.
+const AIRDROP_PICKUP_RADIUS := 42.0
+const AIRDROP_CANCEL_RELEASE_RADIUS := 62.0 # Hysteresis: after Cancel, move clearly away before the same crate can prompt again.
 const AIRDROP_DESPAWN_EFFECT_DURATION := 1.15
 const AIRDROP_LANDING_EFFECT_DURATION := 2.0
 const PLAYER_DEATH_FADE_DURATION := 1.25
@@ -190,6 +192,9 @@ var players: Dictionary = {}
 var input_vectors: Dictionary = {}
 var zombies: Array[Dictionary] = []
 var airdrops: Array[Dictionary] = []
+# Host-local transient state: player ID -> airdrop ID they cancelled. This prevents
+# the pickup proximity loop from reopening the same replacement modal immediately.
+var airdrop_cancel_ignore_by_player: Dictionary = {}
 var barricades: Array[Dictionary] = []
 var turrets: Array[Dictionary] = []
 var turret_sequence := 1
@@ -1241,6 +1246,7 @@ func _on_peer_connected(id: int) -> void:
 
 func _on_peer_disconnected(id: int) -> void:
     players.erase(id)
+    airdrop_cancel_ignore_by_player.erase(id)
     input_vectors.erase(id)
     fire_cooldowns.erase(id)
     heal_cooldowns.erase(id)
@@ -2365,6 +2371,7 @@ func _start_offline(load_saved: bool = false) -> void:
     host_view.clear()
     zombies.clear()
     airdrops.clear()
+    airdrop_cancel_ignore_by_player.clear()
     barricades.clear()
     turrets.clear()
     active_grenades.clear()
@@ -2543,6 +2550,10 @@ func _host_cancel_weapon_replacement(id: int) -> void:
         return
     var p: Dictionary = players[id]
     var pending_id := int(p.get("pending_weapon_drop_id", -1))
+    if pending_id >= 0:
+        # Set the per-player ignore even if a stale reservation bit has already been
+        # cleared; the prompt itself proves this player was interacting with that crate.
+        airdrop_cancel_ignore_by_player[id] = pending_id
     for drop_index in range(airdrops.size()):
         var drop: Dictionary = airdrops[drop_index]
         if int(drop.get("id", -2)) == pending_id and int(drop.get("reserved_by", -1)) == id:
@@ -3650,7 +3661,35 @@ func _grant_airdrop_loot(id: int, drop: Dictionary) -> void:
     players[id] = p
     _emit_sfx("pickup")
 
+func _update_airdrop_cancel_ignores() -> void:
+    # This map is intentionally host-local; it controls authoritative pickup behavior
+    # and adds no fields to the LAN snapshot. A cancelled crate becomes eligible again
+    # once the player leaves the release radius, then walks back into pickup range.
+    for id_variant in airdrop_cancel_ignore_by_player.keys().duplicate():
+        var player_id: int = int(id_variant)
+        var ignored_drop_id: int = int(airdrop_cancel_ignore_by_player.get(player_id, -1))
+        if not players.has(player_id):
+            airdrop_cancel_ignore_by_player.erase(player_id)
+            continue
+        var player: Dictionary = players[player_id]
+        if float(player.get("hp", 0.0)) <= 0.0:
+            airdrop_cancel_ignore_by_player.erase(player_id)
+            continue
+        var ignored_drop: Dictionary = {}
+        for candidate in airdrops:
+            if int(candidate.get("id", -2)) == ignored_drop_id:
+                ignored_drop = candidate
+                break
+        if ignored_drop.is_empty():
+            airdrop_cancel_ignore_by_player.erase(player_id)
+            continue
+        var player_pos := Vector2(float(player.get("x", 0.0)), float(player.get("y", 0.0)))
+        var ignored_pos := Vector2(float(ignored_drop.get("x", 0.0)), float(ignored_drop.get("y", 0.0)))
+        if player_pos.distance_to(ignored_pos) > AIRDROP_CANCEL_RELEASE_RADIUS:
+            airdrop_cancel_ignore_by_player.erase(player_id)
+
 func _update_airdrops(delta: float) -> void:
+    _update_airdrop_cancel_ignores()
     airdrop_spawn_timer = maxf(0.0, airdrop_spawn_timer - delta)
     if airdrop_spawn_timer <= 0.0:
         if airdrops.size() < 2:
@@ -3706,8 +3745,10 @@ func _update_airdrops(delta: float) -> void:
                     continue
                 if waiting_for_slot_choice and int(drop.get("reserved_by", -1)) != id:
                     continue
+                if int(airdrop_cancel_ignore_by_player.get(id, -1)) == int(drop.get("id", -2)):
+                    continue # The user explicitly cancelled this exact crate; require leaving its area first.
                 var player_pos := Vector2(float(p.get("x", 0.0)), float(p.get("y", 0.0)))
-                if player_pos.distance_to(drop_pos) <= 42.0:
+                if player_pos.distance_to(drop_pos) <= AIRDROP_PICKUP_RADIUS:
                     var drop_kind := str(drop.get("loot_kind", "grenade"))
                     var drop_weapon_id := int(drop.get("weapon_id", WEAPON_SMG))
                     if drop_kind == "ammo" and not _can_collect_ammo(p, drop_weapon_id):
@@ -3778,6 +3819,7 @@ func _restart_run() -> void:
     player_death_visuals.clear()
     zombies.clear()
     airdrops.clear()
+    airdrop_cancel_ignore_by_player.clear()
     barricades.clear()
     turrets.clear()
     active_grenades.clear()
@@ -3903,6 +3945,7 @@ func _load_world() -> void:
     airdrop_spawn_timer = maxf(2.0, float(parsed.get("airdrop_spawn_timer", AIRDROP_FIRST_DELAY)))
     zombies.clear()
     airdrops.clear()
+    airdrop_cancel_ignore_by_player.clear()
     barricades.clear()
     turrets.clear()
     active_grenades.clear()
@@ -4009,6 +4052,7 @@ func _start_host() -> void:
     host_view.clear()
     zombies.clear()
     airdrops.clear()
+    airdrop_cancel_ignore_by_player.clear()
     barricades.clear()
     turrets.clear()
     active_grenades.clear()
@@ -4130,6 +4174,7 @@ func _reset_network_state() -> void:
     host_view.clear()
     zombies.clear()
     airdrops.clear()
+    airdrop_cancel_ignore_by_player.clear()
     barricades.clear()
     turrets.clear()
     active_grenades.clear()

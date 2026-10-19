@@ -1,3 +1,9 @@
+## v0.4.35 Cancelled-airdrop pickup suppression
+
+- `_host_cancel_weapon_replacement` marks the reserved drop as temporarily ignored for the cancelling player before releasing `reserved_by`.
+- `_update_airdrop_cancel_ignores()` keeps suppression while the player remains within a 62 px release radius; pickup distance remains 42 px, so small movement jitter cannot immediately re-open the modal. Leaving, death/disconnect, reset, or despawn clears the transient ignore.
+- Regression exercises the complete cancel/stay/leave/return path. This state is host-local and does not change LAN packet layout.
+
 ## v0.4.34 Cancel modal fix
 
 - Centralized weapon-replacement cancellation in `_cancel_weapon_replacement_from_ui()`; all paths clear pending flags and stale modal hitboxes then queue a redraw.

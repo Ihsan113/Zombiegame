@@ -278,6 +278,49 @@ func _initialize() -> void:
     game.weapon_replace_cancel_started_msec = Time.get_ticks_msec()
     check(not game._resolve_weapon_replace_snapshot_state(true, Time.get_ticks_msec() + 250), "stale in-flight snapshot cannot reopen a cancelled weapon modal")
     check(not game._resolve_weapon_replace_snapshot_state(false, Time.get_ticks_msec() + 300), "host cancellation acknowledgement clears modal suppression")
+
+    # Root-cause regression: Cancel releases a reserved crate, but the player is still
+    # overlapping its pickup radius. The same modal must remain closed until they leave.
+    game.weapon_replace_cancel_pending = false
+    game.weapon_replace_cancel_started_msec = -1
+    game.airdrops.clear()
+    game.airdrop_cancel_ignore_by_player.clear()
+    game.airdrop_spawn_timer = 999.0
+    var cancel_loop_player: Dictionary = game.players.get(1, {})
+    cancel_loop_player["x"] = 320.0
+    cancel_loop_player["y"] = 390.0
+    cancel_loop_player["hp"] = 100.0
+    cancel_loop_player["slot1_type"] = game.WEAPON_SMG
+    cancel_loop_player["slot1_mag"] = 10
+    cancel_loop_player["slot1_reserve"] = 40
+    cancel_loop_player["slot2_type"] = game.WEAPON_SHOTGUN
+    cancel_loop_player["slot2_mag"] = 3
+    cancel_loop_player["slot2_reserve"] = 12
+    cancel_loop_player["weapon_replace_pending"] = false
+    cancel_loop_player["pending_weapon_drop_id"] = -1
+    cancel_loop_player["pending_weapon_id"] = 0
+    game.players[1] = cancel_loop_player
+    game.airdrops.append({"id": 76505, "x": 320.0, "y": 390.0, "landed": true, "despawn_timer": 20.0, "loot_kind": "weapon", "weapon_id": game.WEAPON_SNIPER, "reserved_by": -1})
+    game._update_airdrops(0.016)
+    check(bool(game.players[1].get("weapon_replace_pending", false)) and int(game.players[1].get("pending_weapon_drop_id", -1)) == 76505, "nearby weapon crate opens replacement modal initially")
+    game._host_cancel_weapon_replacement(1)
+    game._update_airdrops(0.016)
+    check(not bool(game.players[1].get("weapon_replace_pending", false)), "Cancel suppresses the same crate while player remains in pickup radius")
+    check(int(game.airdrops[0].get("reserved_by", -1)) == -1 and int(game.airdrop_cancel_ignore_by_player.get(1, -1)) == 76505, "cancelled crate remains available but ignored for this player")
+    cancel_loop_player = game.players[1]
+    cancel_loop_player["x"] = 430.0
+    game.players[1] = cancel_loop_player
+    game._update_airdrops(0.016)
+    check(not game.airdrop_cancel_ignore_by_player.has(1), "leaving the cancel release radius re-enables pickup attempt")
+    cancel_loop_player = game.players[1]
+    cancel_loop_player["x"] = 320.0
+    game.players[1] = cancel_loop_player
+    game._update_airdrops(0.016)
+    check(bool(game.players[1].get("weapon_replace_pending", false)) and int(game.airdrops[0].get("reserved_by", -1)) == 1, "returning to the same crate can open replacement modal again")
+    game._host_cancel_weapon_replacement(1)
+    game.airdrops.clear()
+    game.airdrop_cancel_ignore_by_player.clear()
+    print("[codec checkpoint] PASS: cancelled nearby crate stays closed until player leaves and returns")
     check(not game.weapon_replace_cancel_pending, "cancel acknowledgement releases the temporary snapshot guard")
     game.screen_mode = previous_replace_screen
     print("[codec checkpoint] PASS: host replacement selection and cancellation")
