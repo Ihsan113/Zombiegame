@@ -1,30 +1,22 @@
-# Implementation notes v0.4.24
+# Implementation notes v0.4.26
 
-- Turret base/head generated as separate transparent PNGs so the head can rotate independently.
-- Turret firing sound is a compact local WAV and participates in existing SFX broadcast.
-- Weapon replacement choice is host-authoritative; reserved drops remain in world until selected or canceled. Pending prompt uses spare bits in the existing player flags, avoiding a packet-size change.
-- Aim-assist preference moved into User Settings outside live gameplay.
-- Turret target scan uses squared distance to reduce repeated square-root work.
-- Reserved weapon crate does not despawn while a slot-choice prompt is open and is released on cancel, death, or disconnect.
-- `tools/build_turret_assets.py` and `tools/generate_turret_fire_sfx.py` regenerate the two turret PNG layers and the compact one-shot firing sound.
+- Directional turret sector: target candidates must be within the deployment-facing 180° hemisphere, and yaw is stored as a relative offset bounded to ±90°.
+- Collision: widened the solid turret body rectangle to align with the rendered footprint. Host simulation, received movement commands, local prediction, and zombie movement all resolve against this shared shape.
+- AIM control: settings switch row expanded to 88 logical px, larger track and knob, direct touch dispatch before general UI hit testing, and persistent ON/OFF preference.
+- Save migration: save version 7. Previous turret global angles are converted to the constrained relative offset; face direction is preserved/inferred.
+- Static validation: workflow resource references, PNG alpha, SFX format, shell syntax, YAML structure, and ZIP integrity are checked. Godot runtime/export must be confirmed by CI.
 
-# Implementation notes — v0.4.23 hotfix (includes v0.4.21 features)
 
-## v0.4.21 turret and aim update
+## Directional turret and collision update
 
-- `assets/sprite_atlas_player_clean.png` is generated from the 320×192 survivor/zombie atlas. Only the four survivor cells have their baked diagonal gun area inpainted; zombie cells and transparent alpha regions are preserved. `_draw_player_weapon()` then draws the selected weapon and custom forearm/hand at chest height. `sprite_atlas.png` remains the source/fallback.
-- The aim assistance marker is local presentation and can be toggled with the AIM button, placed clear of the VITALS panel. Preference is stored in `user://settings.cfg` under `[controls] aim_marker_enabled`; it does not alter authoritative damage.
-- Auto-turret behavior is host authoritative: host validates build placement, consumes one turret kit, tracks the nearest zombie within 270 px, turns its head at 3.8 rad/s, and fires every 0.20 s for 1.35 damage per hit. Each turret has 180 HP. Zombies engage a turret when it is within 132 px and nearer than a survivor; ordinary and boss attacks reduce turret HP and can destroy it. Four turrets maximum.
-- An airdrop rolls an auto-turret kit rarely and guarantees one on every fourth generated drop if the squad has no kit and no deployed turret. Holding/draging the TUR control previews a green/red range circle; release requests host deployment.
-- Snapshot player records are now 30 bytes (one new turret-kit byte); turret records are 8 bytes: id u16, x/y u16, HP u8, angle u8. The encoder still computes the effect budget from the remaining bytes and keeps the full datagram within `MAX_SNAPSHOT_BYTES = 1180`. All LAN clients must run the same version.
+- Turret `angle` is a relative offset, constrained to `[-PI/2, +PI/2]`; `face_x` stores the left/right firing hemisphere chosen from the placing player's facing.
+- The existing 8-byte turret record remains compact: the upper bit of the wire angle byte stores `face_x < 0`, and the lower seven bits quantize the relative angle. Snapshot maximum remains 1180 bytes. Mixed-version LAN sessions are not compatible.
+- Preview draws the actual forward semicircle. Target acquisition filters zombies behind the turret, and head motion cannot spin through the rear hemisphere.
+- AABB collision resolution with axis sliding is applied to authoritative player movement, remote input, client prediction/reconciliation, and zombie movement. Turret base spacing from barricades is increased to prevent visual/physical overlap.
+- AIM Assist remains local-only, now shown as an easy-to-hit switch in User Settings.
+- Tests added for round-trip facing, rear-arc rejection, left-facing acquisition, and turret collision.
+- Validation limitation: Godot runtime test and Android APK export require GitHub Actions; this package has only been statically validated here.
 
-# Implementation notes — v0.4.20
-
-- On-player firearm draw sizes were reduced to fit the survivor scale. The muzzle is anchored around `face * 24 px`, matching the authoritative shot origin. Per-weapon grip ratios anchor the trigger and support hands; outlined arm segments render behind/in front of the weapon to reduce the floating-sprite appearance.
-- `_draw_aim_direction_marker()` is presentation-only. It finds the nearest zombie satisfying the active weapon's forward projection, effective range and lane tolerance, then draws a dashed horizontal guide and bracket marker at that projection. Green indicates a valid zombie; amber indicates direction/range only. Host-side hit checks remain unchanged.
-- `BARRICADE_JOIN_GAP` remains 4 px. `BARRICADE_VERTICAL_SPACING` is now 60 px, with lower rows depth-rendered in front; `_snap_wall_preview_to_neighbour()` supports horizontal or vertical neighbours within arena/range limits.
-- The provided `assets/audio/gameplay_tension_ambience.mp3` (151.249 s, stereo, 44.1 kHz) is loaded as `AudioStreamMP3` with looping enabled and -20 dB playback. `combat_ambience_loop.wav` remains as the fallback; `_sync_music_state()` still controls gameplay/pause/exit behavior.
-- Godot headless validation and Android export must run through the Godot 4.7.2 workflow; this edit environment does not have a Godot executable.
 
 ## v0.4.19 animation, airdrop and audio notes
 - `_draw_atlas_character()` uses the existing 64×80 (or 80×80 SVG layout) cell as a static atlas and splits the lower 32 px into a separate rotated layer during movement. The split intentionally overlaps the torso slice by five source pixels to avoid a visible seam; all gait state is local presentation only.

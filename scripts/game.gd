@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.23
+# Pixel Zombie LAN — wave defense prototype v0.4.26
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -80,12 +80,16 @@ const TURRET_RANGE := 270.0
 const TURRET_PLACE_RANGE_RATIO := 0.22
 const TURRET_MIN_PLAYER_DISTANCE := 48.0
 const TURRET_BASE_SPACING := 54.0
-const TURRET_WALL_SPACING := 44.0
+const TURRET_WALL_SPACING := 62.0
 const TURRET_AGGRO_RADIUS := 132.0
 const TURRET_ATTACK_RANGE := 46.0
 const TURRET_DAMAGE := 1.35
 const TURRET_FIRE_INTERVAL := 0.20
 const TURRET_TURN_SPEED := 3.8
+const TURRET_ARC_HALF_ANGLE := PI * 0.5
+const TURRET_BODY_HALF_WIDTH := 35.0
+const TURRET_BODY_TOP := -5.0
+const TURRET_BODY_BOTTOM := 31.0
 const TURRET_FEET: Array[Vector2] = [Vector2(-27.0, 28.0), Vector2(27.0, 28.0), Vector2(0.0, 31.0)]
 const WALL_ATTACK_RANGE := 50.0
 const WALL_LANE_TOLERANCE := 46.0
@@ -167,7 +171,7 @@ var boss_attack_textures: Array[Texture2D] = []
 var weapon_icon_textures: Dictionary = {}
 var active_projectiles: Array[Dictionary] = []
 var combat_effects: Array[Dictionary] = []
-# Aim-assist preference is local-only; the weapon replacement prompt is serialized with spare player-flag bits.
+# Aim-assist preference is local-only; weapon replacement uses spare player-flag bits and turret facing is packed in its angle byte.
 var player_death_visuals: Dictionary = {}
 var wave_number := 1
 var wave_total := WAVE_ZOMBIE_COUNT
@@ -220,6 +224,7 @@ var wall_preview_position := Vector2(480.0, 350.0)
 var wall_place_touch_id := -1
 var turret_place_active := false
 var turret_preview_position := Vector2(480.0, 350.0)
+var turret_preview_face_x := 1.0
 var turret_place_touch_id := -1
 var turret_requested := false
 var aim_marker_enabled := true
@@ -634,8 +639,14 @@ func _host_simulate(delta: float) -> void:
         if id == local_player_id:
             var movement: Vector2 = input_vectors.get(id, Vector2.ZERO).limit_length(1.0)
             if alive:
-                p["x"] = clampf(float(p.get("x", screen_size.x * 0.5)) + movement.x * PLAYER_SPEED * delta, 30.0, maxf(31.0, screen_size.x - 30.0))
-                p["y"] = clampf(float(p.get("y", screen_size.y * 0.68)) + movement.y * PLAYER_SPEED * delta, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+                var previous_player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+                var desired_player_pos := Vector2(
+                    clampf(previous_player_pos.x + movement.x * PLAYER_SPEED * delta, 30.0, maxf(31.0, screen_size.x - 30.0)),
+                    clampf(previous_player_pos.y + movement.y * PLAYER_SPEED * delta, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+                )
+                var resolved_player_pos := _resolve_turret_collision(previous_player_pos, desired_player_pos, 8.0)
+                p["x"] = resolved_player_pos.x
+                p["y"] = resolved_player_pos.y
                 # Side-view shooter: keep left/right facing for perfectly horizontal shots.
                 if absf(movement.x) > 0.14:
                     p["face_x"] = -1.0 if movement.x < 0.0 else 1.0
@@ -787,6 +798,10 @@ func _host_simulate(delta: float) -> void:
                         ui_status = "AUTO TURRET DESTROYED BY HORDE"
                     else:
                         turrets[turret_target_index] = turret_target
+            var turret_branch_pos := Vector2(float(z.get("x", zombie_pos.x)), float(z.get("y", zombie_pos.y)))
+            var turret_branch_resolved := _resolve_turret_collision(zombie_pos, turret_branch_pos, 5.0)
+            z["x"] = turret_branch_resolved.x
+            z["y"] = turret_branch_resolved.y
             z["attack_timer"] = attack_timer
             z["attack_cooldown"] = attack_cooldown
             z["attack_type"] = attack_type
@@ -952,6 +967,10 @@ func _host_simulate(delta: float) -> void:
                         _add_combat_effect(5, zombie_pos + Vector2(float(z.get("face_x", 1.0)) * 14.0, -3.0), target_pos + Vector2(0.0, -7.0), 0.20)
                         _emit_sfx("attack")
 
+        var zombie_after_move := Vector2(float(z.get("x", zombie_pos.x)), float(z.get("y", zombie_pos.y)))
+        var zombie_resolved_pos := _resolve_turret_collision(zombie_pos, zombie_after_move, 5.0)
+        z["x"] = zombie_resolved_pos.x
+        z["y"] = zombie_resolved_pos.y
         z["attack_timer"] = attack_timer
         z["attack_cooldown"] = attack_cooldown
         z["attack_type"] = attack_type
@@ -1320,8 +1339,10 @@ func _encode_snapshot() -> PackedByteArray:
         sp.put_u16(_qpos(float(turret.get("x", 0.0))))
         sp.put_u16(_qpos(float(turret.get("y", 0.0))))
         sp.put_u8(clampi(roundi(float(turret.get("hp", TURRET_MAX_HP))), 0, 255))
-        var wire_angle: float = wrapf(float(turret.get("angle", 0.0)), -PI, PI)
-        sp.put_u8(clampi(roundi((wire_angle + PI) / TAU * 255.0), 0, 255))
+        var angle_offset: float = clampf(float(turret.get("angle", 0.0)), -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
+        var angle_quantized := clampi(roundi((angle_offset + TURRET_ARC_HALF_ANGLE) / PI * 127.0), 0, 127)
+        var facing_bit := 128 if float(turret.get("face_x", 1.0)) < 0.0 else 0
+        sp.put_u8(angle_quantized | facing_bit)
 
     var dcount := mini(airdrops.size(), MAX_AIRDROPS_PER_SNAPSHOT)
     sp.put_u8(dcount)
@@ -1489,8 +1510,11 @@ func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
         var tx := float(sp.get_u16()) / POS_SCALE
         var ty := float(sp.get_u16()) / POS_SCALE
         var thp := float(sp.get_u8())
-        var tangle := float(sp.get_u8()) / 255.0 * TAU - PI
-        decoded_turrets.append({"id": tid, "x": tx, "y": ty, "hp": thp, "max_hp": TURRET_MAX_HP, "angle": tangle})
+        var angle_and_facing := int(sp.get_u8())
+        var face_x := -1.0 if (angle_and_facing & 128) != 0 else 1.0
+        var angle_quantized := angle_and_facing & 127
+        var angle_offset := float(angle_quantized) / 127.0 * PI - TURRET_ARC_HALF_ANGLE
+        decoded_turrets.append({"id": tid, "x": tx, "y": ty, "hp": thp, "max_hp": TURRET_MAX_HP, "angle": angle_offset, "face_x": face_x})
     snap["turrets"] = decoded_turrets
 
     var dcount := sp.get_u8()
@@ -1599,7 +1623,9 @@ func submit_input(packed: PackedByteArray) -> void:
         var move := _command_vector(qx, qy)
         if alive:
             if use > 0.0:
-                var next_pos := _clamp_to_lane(Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68))) + move * PLAYER_SPEED * use, screen_size.x, screen_size.y)
+                var previous_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+                var next_pos := _clamp_to_lane(previous_pos + move * PLAYER_SPEED * use, screen_size.x, screen_size.y)
+                next_pos = _resolve_turret_collision(previous_pos, next_pos, 8.0)
                 p["x"] = next_pos.x
                 p["y"] = next_pos.y
             if absf(move.x) > 0.14:
@@ -1860,7 +1886,20 @@ func _local_alive() -> bool:
 func _step_command(pos: Vector2, qx: int, qy: int, dt: float) -> Vector2:
     if dt <= 0.0 or not _local_alive():
         return pos
-    return _clamp_to_lane(pos + _command_vector(qx, qy) * PLAYER_SPEED * dt, host_world_w, host_world_h)
+    var desired := _clamp_to_lane(pos + _command_vector(qx, qy) * PLAYER_SPEED * dt, host_world_w, host_world_h)
+    return _resolve_prediction_turret_collision(pos, desired, 8.0)
+
+func _resolve_prediction_turret_collision(from_world: Vector2, desired_world: Vector2, padding: float) -> Vector2:
+    # The local client's turret render cache is already scaled into viewport coordinates,
+    # while prediction positions remain in host-world coordinates. Convert around collision.
+    if _is_connected_client():
+        var scale_x: float = screen_size.x / maxf(1.0, host_world_w)
+        var scale_y: float = screen_size.y / maxf(1.0, host_world_h)
+        var from_view := Vector2(from_world.x * scale_x, from_world.y * scale_y)
+        var desired_view := Vector2(desired_world.x * scale_x, desired_world.y * scale_y)
+        var resolved_view := _resolve_turret_collision(from_view, desired_view, padding)
+        return Vector2(resolved_view.x / maxf(0.0001, scale_x), resolved_view.y / maxf(0.0001, scale_y))
+    return _resolve_turret_collision(from_world, desired_world, padding)
 
 func _predict_local_player(delta: float) -> void:
     if not pred_ready or game_over or screen_mode != "game":
@@ -1872,7 +1911,8 @@ func _predict_local_player(delta: float) -> void:
         qy = 0
     var move := _command_vector(qx, qy)
     if qx != 0 or qy != 0:
-        pred_pos = _clamp_to_lane(pred_pos + move * PLAYER_SPEED * delta, host_world_w, host_world_h)
+        var desired_pred_pos := _clamp_to_lane(pred_pos + move * PLAYER_SPEED * delta, host_world_w, host_world_h)
+        pred_pos = _resolve_prediction_turret_collision(pred_pos, desired_pred_pos, 8.0)
     if absf(move.x) > 0.14:
         local_face = -1.0 if move.x < 0.0 else 1.0
     local_walking = move.length() > 0.12
@@ -2120,8 +2160,10 @@ func _client_update_render(delta: float) -> void:
             lerpf(float(prior_turret.get("y", turret_record["y"])), float(turret_record["y"]), alpha) * sy
         )
         var prior_angle: float = float(prior_turret.get("angle", turret_record.get("angle", 0.0)))
-        var angle_step: float = wrapf(float(turret_record.get("angle", 0.0)) - prior_angle, -PI, PI)
-        turrets.append({"id": int(turret_record["id"]), "x": turret_pos.x, "y": turret_pos.y, "hp": float(turret_record["hp"]), "max_hp": float(turret_record.get("max_hp", TURRET_MAX_HP)), "angle": prior_angle + angle_step * alpha, "flash_timer": 0.0})
+        var target_angle: float = clampf(float(turret_record.get("angle", 0.0)), -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
+        var interpolated_angle := lerpf(prior_angle, target_angle, alpha)
+        var turret_face_x := -1.0 if float(turret_record.get("face_x", prior_turret.get("face_x", 1.0))) < 0.0 else 1.0
+        turrets.append({"id": int(turret_record["id"]), "x": turret_pos.x, "y": turret_pos.y, "hp": float(turret_record["hp"]), "max_hp": float(turret_record.get("max_hp", TURRET_MAX_HP)), "angle": interpolated_angle, "face_x": turret_face_x, "flash_timer": 0.0})
     airdrops.clear()
     var from_drops: Array = from_snap["drops"]
     for drop in to_snap["drops"]:
@@ -2900,6 +2942,69 @@ func _next_turret_id() -> int:
         attempts += 1
     return randi() & 0xFFFF
 
+func _resolve_turret_collision(from_pos: Vector2, desired_pos: Vector2, padding: float = 8.0) -> Vector2:
+    # Turrets are drawn from a compact footprint in the 2D lane, so use an expanded static
+    # rectangle and axis-separated resolution to provide collision without per-frame physics nodes.
+    var resolved := desired_pos
+    var body_padding: float = maxf(0.0, padding)
+    for turret in turrets:
+        var turret_pos := Vector2(float(turret.get("x", 0.0)), float(turret.get("y", 0.0)))
+        var obstacle := Rect2(
+            turret_pos.x - TURRET_BODY_HALF_WIDTH,
+            turret_pos.y + TURRET_BODY_TOP,
+            TURRET_BODY_HALF_WIDTH * 2.0,
+            TURRET_BODY_BOTTOM - TURRET_BODY_TOP
+        ).grow(body_padding)
+        var from_inside := obstacle.has_point(from_pos)
+        var x_probe := Vector2(resolved.x, from_pos.y)
+        if obstacle.has_point(x_probe) and not from_inside:
+            if from_pos.x < obstacle.position.x:
+                resolved.x = obstacle.position.x - 0.5
+            elif from_pos.x > obstacle.end.x:
+                resolved.x = obstacle.end.x + 0.5
+            else:
+                resolved.x = from_pos.x
+        var y_probe := Vector2(resolved.x, resolved.y)
+        if obstacle.has_point(y_probe) and not from_inside:
+            if from_pos.y < obstacle.position.y:
+                resolved.y = obstacle.position.y - 0.5
+            elif from_pos.y > obstacle.end.y:
+                resolved.y = obstacle.end.y + 0.5
+            else:
+                resolved.y = from_pos.y
+        if obstacle.has_point(resolved):
+            # Recover safely if a player spawned or was teleported inside a turret footprint.
+            var to_left := absf(resolved.x - obstacle.position.x)
+            var to_right := absf(obstacle.end.x - resolved.x)
+            var to_top := absf(resolved.y - obstacle.position.y)
+            var to_bottom := absf(obstacle.end.y - resolved.y)
+            var nearest_edge := minf(minf(to_left, to_right), minf(to_top, to_bottom))
+            if nearest_edge == to_left:
+                resolved.x = obstacle.position.x - 0.5
+            elif nearest_edge == to_right:
+                resolved.x = obstacle.end.x + 0.5
+            elif nearest_edge == to_top:
+                resolved.y = obstacle.position.y - 0.5
+            else:
+                resolved.y = obstacle.end.y + 0.5
+    return resolved
+
+func _restore_turret_orientation(saved_turret: Dictionary, saved_version: int) -> Dictionary:
+    var saved_angle: float = float(saved_turret.get("angle", 0.0))
+    var has_saved_facing: bool = saved_turret.has("face_x")
+    var face_x: float = -1.0 if float(saved_turret.get("face_x", 1.0)) < 0.0 else 1.0
+    var angle_offset: float = saved_angle
+    if saved_version < 7:
+        # Version 6 and earlier may store a global 360-degree angle. Migrate it to the
+        # v0.4.26 relative half-arc, preserving facing when available or inferring it from yaw.
+        if not has_saved_facing:
+            face_x = -1.0 if cos(saved_angle) < 0.0 else 1.0
+        if not has_saved_facing or absf(saved_angle) > TURRET_ARC_HALF_ANGLE + 0.001:
+            var base_angle: float = PI if face_x < 0.0 else 0.0
+            angle_offset = wrapf(saved_angle - base_angle, -PI, PI)
+    angle_offset = clampf(angle_offset, -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
+    return {"angle": angle_offset, "face_x": face_x}
+
 func _turret_placement_is_valid(id: int, turret_pos: Vector2) -> bool:
     if not players.has(id) or turrets.size() >= MAX_TURRETS:
         return false
@@ -2947,7 +3052,8 @@ func _host_build_turret(id: int, x_ratio: float, y_ratio: float) -> void:
     players[id] = p
     build_cooldowns[id] = now
     var turret_id := _next_turret_id()
-    turrets.append({"id": turret_id, "x": turret_pos.x, "y": turret_pos.y, "hp": TURRET_MAX_HP, "max_hp": TURRET_MAX_HP, "angle": 0.0, "fire_timer": 0.25, "flash_timer": 0.0, "owner_id": id})
+    var turret_face_x := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
+    turrets.append({"id": turret_id, "x": turret_pos.x, "y": turret_pos.y, "hp": TURRET_MAX_HP, "max_hp": TURRET_MAX_HP, "angle": 0.0, "face_x": turret_face_x, "fire_timer": 0.25, "flash_timer": 0.0, "owner_id": id})
     _emit_sfx("wall_build")
     ui_status = "AUTO TURRET DEPLOYED • RANGE 270 • ZOMBIES CAN DESTROY IT"
     _broadcast_world()
@@ -2988,7 +3094,8 @@ func _begin_turret_placement(touch_id: int = -1) -> void:
     turret_place_active = true
     turret_place_touch_id = touch_id
     var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
-    var face: float = -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
+    var face: float = -1.0 if float(p.get("face_x", local_face)) < 0.0 else 1.0
+    turret_preview_face_x = face
     turret_preview_position = Vector2(
         clampf(player_pos.x + face * 88.0, 35.0, maxf(36.0, screen_size.x - 35.0)),
         clampf(player_pos.y + 6.0, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
@@ -3002,17 +3109,22 @@ func _draw_turret_placement_preview() -> void:
         radius *= screen_size.x / maxf(1.0, host_world_w)
     var fill := Color(0.36, 0.80, 0.40, 0.10) if valid else Color(0.92, 0.30, 0.22, 0.10)
     var line_color := Color("#92d578", 0.84) if valid else Color("#e46e58", 0.92)
-    var ring_points := PackedVector2Array()
-    for point_index in range(48):
-        var angle := TAU * float(point_index) / 48.0
-        ring_points.append(turret_preview_position + Vector2(cos(angle), sin(angle)) * radius)
-    draw_colored_polygon(ring_points, fill)
-    draw_arc(turret_preview_position, radius, 0.0, TAU, 80, line_color, 1.5, true)
+    var base_angle := 0.0 if turret_preview_face_x >= 0.0 else PI
+    var sector_points := PackedVector2Array()
+    sector_points.append(turret_preview_position)
+    for point_index in range(49):
+        var angle := base_angle - TURRET_ARC_HALF_ANGLE + PI * float(point_index) / 48.0
+        sector_points.append(turret_preview_position + Vector2(cos(angle), sin(angle)) * radius)
+    draw_colored_polygon(sector_points, fill)
+    draw_arc(turret_preview_position, radius, base_angle - TURRET_ARC_HALF_ANGLE, base_angle + TURRET_ARC_HALF_ANGLE, 80, line_color, 1.5, true)
+    draw_line(turret_preview_position, turret_preview_position + Vector2(cos(base_angle - TURRET_ARC_HALF_ANGLE), sin(base_angle - TURRET_ARC_HALF_ANGLE)) * radius, line_color, 1.1, true)
+    draw_line(turret_preview_position, turret_preview_position + Vector2(cos(base_angle + TURRET_ARC_HALF_ANGLE), sin(base_angle + TURRET_ARC_HALF_ANGLE)) * radius, line_color, 1.1, true)
     draw_arc(turret_preview_position, 28.0, 0.0, TAU, 32, Color(line_color.r, line_color.g, line_color.b, 0.55), 1.0, true)
-    _draw_turret_entity({"id": -1, "x": turret_preview_position.x, "y": turret_preview_position.y, "hp": TURRET_MAX_HP, "max_hp": TURRET_MAX_HP, "angle": 0.0, "flash_timer": 0.0}, true, valid)
-    var note := "RANGE 270  •  RELEASE TO DEPLOY" if valid else "BLOCKED / OUT OF RANGE"
-    draw_rect(Rect2(turret_preview_position.x - 93.0, turret_preview_position.y - 70.0, 186.0, 17.0), Color(0.008, 0.012, 0.014, 0.82))
-    draw_string(ui_font, Vector2(turret_preview_position.x - 90.0, turret_preview_position.y - 58.0), note, HORIZONTAL_ALIGNMENT_CENTER, 180.0, 9, line_color)
+    _draw_turret_entity({"id": -1, "x": turret_preview_position.x, "y": turret_preview_position.y, "hp": TURRET_MAX_HP, "max_hp": TURRET_MAX_HP, "angle": 0.0, "face_x": turret_preview_face_x, "flash_timer": 0.0}, true, valid)
+    var facing_label := "RIGHT" if turret_preview_face_x >= 0.0 else "LEFT"
+    var note := "180 DEG FRONT ARC • %s • RELEASE" % facing_label if valid else "BLOCKED / OUT OF RANGE"
+    draw_rect(Rect2(turret_preview_position.x - 112.0, turret_preview_position.y - 70.0, 224.0, 17.0), Color(0.008, 0.012, 0.014, 0.82))
+    draw_string(ui_font, Vector2(turret_preview_position.x - 108.0, turret_preview_position.y - 58.0), note, HORIZONTAL_ALIGNMENT_CENTER, 216.0, 9, line_color)
 
 func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid: bool = true) -> void:
     var pos := Vector2(float(turret.get("x", 0.0)), float(turret.get("y", 0.0)))
@@ -3030,8 +3142,11 @@ func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid:
         var base_size := Vector2(72.0, 35.1)
         draw_texture_rect(turret_base_texture, Rect2(pos + Vector2(-base_size.x * 0.5, -4.4), base_size), false, tint)
         var pivot := pos + Vector2(0.0, -24.0)
-        var raw_angle: float = float(turret.get("angle", 0.0))
-        var flip_x := -1.0 if cos(raw_angle) < 0.0 else 1.0
+        var face_x := -1.0 if float(turret.get("face_x", 1.0)) < 0.0 else 1.0
+        var angle_offset: float = clampf(float(turret.get("angle", 0.0)), -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
+        var base_angle: float = 0.0 if face_x >= 0.0 else PI
+        var raw_angle: float = base_angle + angle_offset
+        var flip_x := -1.0 if face_x < 0.0 else 1.0
         var draw_angle: float = wrapf(raw_angle - PI, -PI, PI) if flip_x < 0.0 else raw_angle
         var head_size := Vector2(73.0, 23.2)
         var firing_flash: float = clampf(float(turret.get("flash_timer", 0.0)) / 0.075, 0.0, 1.0)
@@ -3062,7 +3177,8 @@ func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid:
             draw_circle(pos + knee, 3.2, bronze)
             draw_rect(Rect2(pos + foot - Vector2(5.0, 1.5), Vector2(10.0, 3.0)), dark)
         var pivot_fallback := pos + Vector2(0.0, -24.0)
-        var angle_fallback: float = float(turret.get("angle", 0.0))
+        var fallback_face_x := -1.0 if float(turret.get("face_x", 1.0)) < 0.0 else 1.0
+        var angle_fallback: float = (PI if fallback_face_x < 0.0 else 0.0) + clampf(float(turret.get("angle", 0.0)), -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
         draw_set_transform(pivot_fallback, angle_fallback, Vector2.ONE)
         draw_rect(Rect2(-13.0, -9.0, 30.0, 16.0), dark)
         draw_rect(Rect2(-11.0, -7.0, 25.0, 12.0), steel)
@@ -3086,30 +3202,39 @@ func _update_turrets(delta: float) -> void:
         turret["fire_timer"] = maxf(0.0, float(turret.get("fire_timer", 0.0)) - delta)
         turret["flash_timer"] = maxf(0.0, float(turret.get("flash_timer", 0.0)) - delta)
         var turret_pos := Vector2(float(turret.get("x", 0.0)), float(turret.get("y", 0.0)))
+        var face_x := -1.0 if float(turret.get("face_x", 1.0)) < 0.0 else 1.0
+        var base_angle: float = 0.0 if face_x >= 0.0 else PI
         var target_index := -1
         var nearest_distance_squared: float = TURRET_RANGE * TURRET_RANGE
         for zombie_index in range(zombies.size()):
             var zombie: Dictionary = zombies[zombie_index]
             var zombie_pos := Vector2(float(zombie.get("x", 0.0)), float(zombie.get("y", 0.0)))
+            # A turret scans and fires only inside its forward 180-degree hemisphere.
+            # The facing direction is locked when deployed; the head never spins through the back arc.
+            if (zombie_pos.x - turret_pos.x) * face_x < -0.5:
+                continue
             var distance_squared := turret_pos.distance_squared_to(zombie_pos)
             if distance_squared < nearest_distance_squared:
                 nearest_distance_squared = distance_squared
                 target_index = zombie_index
-        var desired_angle: float = sin(world_time * 0.63 + float(int(turret.get("id", 0)))) * 0.10
-        var target_pos := turret_pos + Vector2.RIGHT * TURRET_RANGE
+        var desired_offset: float = sin(world_time * 0.63 + float(int(turret.get("id", 0)))) * 0.06
+        var target_pos := turret_pos + Vector2(face_x * TURRET_RANGE, 0.0)
+        var pivot := turret_pos + Vector2(0.0, -24.0)
         if target_index >= 0:
             target_pos = Vector2(float(zombies[target_index].get("x", 0.0)), float(zombies[target_index].get("y", 0.0)) - 11.0)
-            desired_angle = (target_pos - (turret_pos + Vector2(0.0, -24.0))).angle()
-        var current_angle: float = float(turret.get("angle", 0.0))
-        var angle_delta: float = wrapf(desired_angle - current_angle, -PI, PI)
-        current_angle += clampf(angle_delta, -TURRET_TURN_SPEED * delta, TURRET_TURN_SPEED * delta)
-        turret["angle"] = wrapf(current_angle, -PI, PI)
-        if target_index >= 0 and absf(angle_delta) < 0.30 and float(turret.get("fire_timer", 0.0)) <= 0.0:
+            var target_vector := target_pos - pivot
+            desired_offset = clampf(wrapf(target_vector.angle() - base_angle, -PI, PI), -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
+        var current_offset: float = clampf(float(turret.get("angle", 0.0)), -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
+        var angle_delta: float = desired_offset - current_offset
+        current_offset = clampf(current_offset + clampf(angle_delta, -TURRET_TURN_SPEED * delta, TURRET_TURN_SPEED * delta), -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
+        turret["angle"] = current_offset
+        if target_index >= 0 and absf(desired_offset - current_offset) < 0.22 and float(turret.get("fire_timer", 0.0)) <= 0.0:
             var target: Dictionary = zombies[target_index]
             target["hp"] = float(target.get("hp", 1.0)) - TURRET_DAMAGE
             target["hit_timer"] = 0.10
             zombies[target_index] = target
-            var muzzle := turret_pos + Vector2(0.0, -24.0) + Vector2(cos(current_angle), sin(current_angle)) * 37.0
+            var global_angle := base_angle + current_offset
+            var muzzle := pivot + Vector2(cos(global_angle), sin(global_angle)) * 37.0
             _add_combat_effect(14, muzzle, target_pos, 0.12)
             turret["fire_timer"] = TURRET_FIRE_INTERVAL
             turret["flash_timer"] = 0.075
@@ -3618,7 +3743,7 @@ func _save_world(announce: bool = true) -> void:
     if not is_host:
         return
     var data := {
-        "version": 6,
+        "version": 7,
         "seed": world_seed,
         "time": world_time,
         "wave_number": wave_number,
@@ -3733,13 +3858,15 @@ func _load_world() -> void:
     if typeof(saved_turrets) == TYPE_ARRAY:
         for turret in saved_turrets:
             if typeof(turret) == TYPE_DICTIONARY and turret.has("x") and turret.has("y") and turrets.size() < MAX_TURRETS:
+                var restored_orientation: Dictionary = _restore_turret_orientation(turret, saved_version)
                 turrets.append({
                     "id": int(turret.get("id", _next_turret_id())) & 0xFFFF,
                     "x": clampf(float(turret.get("x", screen_size.x * 0.5)), 35.0, maxf(36.0, screen_size.x - 35.0)),
                     "y": clampf(float(turret.get("y", screen_size.y * 0.7)), _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE),
                     "hp": clampf(float(turret.get("hp", TURRET_MAX_HP)), 1.0, TURRET_MAX_HP),
                     "max_hp": TURRET_MAX_HP,
-                    "angle": float(turret.get("angle", 0.0)),
+                    "angle": float(restored_orientation.get("angle", 0.0)),
+                    "face_x": float(restored_orientation.get("face_x", 1.0)),
                     "fire_timer": 0.2,
                     "flash_timer": 0.0,
                     "owner_id": int(turret.get("owner_id", 1))
@@ -5024,9 +5151,20 @@ func _draw_settings() -> void:
     _draw_panel(panel, "USER SETTINGS", "LOCAL CONTROL PREFERENCES")
     draw_string(ui_font, Vector2(panel.position.x + 26.0, panel.position.y + 83.0), "AIM ASSIST DIRECTION MARKER", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 52.0, 15, Color("#f0ead8"))
     draw_string(ui_font, Vector2(panel.position.x + 26.0, panel.position.y + 105.0), "Show a subtle lane and target cue during survival.", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 52.0, 11, Color("#b4c7b6"))
-    var toggle_rect := Rect2(panel.position.x + 26.0, panel.position.y + 126.0, panel.size.x - 52.0, 54.0)
-    _draw_ui_button("settings_toggle_aim", toggle_rect, "AIM ASSIST  " + ("ON" if aim_marker_enabled else "OFF"), "Tap to change; saved on this device", Color("#8bb775") if aim_marker_enabled else Color("#737f7d"), false)
-    draw_string(ui_font, Vector2(panel.position.x + 26.0, panel.position.y + 213.0), "This option is visual only and does not change weapon damage or LAN authority.", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 52.0, 10, Color("#9eaaa0"))
+    # Large, explicit switch hit target (whole row + track) so Android taps reliably register.
+    var toggle_rect := Rect2(panel.position.x + 26.0, panel.position.y + 120.0, panel.size.x - 52.0, 88.0)
+    button_rects["settings_toggle_aim"] = toggle_rect
+    draw_rect(Rect2(toggle_rect.position + Vector2(3.0, 4.0), toggle_rect.size), Color(0.0, 0.0, 0.0, 0.38))
+    draw_rect(toggle_rect, Color("#182225"))
+    draw_rect(Rect2(toggle_rect.position, Vector2(4.0, toggle_rect.size.y)), Color("#8bb775") if aim_marker_enabled else Color("#737f7d"))
+    draw_rect(toggle_rect, Color("#3e4c4e"), false, 1.0)
+    draw_string(ui_font, toggle_rect.position + Vector2(16.0, 34.0), "AIM ASSIST", HORIZONTAL_ALIGNMENT_LEFT, toggle_rect.size.x - 154.0, 14, Color("#f2ece3"))
+    draw_string(ui_font, toggle_rect.position + Vector2(16.0, 57.0), "DIRECTION MARKER  •  " + ("ON" if aim_marker_enabled else "OFF") + "  •  TAP TO TOGGLE", HORIZONTAL_ALIGNMENT_LEFT, toggle_rect.size.x - 154.0, 10, Color("#bfc8bd"))
+    var switch_rect := Rect2(toggle_rect.end.x - 108.0, toggle_rect.position.y + 23.0, 84.0, 42.0)
+    draw_rect(switch_rect, Color("#557e4e") if aim_marker_enabled else Color("#444d4e"), true, 10.0)
+    draw_rect(switch_rect, Color("#91ba7a") if aim_marker_enabled else Color("#657070"), false, 1.4, true)
+    draw_circle(Vector2(switch_rect.position.x + (62.0 if aim_marker_enabled else 22.0), switch_rect.position.y + 21.0), 15.0, Color("#f1eddf"))
+    draw_string(ui_font, Vector2(panel.position.x + 26.0, panel.position.y + 220.0), "Saved on this device. Tap anywhere on the switch row to change it.", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 52.0, 10, Color("#9eaaa0"))
     _draw_ui_button("settings_back", Rect2(panel.position.x + 26.0, panel.position.y + panel.size.y - 64.0, panel.size.x - 52.0, 42.0), "‹  BACK", "Return to " + ("lobby" if settings_return_mode == "lobby" else "safehouse"), Color("#c18a55"), false)
 
 func _weapon_replace_prompt_visible() -> bool:
@@ -5463,9 +5601,11 @@ func _handle_ui_button(id: String) -> void:
         "home_settings":
             settings_return_mode = "home"
             screen_mode = "settings"
+            ui_status = "AIM ASSIST %s" % ("ON" if aim_marker_enabled else "OFF")
         "lobby_settings":
             settings_return_mode = "lobby"
             screen_mode = "settings"
+            ui_status = "AIM ASSIST %s" % ("ON" if aim_marker_enabled else "OFF")
         "settings_back":
             screen_mode = "lobby" if settings_return_mode == "lobby" else "home"
         "settings_toggle_aim":
@@ -5611,6 +5751,11 @@ func _input(event: InputEvent) -> void:
             _set_turret_preview_from_pointer(event.position)
 
 func _touch_start(index: int, pos: Vector2) -> void:
+    if screen_mode == "settings":
+        var aim_toggle_hitbox: Rect2 = button_rects.get("settings_toggle_aim", Rect2())
+        if aim_toggle_hitbox.has_point(pos):
+            _handle_ui_button("settings_toggle_aim")
+            return
     if _weapon_replace_prompt_visible():
         _handle_press(pos, index)
         return

@@ -75,7 +75,7 @@ func _initialize() -> void:
         for i in range(int(sc.w)):
             game.barricades.append({"id": rng.randi(), "x": 100.0 + i * 130, "y": 380.0, "hp": 90.0 - i, "max_hp": 125.0, "owner_id": 1})
         for i in range(int(sc.get("t", 0))):
-            game.turrets.append({"id": i + 1, "x": 250.0 + i * 115.0, "y": 374.0 + (i % 2) * 44.0, "hp": 140.0 - i, "max_hp": game.TURRET_MAX_HP, "angle": -0.5 + i * 0.25, "fire_timer": 0.1, "flash_timer": 0.0})
+            game.turrets.append({"id": i + 1, "x": 250.0 + i * 115.0, "y": 374.0 + (i % 2) * 44.0, "hp": 140.0 - i, "max_hp": game.TURRET_MAX_HP, "angle": -0.5 + i * 0.25, "face_x": -1.0 if i % 2 == 0 else 1.0, "fire_timer": 0.1, "flash_timer": 0.0})
         for i in range(int(sc.d)):
             game.airdrops.append({"id": i + 1, "x": 300.0 + i * 200, "y": 350.0, "start_y": 280.0, "land_y": 400.0, "elapsed": 1.3, "fall_duration": 2.6, "despawn_timer": 20.0, "landed": false, "loot_kind": "wall", "quantity": 2})
         for i in range(int(sc.g)):
@@ -138,7 +138,8 @@ func _initialize() -> void:
             check(int(source_turret.id) == int(decoded_turret.id), "turret id round-trip")
             check(near(float(source_turret.x), float(decoded_turret.x), 0.07) and near(float(source_turret.y), float(decoded_turret.y), 0.07), "turret position round-trip")
             check(near(float(source_turret.hp), float(decoded_turret.hp), 1.0), "turret HP round-trip")
-            check(absf(wrapf(float(source_turret.angle) - float(decoded_turret.angle), -PI, PI)) <= 0.03, "turret head angle round-trip")
+            check(absf(float(source_turret.angle) - float(decoded_turret.angle)) <= 0.03, "turret relative head angle round-trip")
+            check((float(source_turret.get("face_x", 1.0)) < 0.0) == (float(decoded_turret.get("face_x", 1.0)) < 0.0), "turret facing direction round-trips in angle byte")
         for pid in ids:
             var player_source: Dictionary = game.players[pid]
             var player_decoded: Dictionary = snap.players[pid]
@@ -158,6 +159,26 @@ func _initialize() -> void:
         print("%-40s %5d bytes  (players %d, zombies %d, effects %d)" % [sc.name, buf.size(), snap.players.size(), snap.zids.size(), snap.fx.size()])
 
     print("[codec checkpoint] PASS: snapshot scenario round-trips")
+    var legacy_left_orientation: Dictionary = game._restore_turret_orientation({"angle": 2.6, "face_x": -1.0}, 6)
+    check(float(legacy_left_orientation.face_x) < 0.0 and absf(float(legacy_left_orientation.angle)) <= game.TURRET_ARC_HALF_ANGLE, "legacy world save migrates global turret yaw to left-facing half-arc")
+    var legacy_inferred_orientation: Dictionary = game._restore_turret_orientation({"angle": -2.7}, 6)
+    check(float(legacy_inferred_orientation.face_x) < 0.0 and absf(float(legacy_inferred_orientation.angle)) <= game.TURRET_ARC_HALF_ANGLE, "legacy turret without facing field infers and migrates left-facing yaw")
+    var current_orientation: Dictionary = game._restore_turret_orientation({"angle": -0.4, "face_x": -1.0}, 7)
+    check(float(current_orientation.face_x) < 0.0 and near(float(current_orientation.angle), -0.4, 0.001), "current turret save preserves relative angle and facing")
+    var prior_screen_mode: String = str(game.screen_mode)
+    game.screen_mode = "settings"
+    game.button_rects.clear()
+    game.button_rects["settings_toggle_aim"] = Rect2(200.0, 120.0, 468.0, 88.0)
+    var aim_before_touch: bool = bool(game.aim_marker_enabled)
+    game._touch_start(9, Vector2(201.0, 121.0))
+    check(bool(game.aim_marker_enabled) != aim_before_touch, "AIM Settings toggle responds to touch at switch-row edge")
+    var aim_after_toggle: bool = bool(game.aim_marker_enabled)
+    game._touch_start(10, Vector2(100.0, 100.0))
+    check(bool(game.aim_marker_enabled) == aim_after_toggle, "AIM Settings tap outside switch does not toggle")
+    game._touch_start(11, Vector2(400.0, 160.0))
+    check(bool(game.aim_marker_enabled) == aim_before_touch, "AIM Settings switch track toggles back on tap")
+    game.screen_mode = prior_screen_mode
+    game.button_rects.clear()
     # Weapon profiles and reload arithmetic are deterministic and bounded.
     var sidearm_profile: Dictionary = game._weapon_profile(game.WEAPON_SIDEARM)
     check(int(sidearm_profile.mag_size) == -1 and int(sidearm_profile.interval_ms) == 280, "default sidearm keeps infinite ammo")
@@ -311,12 +332,37 @@ func _initialize() -> void:
         game.zombies.append({"id": 80808, "kind": 0, "x": test_target_pos.x, "y": test_target_pos.y, "hp": 20.0, "max_hp": 20.0, "walking": true, "attacking": false, "attack_timer": 0.0, "attack_cooldown": 0.0, "hit_timer": 0.0})
         game._update_turrets(0.016)
         check(float(game.zombies[0].get("hp", 20.0)) < 20.0, "auto-turret tracks and damages a zombie in range")
+        # The 180-degree firing sector must never acquire targets behind its fixed facing side.
+        game.zombies.clear()
+        game.turrets[0]["face_x"] = 1.0
+        game.turrets[0]["angle"] = 0.0
+        game.turrets[0]["fire_timer"] = 0.0
+        game.zombies.append({"id": 80810, "kind": 0, "x": 408.0, "y": 390.0, "hp": 100.0, "max_hp": 100.0, "walking": true, "attacking": false, "attack_timer": 0.0, "attack_cooldown": 0.0, "hit_timer": 0.0})
+        game._update_turrets(0.016)
+        check(near(float(game.zombies[0].get("hp", 100.0)), 100.0, 0.001), "turret cannot fire into rear hemisphere")
+        game.turrets[0]["face_x"] = -1.0
+        game.turrets[0]["angle"] = 0.0
+        game.turrets[0]["fire_timer"] = 0.0
+        for turn_step in range(36):
+            game._update_turrets(0.016)
+        check(float(game.zombies[0].get("hp", 100.0)) < 100.0, "left-facing turret can track and fire inside its forward hemisphere")
+        # Collision footprint is enforced by authoritative and predicted movement.
+        var collision_from := Vector2(turret_spot.x - 50.0, turret_spot.y)
+        var collision_desired := Vector2(turret_spot.x - 20.0, turret_spot.y)
+        var collision_result := game._resolve_turret_collision(collision_from, collision_desired, 8.0)
+        var turret_body_rect := Rect2(turret_spot.x - game.TURRET_BODY_HALF_WIDTH, turret_spot.y + game.TURRET_BODY_TOP, game.TURRET_BODY_HALF_WIDTH * 2.0, game.TURRET_BODY_BOTTOM - game.TURRET_BODY_TOP).grow(8.0)
+        check(not turret_body_rect.has_point(collision_result), "survivor collides with turret body instead of passing through")
+        var collision_from_right := Vector2(turret_spot.x + 60.0, turret_spot.y)
+        var collision_desired_left := Vector2(turret_spot.x - 10.0, turret_spot.y)
+        var collision_result_right := game._resolve_turret_collision(collision_from_right, collision_desired_left, 8.0)
+        check(not turret_body_rect.has_point(collision_result_right), "turret body blocks survivor approaching from the opposite direction")
         # A zombie closer to a turret than any survivor must attack and be able to destroy it.
         game.players[1]["x"] = 850.0
         game.turrets[0]["x"] = 450.0
         game.turrets[0]["y"] = 390.0
         game.turrets[0]["hp"] = 2.0
         game.turrets[0]["angle"] = 0.0
+        game.turrets[0]["face_x"] = 1.0
         game.turrets[0]["fire_timer"] = 4.0
         game.zombies.clear()
         game.zombies.append({"id": 80809, "kind": 0, "x": 455.0, "y": 390.0, "face_x": 1.0, "hp": 20.0, "max_hp": 20.0, "walking": true, "attacking": false, "attack_timer": 0.0, "attack_cooldown": 0.0, "attack_type": game.BOSS_ATTACK_SLASH, "attack_hit_applied": false, "hit_timer": 0.0})

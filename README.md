@@ -1,17 +1,22 @@
-# Pixel Zombie LAN v0.4.24
+# Pixel Zombie LAN v0.4.26
 
-This update improves survivor weapon presentation, adds transparent PNG turret assets and turret-fire audio, moves AIM Assist to the pre-game User Settings screen, and adds explicit airdrop weapon replacement choice when both carry slots are occupied. Gameplay networking remains host-authoritative; player snapshot record size remains 30 bytes.
+## v0.4.26 — front 180° turret sector, solid footprint, dependable AIM toggle
 
-# Pixel Zombie LAN — v0.4.23
+- Turret keeps the deployment-side direction (left/right) and targets only zombies in the front 180° sector. The head rotates inside that sector without crossing through the back arc.
+- Expanded the turret body collision to cover the visible base more accurately; survivor prediction, authoritative player movement, and zombie movement use the same solid footprint.
+- AIM ASSIST in User Settings is now a large ON/OFF toggle row with a dedicated touch path, a clear visible state, and persistent local preference.
+- Bumped save format to version 7 and migrates legacy 360° turret yaw to the new relative half-arc while preserving the saved facing where possible.
+- Added regression checks for legacy/current turret save orientation, firing restrictions, and collision approaches from both sides.
+- Snapshot records remain unchanged (8-byte turret record); all LAN clients should use v0.4.26 together because turret angle semantics remain directional.
+- Android version code/name: 38 / 0.4.26. Validate runtime with Godot 4.7.2 in GitHub Actions.
 
-A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
+## Previous release: v0.4.25 — Directional turret arc, body collision, and AIM switch
 
-## v0.4.24 — Turret asset runtime test fix
-
-- The headless codec suite now yields one frame after adding `Main.tscn` to the SceneTree so `_ready()` and runtime texture loading complete before assertions execute.
-- Added separate checks for loading both turret PNGs by resource path and for the game node's loaded texture fields. This distinguishes bad resource packaging from a test lifecycle/order problem.
-- CI now reports Android version code/name 36 / 0.4.24. The game snapshot layout, turret firing, loot, and host-authoritative mechanics are unchanged.
-
+- Turret firing arc is a front-facing 180° semicircle. The turret keeps the left/right direction it had when placed; the head only rotates within that half-plane.
+- Solid rectangular footprint blocks survivor and zombie movement; placement checks keep turret bodies away from barricades.
+- AIM direction marker can be changed through a large switch-style ON/OFF row in User Settings.
+- Snapshot packet sizes are unchanged; the 8-byte turret angle field now packs facing direction in the high bit. All LAN devices must use v0.4.25 together.
+- Android version code/name: 37 / 0.4.25. Runtime Godot build/test must be verified in GitHub Actions.
 
 ## v0.4.23 — Destructible auto-turrets, aim toggle and survivor weapon cleanup
 

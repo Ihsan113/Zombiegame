@@ -1,4 +1,16 @@
-# Pixel Zombie LAN v0.4.24
+# Pixel Zombie LAN v0.4.26
+
+## v0.4.26 — half-plane turret aiming and reliable settings toggle
+
+- Turret targeting and visual tracking are strictly limited to a front-facing 180° sector, selected by the placing survivor's left/right facing. Head yaw is clamped relative to the base angle so it does not sweep through the rear hemisphere.
+- Increased the static turret collision footprint to match the displayed base more closely and prevent survivors/zombies from walking through the machine.
+- Enlarged the AIM ASSIST switch row and gave it a dedicated high-priority touch route in Settings to reduce missed taps; explicit ON/OFF state remains stored locally.
+- Bumped saved-world format to version 7 and added migration for older turret yaw values.
+- Added codec regressions for old-save yaw migration and body collision from both approaches.
+- Android version code/name: 38 / 0.4.26. Godot runtime and APK export still need to pass GitHub Actions.
+
+## Previous release history
+
 
 - Replaced procedural turret geometry with transparent generated PNG base/head sprites; only the head rotates around its pivot.
 - Added compact generated turret-fire SFX and connected it to synchronized turret firing.
