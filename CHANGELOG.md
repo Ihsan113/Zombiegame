@@ -1,3 +1,25 @@
+# Pixel Zombie LAN v0.4.30
+
+## v0.4.30 — first-tap turret aim controls and input regression fix
+- Added shared `_turret_facing_button_rects()` geometry for drawing, touch hit-testing, and Android coordinate fallback. First tap on AIM LEFT/RIGHT now registers before the first draw pass, and selection remains independent of the chosen ground point.
+- Re-aligned the turret yaw joint to the base bearing and moved the simulated muzzle origin to match the visible barrel bore.
+- Added active-control hit testing that tolerates Android viewport/window coordinate differences for AIM settings and first-tap weapon replacement.
+- The in-game placement workflow reserves arena touches for choosing a turret position while placement is active; players continue to pass through turret scenery.
+- Added regressions for first-tap AIM LEFT hit testing, both facing choices, turret pivot/muzzle alignment, transformed AIM taps, and the first replacement-slot tap.
+- Android version code/name: 42 / 0.4.30. Player/turret/drop snapshot record sizes and save schema unchanged.
+
+# Pixel Zombie LAN v0.4.28
+
+## v0.4.28 — turret placement/input/visual hotfix
+
+- Fixed turret placement controls: pressing TUR only enters placement mode; the next arena tap/drag chooses the spot. Place to the left of the survivor to face left, or to the right to face right, and the preview sector matches the host placement rule.
+- Convert touch/mouse event positions into canvas coordinates before UI hit-testing and placement calculations.
+- Rebuild AIM Settings and weapon-replacement hitboxes from shared geometry at touch time so a first tap cannot be swallowed by stale draw-state rectangles.
+- Lock survivor movement while an airdrop replacement dialog is active and relax reserved-drop proximity tolerance slightly so the initial slot choice is accepted reliably.
+- Let players pass through turret bodies/feet while keeping collision resolution for zombies. Add a visible central turret mast/collar between the tripod and rotating head.
+- Align muzzle flash and moving turret tracer origins using the same muzzle-point function for both facing directions.
+- Android version code/name: 40 / 0.4.28. Snapshot record sizes and save schema unchanged.
+
 # Pixel Zombie LAN v0.4.27
 
 ## v0.4.27 — explicit Vector2 typing for collision codec regressions

@@ -1,3 +1,21 @@
+# Implementation notes — v0.4.30
+
+### v0.4.30 validation notes
+- Turret facing is a user-selectable half-arc, transmitted with the deployment request.
+- Head yaw ring and muzzle coordinates now align with the base bearing.
+- Shared turret-facing control geometry is used by render, first-touch, and coordinate-space hit testing. Input mapping falls back to a raw hit on a live visible button when Android reports an alternate coordinate space; otherwise it uses the inverse canvas transform.
+- Tests added for first-touch AIM LEFT registration before drawing, explicit left/right deployment, input-mapping fallback, and first-tap weapon replacement.
+- Android version code/name: 42 / 0.4.30.
+
+# Implementation notes — v0.4.28
+
+- TUR uses two-step placement. The touch that activates TUR is intentionally not bound to placement; the next arena touch/drag locks the placement pointer. Final host facing is selected from target X relative to the placing survivor, matching the local preview.
+- Pointer events are mapped via `get_global_transform_with_canvas().affine_inverse()` before using custom-canvas coordinates.
+- AIM Settings and weapon-replacement prompt share calculated hitbox geometry between render and input paths.
+- Survivor movement is lane-clamped but no longer resolved against turret body collision. Zombie movement still uses `_resolve_turret_collision`.
+- Central mast/collar geometry fills the turret visual gap; turret tracer and flash start at `_turret_muzzle_position`.
+- Local validation: resource-path and workflow syntax checks are expected to run in CI. Godot 4.7.2 runtime has not been run in this workspace.
+
 # Implementation notes v0.4.27
 
 - GDScript type fix: `_resolve_turret_collision()` returns `Vector2`, but tests call it through `game: Node`, so type inference treated the value as dynamic. Both test variables are now explicitly typed `Vector2`.

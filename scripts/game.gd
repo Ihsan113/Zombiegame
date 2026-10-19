@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.27
+# Pixel Zombie LAN — wave defense prototype v0.4.30
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -359,6 +359,12 @@ func _process(delta: float) -> void:
     _sync_music_state()
 
     if screen_mode == "game":
+        if _weapon_replace_prompt_visible():
+            joystick_vector = Vector2.ZERO
+            joystick_active = false
+            joystick_touch_id = -1
+            fire_held = false
+            fire_touch_id = -1
         if is_host:
             input_vectors[local_player_id] = joystick_vector
             _host_simulate(minf(delta, 0.1))
@@ -619,10 +625,11 @@ func _process_action_requests(delta: float) -> void:
         var turret_y_ratio: float = clampf(turret_preview_position.y / maxf(1.0, screen_size.y), 0.0, 1.0)
         turret_place_active = false
         turret_place_touch_id = -1
+        var requested_face_x: float = -1.0 if turret_preview_face_x < 0.0 else 1.0
         if is_host:
-            _host_build_turret(local_player_id, turret_x_ratio, turret_y_ratio)
+            _host_build_turret(local_player_id, turret_x_ratio, turret_y_ratio, requested_face_x)
         elif _is_connected_client():
-            rpc_id(1, "request_build_turret", turret_x_ratio, turret_y_ratio)
+            rpc_id(1, "request_build_turret", turret_x_ratio, turret_y_ratio, requested_face_x)
         else:
             ui_status = "Auto turrets are available during a world session"
 
@@ -638,15 +645,19 @@ func _host_simulate(delta: float) -> void:
         var alive := float(p.get("hp", 0.0)) > 0.0
         if id == local_player_id:
             var movement: Vector2 = input_vectors.get(id, Vector2.ZERO).limit_length(1.0)
+            if bool(p.get("weapon_replace_pending", false)):
+                movement = Vector2.ZERO
+                input_vectors[id] = Vector2.ZERO
             if alive:
                 var previous_player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
                 var desired_player_pos := Vector2(
                     clampf(previous_player_pos.x + movement.x * PLAYER_SPEED * delta, 30.0, maxf(31.0, screen_size.x - 30.0)),
                     clampf(previous_player_pos.y + movement.y * PLAYER_SPEED * delta, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
                 )
-                var resolved_player_pos := _resolve_turret_collision(previous_player_pos, desired_player_pos, 8.0)
-                p["x"] = resolved_player_pos.x
-                p["y"] = resolved_player_pos.y
+                # Deployable turrets are defensive scenery, not survivor blockers. Keep the
+                # lane clamp above, but allow a survivor to pass across the tripod footprint.
+                p["x"] = desired_player_pos.x
+                p["y"] = desired_player_pos.y
                 # Side-view shooter: keep left/right facing for perfectly horizontal shots.
                 if absf(movement.x) > 0.14:
                     p["face_x"] = -1.0 if movement.x < 0.0 else 1.0
@@ -1621,11 +1632,14 @@ func submit_input(packed: PackedByteArray) -> void:
         var use := minf(minf(dt, COMMAND_MAX_DT), budget)
         budget -= use
         var move := _command_vector(qx, qy)
+        if bool(p.get("weapon_replace_pending", false)):
+            move = Vector2.ZERO
         if alive:
             if use > 0.0:
                 var previous_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
                 var next_pos := _clamp_to_lane(previous_pos + move * PLAYER_SPEED * use, screen_size.x, screen_size.y)
-                next_pos = _resolve_turret_collision(previous_pos, next_pos, 8.0)
+                # Survivors pass through turret bases; only zombie movement uses the
+                # obstacle resolver so the machine remains a target rather than a wall.
                 p["x"] = next_pos.x
                 p["y"] = next_pos.y
             if absf(move.x) > 0.14:
@@ -1889,17 +1903,10 @@ func _step_command(pos: Vector2, qx: int, qy: int, dt: float) -> Vector2:
     var desired := _clamp_to_lane(pos + _command_vector(qx, qy) * PLAYER_SPEED * dt, host_world_w, host_world_h)
     return _resolve_prediction_turret_collision(pos, desired, 8.0)
 
-func _resolve_prediction_turret_collision(from_world: Vector2, desired_world: Vector2, padding: float) -> Vector2:
-    # The local client's turret render cache is already scaled into viewport coordinates,
-    # while prediction positions remain in host-world coordinates. Convert around collision.
-    if _is_connected_client():
-        var scale_x: float = screen_size.x / maxf(1.0, host_world_w)
-        var scale_y: float = screen_size.y / maxf(1.0, host_world_h)
-        var from_view := Vector2(from_world.x * scale_x, from_world.y * scale_y)
-        var desired_view := Vector2(desired_world.x * scale_x, desired_world.y * scale_y)
-        var resolved_view := _resolve_turret_collision(from_view, desired_view, padding)
-        return Vector2(resolved_view.x / maxf(0.0001, scale_x), resolved_view.y / maxf(0.0001, scale_y))
-    return _resolve_turret_collision(from_world, desired_world, padding)
+func _resolve_prediction_turret_collision(from_world: Vector2, desired_world: Vector2, _padding: float) -> Vector2:
+    # Compatibility helper kept for the prediction call sites and regression tests.
+    # Survivors pass through turret feet/body; zombie pathing still uses _resolve_turret_collision.
+    return desired_world
 
 func _predict_local_player(delta: float) -> void:
     if not pred_ready or game_over or screen_mode != "game":
@@ -2542,7 +2549,7 @@ func _host_resolve_weapon_replacement(id: int, slot: int) -> void:
     var drop: Dictionary = airdrops[drop_index]
     var player_pos := Vector2(float(p.get("x", 0.0)), float(p.get("y", 0.0)))
     var drop_pos := Vector2(float(drop.get("x", 0.0)), float(drop.get("y", 0.0)))
-    if player_pos.distance_to(drop_pos) > 72.0:
+    if player_pos.distance_to(drop_pos) > 96.0:
         _host_cancel_weapon_replacement(id)
         return
     var weapon_id := clampi(int(drop.get("weapon_id", WEAPON_SMG)), WEAPON_SMG, WEAPON_ROCKET)
@@ -2788,12 +2795,12 @@ func request_build_wall(x_ratio: float, y_ratio: float) -> void:
         _host_build_wall(sender_id, x_ratio, y_ratio)
 
 @rpc("any_peer", "call_remote", "reliable")
-func request_build_turret(x_ratio: float, y_ratio: float) -> void:
+func request_build_turret(x_ratio: float, y_ratio: float, face_x: float = 1.0) -> void:
     if not is_host:
         return
     var sender_id := multiplayer.get_remote_sender_id()
     if players.has(sender_id):
-        _host_build_turret(sender_id, x_ratio, y_ratio)
+        _host_build_turret(sender_id, x_ratio, y_ratio, face_x)
 
 func _host_heal(id: int) -> void:
     if game_over or not players.has(id):
@@ -3029,7 +3036,7 @@ func _turret_placement_is_valid(id: int, turret_pos: Vector2) -> bool:
             return false
     return true
 
-func _host_build_turret(id: int, x_ratio: float, y_ratio: float) -> void:
+func _host_build_turret(id: int, x_ratio: float, y_ratio: float, requested_face_x: float = 0.0) -> void:
     if game_over or not players.has(id):
         return
     var now := Time.get_ticks_msec()
@@ -3052,7 +3059,12 @@ func _host_build_turret(id: int, x_ratio: float, y_ratio: float) -> void:
     players[id] = p
     build_cooldowns[id] = now
     var turret_id := _next_turret_id()
-    var turret_face_x := -1.0 if float(p.get("face_x", 1.0)) < 0.0 else 1.0
+    # Facing is an explicit deployment choice made with AIM LEFT / AIM RIGHT in the
+    # placement preview; do not infer it from turret position (which made it feel stuck right).
+    var requested_face: float = requested_face_x
+    if absf(requested_face) < 0.1:
+        requested_face = float(p.get("face_x", 1.0))
+    var turret_face_x: float = -1.0 if requested_face < 0.0 else 1.0
     turrets.append({"id": turret_id, "x": turret_pos.x, "y": turret_pos.y, "hp": TURRET_MAX_HP, "max_hp": TURRET_MAX_HP, "angle": 0.0, "face_x": turret_face_x, "fire_timer": 0.25, "flash_timer": 0.0, "owner_id": id})
     _emit_sfx("wall_build")
     ui_status = "AUTO TURRET DEPLOYED • RANGE 270 • ZOMBIES CAN DESTROY IT"
@@ -3075,8 +3087,10 @@ func _set_turret_preview_from_pointer(pointer_pos: Vector2) -> void:
         clampf(desired.x, 35.0, maxf(36.0, screen_size.x - 35.0)),
         clampf(desired.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
     )
+    # Facing is selected explicitly with the preview's AIM LEFT / AIM RIGHT controls.
+    # Moving the placement point must never flip the selected sector unexpectedly.
 
-func _begin_turret_placement(touch_id: int = -1) -> void:
+func _begin_turret_placement(_touch_id: int = -1) -> void:
     var p: Dictionary = players.get(local_player_id, {})
     if p.is_empty() or int(p.get("turret_kits", 0)) <= 0:
         ui_status = "NO TURRET KIT — collect the marked airdrop"
@@ -3092,15 +3106,16 @@ func _begin_turret_placement(touch_id: int = -1) -> void:
     build_requested = false
     turret_requested = false
     turret_place_active = true
-    turret_place_touch_id = touch_id
+    # The TUR button only enters placement mode. Do not let lifting that same finger
+    # instantly deploy a turret at the default spot; wait for a world-position tap/drag.
+    turret_place_touch_id = -1
     var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
-    var face: float = -1.0 if float(p.get("face_x", local_face)) < 0.0 else 1.0
-    turret_preview_face_x = face
+    turret_preview_face_x = -1.0 if float(p.get("face_x", local_face)) < 0.0 else 1.0
     turret_preview_position = Vector2(
-        clampf(player_pos.x + face * 88.0, 35.0, maxf(36.0, screen_size.x - 35.0)),
+        clampf(player_pos.x + turret_preview_face_x * 88.0, 35.0, maxf(36.0, screen_size.x - 35.0)),
         clampf(player_pos.y + 6.0, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
     )
-    ui_status = "HOLD & DRAG TURRET • GREEN CIRCLE VALID • RELEASE TO DEPLOY"
+    ui_status = "TUR READY • CHOOSE AIM LEFT/RIGHT • TAP/DRAG A SPOT"
 
 func _draw_turret_placement_preview() -> void:
     var valid: bool = _turret_placement_is_valid(local_player_id, turret_preview_position)
@@ -3121,10 +3136,28 @@ func _draw_turret_placement_preview() -> void:
     draw_line(turret_preview_position, turret_preview_position + Vector2(cos(base_angle + TURRET_ARC_HALF_ANGLE), sin(base_angle + TURRET_ARC_HALF_ANGLE)) * radius, line_color, 1.1, true)
     draw_arc(turret_preview_position, 28.0, 0.0, TAU, 32, Color(line_color.r, line_color.g, line_color.b, 0.55), 1.0, true)
     _draw_turret_entity({"id": -1, "x": turret_preview_position.x, "y": turret_preview_position.y, "hp": TURRET_MAX_HP, "max_hp": TURRET_MAX_HP, "angle": 0.0, "face_x": turret_preview_face_x, "flash_timer": 0.0}, true, valid)
-    var facing_label := "RIGHT" if turret_preview_face_x >= 0.0 else "LEFT"
-    var note := "180 DEG FRONT ARC • %s • RELEASE" % facing_label if valid else "BLOCKED / OUT OF RANGE"
+    var facing_label := "LEFT" if turret_preview_face_x < 0.0 else "RIGHT"
+    var note := "180 DEG FRONT ARC • FACING %s" % facing_label if valid else "BLOCKED / OUT OF RANGE"
     draw_rect(Rect2(turret_preview_position.x - 112.0, turret_preview_position.y - 70.0, 224.0, 17.0), Color(0.008, 0.012, 0.014, 0.82))
     draw_string(ui_font, Vector2(turret_preview_position.x - 108.0, turret_preview_position.y - 58.0), note, HORIZONTAL_ALIGNMENT_CENTER, 216.0, 9, line_color)
+    # Use one shared geometry helper for draw + hit testing. This prevents first-tap
+    # misses before the first _draw pass and keeps Android touch rectangles pixel-identical.
+    var aim_rects: Dictionary = _turret_facing_button_rects()
+    var left_rect: Rect2 = aim_rects["turret_face_left"]
+    var right_rect: Rect2 = aim_rects["turret_face_right"]
+    _draw_ui_button("turret_face_left", left_rect, "< AIM LEFT", "180 DEG FRONT", Color("#92d578") if turret_preview_face_x < 0.0 else Color("#67766c"), turret_preview_face_x < 0.0)
+    _draw_ui_button("turret_face_right", right_rect, "AIM RIGHT >", "180 DEG FRONT", Color("#92d578") if turret_preview_face_x >= 0.0 else Color("#67766c"), turret_preview_face_x >= 0.0)
+
+func _turret_facing_button_rects() -> Dictionary:
+    var aim_button_w: float = minf(140.0, maxf(96.0, (screen_size.x - 42.0) * 0.5))
+    var aim_button_gap: float = 8.0
+    var aim_controls_w: float = aim_button_w * 2.0 + aim_button_gap
+    var aim_controls_x: float = (screen_size.x - aim_controls_w) * 0.5
+    var aim_controls_y: float = maxf(101.0, _arena_top() * 0.28)
+    return {
+        "turret_face_left": Rect2(aim_controls_x, aim_controls_y, aim_button_w, 36.0),
+        "turret_face_right": Rect2(aim_controls_x + aim_button_w + aim_button_gap, aim_controls_y, aim_button_w, 36.0)
+    }
 
 func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid: bool = true) -> void:
     var pos := Vector2(float(turret.get("x", 0.0)), float(turret.get("y", 0.0)))
@@ -3141,7 +3174,21 @@ func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid:
         # the upper weapon rotates around its yaw ring, avoiding the stiff box-drawn fallback.
         var base_size := Vector2(72.0, 35.1)
         draw_texture_rect(turret_base_texture, Rect2(pos + Vector2(-base_size.x * 0.5, -4.4), base_size), false, tint)
-        var pivot := pos + Vector2(0.0, -24.0)
+        # Visible central mast closes the gap between the tripod crown and rotating head.
+        # Layer it over the base but behind the head so the turret reads as one assembly.
+        # Keep the center coupler short: the PNG base already contains the vertical strut.
+        # The rotating head ring overlaps the foot assembly instead of floating 20+ px above it.
+        var mast_top := pos + Vector2(0.0, -5.0)
+        var mast_bottom := pos + Vector2(0.0, 3.0)
+        draw_line(mast_top, mast_bottom, Color("#151c1b", alpha), 13.0, true)
+        draw_line(mast_top + Vector2(0.0, 1.0), mast_bottom, Color("#5a6053", alpha), 8.0, true)
+        draw_line(mast_top + Vector2(-3.0, 1.0), mast_bottom + Vector2(-3.0, -1.0), Color("#a17a4c", alpha * 0.9), 1.6, true)
+        draw_rect(Rect2(pos.x - 12.0, pos.y - 3.8, 24.0, 5.5), Color("#202725", alpha))
+        draw_rect(Rect2(pos.x - 10.0, pos.y - 2.8, 20.0, 3.2), Color("#777969", alpha))
+        draw_arc(pos + Vector2(0.0, -1.2), 11.5, 0.0, TAU, 20, Color("#b2a17c", alpha), 1.5, true)
+        draw_circle(pos + Vector2(-7.0, -1.2), 1.4, Color("#d5b47b", alpha))
+        draw_circle(pos + Vector2(7.0, -1.2), 1.4, Color("#d5b47b", alpha))
+        var pivot := pos + Vector2(0.0, -1.2)
         var face_x := -1.0 if float(turret.get("face_x", 1.0)) < 0.0 else 1.0
         var angle_offset: float = clampf(float(turret.get("angle", 0.0)), -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
         var base_angle: float = 0.0 if face_x >= 0.0 else PI
@@ -3153,12 +3200,12 @@ func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid:
         var kick := firing_flash * 2.0
         draw_set_transform(pivot, draw_angle, Vector2(flip_x, 1.0))
         # The yaw ring sits ~39% from the left and close to the bottom edge of the source PNG.
-        var head_rect := Rect2(Vector2(-head_size.x * 0.39 - kick, -head_size.y * 0.94), head_size)
+        var head_rect := Rect2(Vector2(-head_size.x * 0.39 - kick, -head_size.y * 0.84), head_size)
         draw_texture_rect(turret_head_texture, head_rect, false, tint)
         draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
         if firing_flash > 0.01:
             var shot_dir := Vector2(cos(raw_angle), sin(raw_angle))
-            var muzzle := pivot + shot_dir * (head_size.x * 0.63 - kick) + Vector2(-shot_dir.y, shot_dir.x) * (-head_size.y * 0.33)
+            var muzzle := _turret_muzzle_position(pos, face_x, angle_offset)
             draw_line(muzzle - shot_dir * 4.0, muzzle + shot_dir * (5.0 + 7.0 * firing_flash), Color(1.0, 0.53, 0.15, alpha * firing_flash), 2.8 * firing_flash, true)
             draw_circle(muzzle + shot_dir * 2.0, 2.8 * firing_flash, Color(1.0, 0.82, 0.40, alpha * firing_flash))
             draw_circle(muzzle + shot_dir * 4.0, 1.5 * firing_flash, Color(1.0, 0.96, 0.70, alpha * firing_flash))
@@ -3176,7 +3223,7 @@ func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid:
             draw_line(pos + knee, pos + foot, edge, 3.0, true)
             draw_circle(pos + knee, 3.2, bronze)
             draw_rect(Rect2(pos + foot - Vector2(5.0, 1.5), Vector2(10.0, 3.0)), dark)
-        var pivot_fallback := pos + Vector2(0.0, -24.0)
+        var pivot_fallback := pos + Vector2(0.0, -1.2)
         var fallback_face_x := -1.0 if float(turret.get("face_x", 1.0)) < 0.0 else 1.0
         var angle_fallback: float = (PI if fallback_face_x < 0.0 else 0.0) + clampf(float(turret.get("angle", 0.0)), -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
         draw_set_transform(pivot_fallback, angle_fallback, Vector2.ONE)
@@ -3195,6 +3242,17 @@ func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid:
             var smoke_offset: float = sin(animation_clock * 7.0 + float(int(turret.get("id", 0)))) * 2.0
             draw_circle(pos + Vector2(-7.0, -38.0 + smoke_offset), 2.4, Color(0.16, 0.17, 0.15, 0.50))
             draw_circle(pos + Vector2(1.0, -42.0 - smoke_offset), 3.0, Color(0.20, 0.19, 0.17, 0.34))
+
+func _turret_muzzle_position(turret_pos: Vector2, face_x: float, angle_offset: float) -> Vector2:
+    var face: float = -1.0 if face_x < 0.0 else 1.0
+    var relative_angle: float = clampf(angle_offset, -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
+    var global_angle: float = (PI if face < 0.0 else 0.0) + relative_angle
+    var pivot := turret_pos + Vector2(0.0, -1.2)
+    var muzzle_axis := Vector2(cos(global_angle), sin(global_angle))
+    # The PNG's barrel center sits a few pixels above the yaw-ring pivot. The Y offset
+    # follows the relative head rotation; the long axis follows the world facing.
+    var barrel_center_offset := Vector2(sin(relative_angle), -cos(relative_angle)) * 8.3
+    return pivot + muzzle_axis * 43.5 + barrel_center_offset
 
 func _update_turrets(delta: float) -> void:
     for turret_index in range(turrets.size() - 1, -1, -1):
@@ -3219,7 +3277,7 @@ func _update_turrets(delta: float) -> void:
                 target_index = zombie_index
         var desired_offset: float = sin(world_time * 0.63 + float(int(turret.get("id", 0)))) * 0.06
         var target_pos := turret_pos + Vector2(face_x * TURRET_RANGE, 0.0)
-        var pivot := turret_pos + Vector2(0.0, -24.0)
+        var pivot := turret_pos + Vector2(0.0, -1.2)
         if target_index >= 0:
             target_pos = Vector2(float(zombies[target_index].get("x", 0.0)), float(zombies[target_index].get("y", 0.0)) - 11.0)
             var target_vector := target_pos - pivot
@@ -3233,9 +3291,10 @@ func _update_turrets(delta: float) -> void:
             target["hp"] = float(target.get("hp", 1.0)) - TURRET_DAMAGE
             target["hit_timer"] = 0.10
             zombies[target_index] = target
-            var global_angle := base_angle + current_offset
-            var muzzle := pivot + Vector2(cos(global_angle), sin(global_angle)) * 37.0
-            _add_combat_effect(14, muzzle, target_pos, 0.12)
+            var muzzle := _turret_muzzle_position(turret_pos, face_x, current_offset)
+            # Effect 13 has a bright moving projectile head and a faint growing tracer,
+            # making the shot visibly travel out of the actual barrel instead of flashing at the pivot.
+            _add_combat_effect(13, muzzle, target_pos, 0.17)
             turret["fire_timer"] = TURRET_FIRE_INTERVAL
             turret["flash_timer"] = 0.075
             _emit_sfx("turret_fire")
@@ -4162,7 +4221,7 @@ func _draw_home() -> void:
     draw_rect(Rect2(signal_rect.position, Vector2(3, signal_rect.size.y)), Color("#9e4146"))
     draw_circle(Vector2(signal_rect.position.x + 17, signal_rect.position.y + 21), 4.0, Color("#dc685b"))
     draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "LOCAL SIGNAL ONLY  /  UDP %d" % PORT, HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
-    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.23  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
+    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.30  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
 
 func _draw_help() -> void:
     _draw_apocalypse_backdrop(true)
@@ -5013,7 +5072,7 @@ func _draw_game_hud() -> void:
     var wall_label := "DRAG" if wall_place_active else "WALL %d" % wall_kits
     _draw_action_button("game_grenade", grenade_pos, 29.0 * control_scale, grenade_label, Color("#d0a14b") if grenade_aim_active else Color("#8b7850"))
     _draw_action_button("game_build", wall_pos, 29.0 * control_scale, wall_label, Color("#8bb775") if wall_place_active else Color("#69756b"))
-    var turret_label := "DRAG" if turret_place_active else "TUR %d" % turret_kits
+    var turret_label := "PLACE" if turret_place_active else "TUR %d" % turret_kits
     _draw_action_button("game_turret", turret_pos, 27.0 * control_scale, turret_label, Color("#d0ac62") if turret_place_active else Color("#66745d"))
     _draw_weapon_slots(local_p, control_scale)
     _draw_ui_button("game_pause", Rect2(w - 65.0, 72.0, 49.0, 41.0), "Ⅱ", "", Color("#c19a68"), false)
@@ -5141,18 +5200,23 @@ func _draw_action_button(id: String, pos: Vector2, radius: float, label: String,
                 draw_rect(Rect2(plank_x, pos.y - 12.0, 6.0, 22.0), Color("#c5b58d"))
         draw_string(ui_font, pos + Vector2(-radius + 1.0, radius * 0.67), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 2.0, 8, Color.WHITE)
 
+func _settings_panel_rect() -> Rect2:
+    var panel_w := minf(520.0, screen_size.x - 40.0)
+    var panel_h := minf(330.0, screen_size.y - 40.0)
+    return Rect2((screen_size.x - panel_w) * 0.5, (screen_size.y - panel_h) * 0.5, panel_w, panel_h)
+
+func _settings_aim_toggle_rect() -> Rect2:
+    var panel := _settings_panel_rect()
+    return Rect2(panel.position.x + 26.0, panel.position.y + 120.0, panel.size.x - 52.0, 88.0)
+
 func _draw_settings() -> void:
     _draw_apocalypse_backdrop(true)
-    var w := screen_size.x
-    var h := screen_size.y
-    var panel_w := minf(520.0, w - 40.0)
-    var panel_h := minf(330.0, h - 40.0)
-    var panel := Rect2((w - panel_w) * 0.5, (h - panel_h) * 0.5, panel_w, panel_h)
+    var panel := _settings_panel_rect()
     _draw_panel(panel, "USER SETTINGS", "LOCAL CONTROL PREFERENCES")
     draw_string(ui_font, Vector2(panel.position.x + 26.0, panel.position.y + 83.0), "AIM ASSIST DIRECTION MARKER", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 52.0, 15, Color("#f0ead8"))
     draw_string(ui_font, Vector2(panel.position.x + 26.0, panel.position.y + 105.0), "Show a subtle lane and target cue during survival.", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 52.0, 11, Color("#b4c7b6"))
     # Large, explicit switch hit target (whole row + track) so Android taps reliably register.
-    var toggle_rect := Rect2(panel.position.x + 26.0, panel.position.y + 120.0, panel.size.x - 52.0, 88.0)
+    var toggle_rect := _settings_aim_toggle_rect()
     button_rects["settings_toggle_aim"] = toggle_rect
     draw_rect(Rect2(toggle_rect.position + Vector2(3.0, 4.0), toggle_rect.size), Color(0.0, 0.0, 0.0, 0.38))
     draw_rect(toggle_rect, Color("#182225"))
@@ -5172,13 +5236,28 @@ func _weapon_replace_prompt_visible() -> bool:
         return false
     return bool(players[local_player_id].get("weapon_replace_pending", false))
 
+func _weapon_replace_hitboxes() -> Dictionary:
+    # Shared geometry is also called from _touch_start. This prevents the first tap
+    # from being ignored if the pending-loot flag arrives before the next draw pass.
+    var panel_w: float = minf(468.0, screen_size.x - 26.0)
+    var panel_h: float = 202.0
+    var panel := Rect2((screen_size.x - panel_w) * 0.5, (screen_size.y - panel_h) * 0.5, panel_w, panel_h)
+    var gap: float = 9.0
+    var card_w: float = (panel.size.x - 32.0 - gap) * 0.5
+    var card_y: float = panel.position.y + 56.0
+    return {
+        "weapon_replace_1": Rect2(panel.position.x + 12.0, card_y, card_w, 68.0),
+        "weapon_replace_2": Rect2(panel.position.x + 20.0 + card_w, card_y, card_w, 68.0),
+        "weapon_replace_cancel": Rect2(panel.position.x + 12.0, panel.position.y + panel.size.y - 34.0, panel.size.x - 24.0, 27.0)
+    }
+
 func _draw_weapon_replace_prompt() -> void:
     if not _weapon_replace_prompt_visible():
         return
     var local_p: Dictionary = players[local_player_id]
     var weapon_id := clampi(int(local_p.get("pending_weapon_id", WEAPON_SMG)), WEAPON_SMG, WEAPON_ROCKET)
-    var panel_w := minf(468.0, screen_size.x - 26.0)
-    var panel_h := 184.0
+    var panel_w: float = minf(468.0, screen_size.x - 26.0)
+    var panel_h: float = 202.0
     var panel := Rect2((screen_size.x - panel_w) * 0.5, (screen_size.y - panel_h) * 0.5, panel_w, panel_h)
     draw_rect(Rect2(Vector2.ZERO, screen_size), Color(0.005, 0.008, 0.012, 0.54))
     draw_rect(panel, Color("#101819", 0.98))
@@ -5186,14 +5265,15 @@ func _draw_weapon_replace_prompt() -> void:
     draw_rect(panel, Color("#728077"), false, 1.5)
     draw_string(ui_font, panel.position + Vector2(16.0, 25.0), "AIRDROP WEAPON FOUND", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 32.0, 15, Color("#f1eadf"))
     draw_string(ui_font, panel.position + Vector2(16.0, 43.0), "%s — choose a slot to replace" % _weapon_name(weapon_id), HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 32.0, 10, Color("#d8bb7c"))
-    var gap := 9.0
-    var card_w := (panel.size.x - 32.0 - gap) * 0.5
-    var card_y := panel.position.y + 54.0
+    var hitboxes := _weapon_replace_hitboxes()
+    var first_rect: Rect2 = hitboxes["weapon_replace_1"]
+    var second_rect: Rect2 = hitboxes["weapon_replace_2"]
+    var cancel_rect: Rect2 = hitboxes["weapon_replace_cancel"]
     var first_slot := int(local_p.get("slot1_type", -1))
     var second_slot := int(local_p.get("slot2_type", -1))
-    _draw_ui_button("weapon_replace_1", Rect2(panel.position.x + 12.0, card_y, card_w, 55.0), "REPLACE SLOT 1", "%s  %d/%d" % [_weapon_name(first_slot), _slot_mag(local_p, 1), _slot_reserve(local_p, 1)], Color("#c18a55"), false)
-    _draw_ui_button("weapon_replace_2", Rect2(panel.position.x + 20.0 + card_w, card_y, card_w, 55.0), "REPLACE SLOT 2", "%s  %d/%d" % [_weapon_name(second_slot), _slot_mag(local_p, 2), _slot_reserve(local_p, 2)], Color("#c18a55"), false)
-    _draw_ui_button("weapon_replace_cancel", Rect2(panel.position.x + 12.0, panel.position.y + panel.size.y - 35.0, panel.size.x - 24.0, 25.0), "KEEP CURRENT WEAPONS  /  CANCEL", "", Color("#707c76"), false)
+    _draw_ui_button("weapon_replace_1", first_rect, "REPLACE SLOT 1", "%s  %d/%d" % [_weapon_name(first_slot), _slot_mag(local_p, 1), _slot_reserve(local_p, 1)], Color("#c18a55"), false)
+    _draw_ui_button("weapon_replace_2", second_rect, "REPLACE SLOT 2", "%s  %d/%d" % [_weapon_name(second_slot), _slot_mag(local_p, 2), _slot_reserve(local_p, 2)], Color("#c18a55"), false)
+    _draw_ui_button("weapon_replace_cancel", cancel_rect, "KEEP CURRENT WEAPONS  /  CANCEL", "", Color("#707c76"), false)
 
 func _draw_title_text(pos: Vector2, label: String, size: int, color: Color) -> void:
     draw_string(ui_font, pos + Vector2(3, 4), label, HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(0.0, 0.0, 0.0, 0.75))
@@ -5662,9 +5742,18 @@ func _handle_ui_button(id: String) -> void:
                 _begin_wall_placement()
         "game_turret":
             if turret_place_active:
+                # In placement mode a tap on TUR confirms the current preview position.
                 turret_requested = true
             else:
                 _begin_turret_placement()
+        "turret_face_left":
+            if turret_place_active:
+                turret_preview_face_x = -1.0
+                ui_status = "TURRET AIM: LEFT • TAP A SPOT TO PLACE"
+        "turret_face_right":
+            if turret_place_active:
+                turret_preview_face_x = 1.0
+                ui_status = "TURRET AIM: RIGHT • TAP A SPOT TO PLACE"
         "pause_resume":
             screen_mode = "game"
         "pause_save":
@@ -5722,43 +5811,119 @@ func _handle_press(pos: Vector2, touch_id: int = -1) -> bool:
 
 func _input(event: InputEvent) -> void:
     if event is InputEventScreenTouch:
+        var local_pos := _input_canvas_position(event.position)
         if event.pressed:
-            _touch_start(event.index, event.position)
+            _touch_start(event.index, local_pos)
         else:
             _touch_end(event.index)
     elif event is InputEventScreenDrag:
+        var local_pos := _input_canvas_position(event.position)
         if joystick_active and event.index == joystick_touch_id:
-            joystick_vector = ((event.position - joystick_origin) / _joystick_radius()).limit_length(1.0)
+            joystick_vector = ((local_pos - joystick_origin) / _joystick_radius()).limit_length(1.0)
         elif event.index == grenade_aim_touch_id and grenade_aim_active:
-            _update_grenade_target_from_pointer(event.position)
+            _update_grenade_target_from_pointer(local_pos)
         elif event.index == wall_place_touch_id and wall_place_active:
-            _set_wall_preview_from_pointer(event.position)
+            _set_wall_preview_from_pointer(local_pos)
         elif event.index == turret_place_touch_id and turret_place_active:
-            _set_turret_preview_from_pointer(event.position)
+            _set_turret_preview_from_pointer(local_pos)
+        elif turret_place_active and turret_place_touch_id < 0 and _pointer_in_arena(local_pos):
+            turret_place_touch_id = event.index
+            _set_turret_preview_from_pointer(local_pos)
     elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+        var local_pos := _input_canvas_position(event.position)
         if event.pressed:
-            _touch_start(-2, event.position)
+            _touch_start(-2, local_pos)
         else:
             _touch_end(-2)
     elif event is InputEventMouseMotion:
+        var local_pos := _input_canvas_position(event.position)
         if joystick_active and joystick_touch_id == -2:
-            joystick_vector = ((event.position - joystick_origin) / _joystick_radius()).limit_length(1.0)
+            joystick_vector = ((local_pos - joystick_origin) / _joystick_radius()).limit_length(1.0)
         elif grenade_aim_touch_id == -2 and grenade_aim_active:
-            _update_grenade_target_from_pointer(event.position)
+            _update_grenade_target_from_pointer(local_pos)
         elif wall_place_touch_id == -2 and wall_place_active:
-            _set_wall_preview_from_pointer(event.position)
+            _set_wall_preview_from_pointer(local_pos)
         elif turret_place_touch_id == -2 and turret_place_active:
-            _set_turret_preview_from_pointer(event.position)
+            _set_turret_preview_from_pointer(local_pos)
+        elif turret_place_active and turret_place_touch_id < 0 and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and _pointer_in_arena(local_pos):
+            turret_place_touch_id = -2
+            _set_turret_preview_from_pointer(local_pos)
+
+func _active_ui_hit_id(pos: Vector2) -> String:
+    # Return the logical control under a point, rebuilding hitboxes on demand. Controls
+    # added by a just-opened panel/placement mode must work on the very first touch.
+    if screen_mode == "settings" and _settings_aim_toggle_rect().has_point(pos):
+        return "settings_toggle_aim"
+    if screen_mode == "game" and turret_place_active:
+        var facing_rects: Dictionary = _turret_facing_button_rects()
+        for facing_id in ["turret_face_left", "turret_face_right"]:
+            var facing_rect: Rect2 = facing_rects[facing_id]
+            if facing_rect.has_point(pos):
+                return facing_id
+    if _weapon_replace_prompt_visible():
+        var prompt_hitboxes := _weapon_replace_hitboxes()
+        for prompt_id in ["weapon_replace_1", "weapon_replace_2", "weapon_replace_cancel"]:
+            var prompt_rect: Rect2 = prompt_hitboxes[prompt_id]
+            if prompt_rect.has_point(pos):
+                return prompt_id
+    for id_variant in button_rects.keys():
+        var id := str(id_variant)
+        var rect: Rect2 = button_rects[id_variant]
+        if rect.has_point(pos):
+            return id
+    return ""
+
+func _input_canvas_position(viewport_position: Vector2) -> Vector2:
+    # Normally input events are viewport-space, so inverse canvas transform is correct.
+    # Some Android stretch/device paths report physical-window coordinates; for actual UI
+    # hit targets prefer the raw point only when it matches that control and transformed
+    # coordinates do not. This prevents dead AIM switches and missed first modal taps.
+    var local_pos: Vector2 = get_global_transform_with_canvas().affine_inverse() * viewport_position
+    var local_hit: String = _active_ui_hit_id(local_pos)
+    var viewport_hit: String = _active_ui_hit_id(viewport_position)
+    if not viewport_hit.is_empty() and viewport_hit != local_hit:
+        # A raw hit means the user's finger is sitting on a visible drawn control.
+        # Prefer that hit in the ambiguous stretch case; otherwise a nearest local-space
+        # transform can redirect it to a different invisible control.
+        return viewport_position
+    return local_pos
+
+func _pointer_in_arena(pos: Vector2) -> bool:
+    return pos.y >= _arena_top() - 5.0 and pos.y <= _arena_bottom() + 8.0
 
 func _touch_start(index: int, pos: Vector2) -> void:
     if screen_mode == "settings":
-        var aim_toggle_hitbox: Rect2 = button_rects.get("settings_toggle_aim", Rect2())
+        var aim_toggle_hitbox := _settings_aim_toggle_rect()
+        button_rects["settings_toggle_aim"] = aim_toggle_hitbox
         if aim_toggle_hitbox.has_point(pos):
             _handle_ui_button("settings_toggle_aim")
             return
     if _weapon_replace_prompt_visible():
+        var prompt_hitboxes := _weapon_replace_hitboxes()
+        for prompt_id in prompt_hitboxes.keys():
+            button_rects[str(prompt_id)] = prompt_hitboxes[prompt_id]
         _handle_press(pos, index)
         return
+    if screen_mode == "game" and turret_place_active and turret_place_touch_id < 0:
+        # Register the direction controls synchronously; _draw may not have run yet when
+        # the user taps immediately after pressing TUR. The same rects are used by drawing
+        # and by _input_canvas_position() for Android viewport/window coordinate fallback.
+        var facing_rects: Dictionary = _turret_facing_button_rects()
+        for facing_id in ["turret_face_left", "turret_face_right"]:
+            button_rects[facing_id] = facing_rects[facing_id]
+        var left_aim_rect: Rect2 = facing_rects["turret_face_left"]
+        var right_aim_rect: Rect2 = facing_rects["turret_face_right"]
+        if left_aim_rect.has_point(pos):
+            _handle_ui_button("turret_face_left")
+            return
+        if right_aim_rect.has_point(pos):
+            _handle_ui_button("turret_face_right")
+            return
+        if _pointer_in_arena(pos):
+            # Once placement is active, world taps are reserved for positioning the turret.
+            turret_place_touch_id = index
+            _set_turret_preview_from_pointer(pos)
+            return
     if screen_mode == "game":
         var grenade_rect: Rect2 = button_rects.get("game_grenade", Rect2())
         if grenade_rect.has_point(pos):

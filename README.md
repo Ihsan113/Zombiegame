@@ -1,9 +1,23 @@
-# Pixel Zombie LAN v0.4.27
+# Pixel Zombie LAN v0.4.30
 
-## v0.4.27 — codec collision result typing hotfix
+## v0.4.30 — first-tap turret aim controls and input regression fix
+- Added shared `_turret_facing_button_rects()` geometry for drawing, touch hit-testing, and Android coordinate fallback. First tap on AIM LEFT/RIGHT now registers before the first draw pass, and selection remains independent of the chosen ground point.
+- Re-aligned the turret yaw joint to the base bearing and moved the simulated muzzle origin to match the visible barrel bore.
+- Added active-control hit testing that tolerates Android viewport/window coordinate differences for AIM settings and first-tap weapon replacement.
+- The in-game placement workflow reserves arena touches for choosing a turret position while placement is active; players continue to pass through turret scenery.
+- Added regressions for first-tap AIM LEFT hit testing, both facing choices, turret pivot/muzzle alignment, transformed AIM taps, and the first replacement-slot tap.
+- Android version code/name: 42 / 0.4.30. Player/turret/drop snapshot record sizes and save schema unchanged.
 
-- The two turret collision test results now explicitly use `Vector2` annotations to satisfy Godot 4.7.2 GDScript parsing when invoking a method through a dynamically typed node.
-- Android version code/name: 39 / 0.4.27. Gameplay behavior and network/save layouts are unchanged.
+# Pixel Zombie LAN v0.4.28
+
+## v0.4.28 — two-step turret placement, reliable touch input, and muzzle alignment
+
+- Turret deployment is now a two-step interaction: press TUR to enter placement mode, then tap/drag a point in the world and release to place. Positioning to the left or right of the survivor selects the corresponding 180° firing hemisphere.
+- Touch, drag, and mouse positions are transformed from viewport space into the game canvas before hit-testing. User Settings rebuilds the AIM toggle hitbox from its layout, while weapon-replacement hitboxes are generated from a shared layout before the first touch is processed.
+- Lock survivor movement while an airdrop weapon-slot choice is open and allow 96 px tolerance for host validation, avoiding a stale first replace click when position drift occurs.
+- Survivors pass through turret feet/body. The obstacle resolver remains in use for zombie movement so zombies can still interact with/damage turrets.
+- Added a central articulated mast/collar between turret head and support legs. Muzzle flash and the brighter moving tracer share a single barrel-tip calculation for both left- and right-facing heads.
+- Added regression coverage for left/right turret placement, first-tap settings/weapon modal input, survivor pass-through, and muzzle positions. Android version code/name: 40 / 0.4.28. Network record sizes and save schema remain unchanged.
 - Runtime codec test and APK export must pass GitHub Actions before treating the update as fully verified.
 
 ## Previous release: v0.4.26 — front 180° turret sector, solid footprint, dependable AIM toggle

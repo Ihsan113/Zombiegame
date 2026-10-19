@@ -167,16 +167,23 @@ func _initialize() -> void:
     check(float(current_orientation.face_x) < 0.0 and near(float(current_orientation.angle), -0.4, 0.001), "current turret save preserves relative angle and facing")
     var prior_screen_mode: String = str(game.screen_mode)
     game.screen_mode = "settings"
-    game.button_rects.clear()
-    game.button_rects["settings_toggle_aim"] = Rect2(200.0, 120.0, 468.0, 88.0)
+    game.button_rects.clear() # deliberately stale/empty: first setting tap must still work.
+    var aim_toggle_rect: Rect2 = game._settings_aim_toggle_rect()
     var aim_before_touch: bool = bool(game.aim_marker_enabled)
-    game._touch_start(9, Vector2(201.0, 121.0))
-    check(bool(game.aim_marker_enabled) != aim_before_touch, "AIM Settings toggle responds to touch at switch-row edge")
+    game._touch_start(9, aim_toggle_rect.position + Vector2(1.0, 1.0))
+    check(bool(game.aim_marker_enabled) != aim_before_touch, "AIM Settings toggle responds to first touch at switch-row edge")
     var aim_after_toggle: bool = bool(game.aim_marker_enabled)
-    game._touch_start(10, Vector2(100.0, 100.0))
+    game._touch_start(10, aim_toggle_rect.position - Vector2(30.0, 25.0))
     check(bool(game.aim_marker_enabled) == aim_after_toggle, "AIM Settings tap outside switch does not toggle")
-    game._touch_start(11, Vector2(400.0, 160.0))
+    game._touch_start(11, aim_toggle_rect.position + aim_toggle_rect.size * 0.5)
     check(bool(game.aim_marker_enabled) == aim_before_touch, "AIM Settings switch track toggles back on tap")
+    # Android builds can report touches in viewport or physical-window space. Validate the
+    # transformed path that _input uses while the menu transform is non-identity.
+    game.position = Vector2(310.0, 115.0)
+    var viewport_aim_point: Vector2 = aim_toggle_rect.position + aim_toggle_rect.size * 0.5
+    var mapped_aim_point: Vector2 = game._input_canvas_position(viewport_aim_point)
+    check(aim_toggle_rect.has_point(mapped_aim_point), "AIM toggle maps transformed viewport touch to the same visible row")
+    game.position = Vector2.ZERO
     game.screen_mode = prior_screen_mode
     game.button_rects.clear()
     # Weapon profiles and reload arithmetic are deterministic and bounded.
@@ -224,6 +231,22 @@ func _initialize() -> void:
     var resolved_pickup: Dictionary = game.players[1]
     check(int(resolved_pickup.slot1_type) == game.WEAPON_SMG and int(resolved_pickup.slot2_type) == game.WEAPON_SNIPER, "host pickup resolver replaces only selected slot and leaves the other weapon untouched")
     check(game.airdrops.is_empty() and not bool(resolved_pickup.weapon_replace_pending), "chosen weapon consumes reserved drop and closes prompt")
+    # Simulate the first touch before the next _draw pass has built button_rects.
+    var previous_replace_screen: String = str(game.screen_mode)
+    game.screen_mode = "game"
+    game.players[1] = {"x": 320.0, "y": 390.0, "hp": 100.0, "active_slot": 1, "slot1_type": game.WEAPON_SMG, "slot1_mag": 10, "slot1_reserve": 40, "slot2_type": game.WEAPON_SHOTGUN, "slot2_mag": 3, "slot2_reserve": 12, "weapon_replace_pending": true, "pending_weapon_drop_id": 76503, "pending_weapon_id": game.WEAPON_SNIPER}
+    game.airdrops.clear()
+    game.airdrops.append({"id": 76503, "x": 320.0, "y": 390.0, "landed": true, "despawn_timer": 12.0, "loot_kind": "weapon", "weapon_id": game.WEAPON_SNIPER, "reserved_by": 1})
+    game.button_rects.clear()
+    var initial_prompt_rects: Dictionary = game._weapon_replace_hitboxes()
+    var first_replace_rect: Rect2 = initial_prompt_rects["weapon_replace_2"]
+    game.position = Vector2(137.0, 19.0)
+    var first_replace_viewport_point: Vector2 = first_replace_rect.position + Vector2(8.0, 8.0)
+    var first_replace_mapped_point: Vector2 = game._input_canvas_position(first_replace_viewport_point)
+    game._touch_start(29, first_replace_mapped_point)
+    game.position = Vector2.ZERO
+    check(int(game.players[1].get("slot2_type", -1)) == game.WEAPON_SNIPER and game.airdrops.is_empty(), "first weapon replacement touch works even before draw registers modal hitboxes")
+    game.screen_mode = previous_replace_screen
     game.players[1]["weapon_replace_pending"] = true
     game.players[1]["pending_weapon_drop_id"] = 76502
     game.players[1]["pending_weapon_id"] = game.WEAPON_ROCKET
@@ -315,6 +338,26 @@ func _initialize() -> void:
         "slot2_type": -1, "slot2_mag": 0, "slot2_reserve": 0, "reload_timer": 0.0
     }
     var turret_spot := Vector2(430.0, 390.0)
+    game._begin_turret_placement(17)
+    check(game.turret_place_active and game.turret_place_touch_id < 0 and not game.turret_requested, "TUR button enters placement mode without instantly deploying on button release")
+    # Simulate a tap before a draw pass has registered the selector hitboxes.
+    var turret_screen_before_tap: String = str(game.screen_mode)
+    game.screen_mode = "game"
+    game.button_rects.clear()
+    var selector_rects: Dictionary = game._turret_facing_button_rects()
+    var first_left_selector_rect: Rect2 = selector_rects["turret_face_left"]
+    game._touch_start(18, first_left_selector_rect.position + first_left_selector_rect.size * 0.5)
+    check(float(game.turret_preview_face_x) < 0.0 and not game.turret_requested, "first AIM LEFT placement tap works before draw registers selector hitboxes")
+    game._set_turret_preview_from_pointer(Vector2(420.0, 390.0))
+    check(float(game.turret_preview_face_x) < 0.0, "explicit AIM LEFT selector stays left even when placement point is on the right")
+    game._handle_ui_button("turret_face_right")
+    game._set_turret_preview_from_pointer(Vector2(240.0, 390.0))
+    check(float(game.turret_preview_face_x) > 0.0, "explicit AIM RIGHT selector stays right even when placement point is on the left")
+    game.screen_mode = turret_screen_before_tap
+    game.button_rects.clear()
+    game.turret_place_active = false
+    game.turret_place_touch_id = -1
+    game.turret_requested = false
     check(game._turret_placement_is_valid(1, turret_spot), "turret spot inside placement ring is valid")
     check(not game._turret_placement_is_valid(1, Vector2(334.0, 390.0)), "turret cannot be placed too close to owner")
     game.build_cooldowns[1] = Time.get_ticks_msec() - 1000
@@ -323,9 +366,14 @@ func _initialize() -> void:
     print("[codec checkpoint] AFTER: _host_build_turret placement test")
     check(game.turrets.size() == 1, "host successfully deploys one turret kit")
     check(int(game.players[1].get("turret_kits", 0)) == 0, "successful turret deploy consumes one kit")
-    if game.turrets.size() == 1:
+    game.players[1]["turret_kits"] = 1
+    game.build_cooldowns[1] = Time.get_ticks_msec() - 1000
+    var left_turret_spot := Vector2(220.0, 390.0)
+    game._host_build_turret(1, left_turret_spot.x / game.screen_size.x, left_turret_spot.y / game.screen_size.y, -1.0)
+    check(game.turrets.size() == 2 and float(game.turrets[1].get("face_x", 1.0)) < 0.0, "host snapshot stores the explicit left-facing choice regardless of placement side")
+    if game.turrets.size() >= 1:
         var test_target_pos := Vector2(452.0, 390.0)
-        var turret_pivot := turret_spot + Vector2(0.0, -24.0)
+        var turret_pivot := turret_spot + Vector2(0.0, -1.2)
         game.turrets[0]["angle"] = (Vector2(test_target_pos.x, test_target_pos.y - 11.0) - turret_pivot).angle()
         game.turrets[0]["fire_timer"] = 0.0
         game.zombies.clear()
@@ -346,16 +394,19 @@ func _initialize() -> void:
         for turn_step in range(36):
             game._update_turrets(0.016)
         check(float(game.zombies[0].get("hp", 100.0)) < 100.0, "left-facing turret can track and fire inside its forward hemisphere")
-        # Collision footprint is enforced by authoritative and predicted movement.
+        # Survivors must pass through turret feet/body; turret collision is retained only for zombie pathing.
         var collision_from := Vector2(turret_spot.x - 50.0, turret_spot.y)
         var collision_desired := Vector2(turret_spot.x - 20.0, turret_spot.y)
-        var collision_result: Vector2 = game._resolve_turret_collision(collision_from, collision_desired, 8.0)
-        var turret_body_rect := Rect2(turret_spot.x - game.TURRET_BODY_HALF_WIDTH, turret_spot.y + game.TURRET_BODY_TOP, game.TURRET_BODY_HALF_WIDTH * 2.0, game.TURRET_BODY_BOTTOM - game.TURRET_BODY_TOP).grow(8.0)
-        check(not turret_body_rect.has_point(collision_result), "survivor collides with turret body instead of passing through")
+        var collision_result: Vector2 = game._resolve_prediction_turret_collision(collision_from, collision_desired, 8.0)
+        check(collision_result.is_equal_approx(collision_desired), "survivor passes through turret body from the left")
         var collision_from_right := Vector2(turret_spot.x + 60.0, turret_spot.y)
         var collision_desired_left := Vector2(turret_spot.x - 10.0, turret_spot.y)
-        var collision_result_right: Vector2 = game._resolve_turret_collision(collision_from_right, collision_desired_left, 8.0)
-        check(not turret_body_rect.has_point(collision_result_right), "turret body blocks survivor approaching from the opposite direction")
+        var collision_result_right: Vector2 = game._resolve_prediction_turret_collision(collision_from_right, collision_desired_left, 8.0)
+        check(collision_result_right.is_equal_approx(collision_desired_left), "survivor passes through turret body from the opposite direction")
+        var muzzle_right: Vector2 = game._turret_muzzle_position(turret_spot, 1.0, 0.0)
+        var muzzle_left: Vector2 = game._turret_muzzle_position(turret_spot, -1.0, 0.0)
+        check(muzzle_right.x > turret_spot.x + 35.0 and muzzle_left.x < turret_spot.x - 35.0, "turret bullet origin follows the real barrel muzzle for both facings")
+        check(absf(muzzle_right.y - (turret_spot.y - 9.5)) < 2.0 and absf(muzzle_left.y - (turret_spot.y - 9.5)) < 2.0, "turret muzzle vertical origin aligns with the barrel bore, not the old floating-head pivot")
         # A zombie closer to a turret than any survivor must attack and be able to destroy it.
         game.players[1]["x"] = 850.0
         game.turrets[0]["x"] = 450.0
