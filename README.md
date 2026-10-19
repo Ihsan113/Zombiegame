@@ -1,15 +1,27 @@
-# Pixel Zombie LAN — v0.4.22
+# Pixel Zombie LAN v0.4.23
+
+This update improves survivor weapon presentation, adds transparent PNG turret assets and turret-fire audio, moves AIM Assist to the pre-game User Settings screen, and adds explicit airdrop weapon replacement choice when both carry slots are occupied. Gameplay networking remains host-authoritative; player snapshot record size remains 30 bytes.
+
+# Pixel Zombie LAN — v0.4.23
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
 
-## v0.4.22 — Destructible auto-turrets, aim toggle and survivor weapon cleanup
+## v0.4.23 — Destructible auto-turrets, aim toggle and survivor weapon cleanup
 
 - Added a deployable auto-turret kit delivered by airdrop. Hold and drag from the TUR control to position it; the green/red circular range preview shows placement/range before release.
 - Turret head tracks nearby zombies smoothly, fires server-authoritative shots, displays health/damage smoke, and can be destroyed by the horde. Maximum four turrets per world.
 - Added local AIM marker ON/OFF control, persisted on the device and placed in the upper HUD gap to avoid the VITALS panel.
 - Fixed duplicate/overhead survivor weapons: clean survivor atlas removes baked-in gun pixels, then the selected loadout weapon and arm/hand overlay is drawn along the torso/hand line; visible muzzle and ray effects share the firing lane.
 - Added turret kit count and turret position/HP/head-angle to the LAN snapshot; all players must use the same protocol version.
-- Android version code/name: 34 / 0.4.22. Snapshot cap remains 1180 bytes.
+- Android version code/name: 34 / 0.4.23. Snapshot cap remains 1180 bytes.
+
+## v0.4.23 — Turret presentation, user aim setting and safe weapon replacement
+- Split the automatic turret into separate transparent PNG base/head layers. The upper head rotates toward zombies, includes a muzzle flash, and uses an original compact turret-fire WAV effect.
+- Removed stretched forearm overlays responsible for the extra diagonal shape near the character; the held weapon remains drawn as a separate loadout sprite.
+- AIM Assist ON/OFF now lives under User Settings in the safehouse and lobby, not on the gameplay HUD. The preference is persisted locally.
+- When a weapon drop arrives while both gun slots are occupied, the pickup prompt asks to replace slot 1, replace slot 2, or cancel. Cancel leaves the crate on the ground; the host validates selection and keeps the prompt state in existing player-flag bits without enlarging the LAN player record.
+- Turret target acquisition uses squared distance to avoid a square-root operation for each zombie candidate. Added codec tests for explicit slot selection and cancellation.
+- Android version code/name: 35 / 0.4.23. Godot headless parsing/runtime test and APK export must still pass in GitHub Actions; this edit environment has no Godot executable.
 
 ## v0.4.20 — Weapon grip, aim guide, tighter barricade rows and supplied ambience
 - Reworked survivor weapon rendering: firearms are scaled/placed around the gameplay muzzle, mirrored for facing, and connected to the character with outlined arms and hands. Recoil flash now lines up with the actual shot origin.
@@ -69,7 +81,7 @@ A landscape Android zombie wave-defense game made with Godot 4. It supports solo
 - Pause: resume, manually save, or leave the session.
 
 ## Supply drops
-Supply crates descend under a parachute and can contain grenades, wall kits, medkits, one of five limited-ammo guns (SMG, shotgun, rifle, sniper or rocket launcher), or ammunition compatible with a gun already owned by the squad. Weapon drops equip the gun and fill its magazine with starting reserve ammo. Ammo drops are matched to a gun already owned by a squad member who still has room for rounds; if nobody can use an ammo cache, the roll becomes a weapon drop instead. A compatible cache fills reserve space first, then uses leftover rounds to top up a missing magazine. Fully stocked players leave the cache on the ground for later. If all weapon slots are occupied, a new gun replaces slot 2. Tap the 0, 1 or 2 weapon tiles to switch; 0 is the infinite sidearm. Holding FIRE while a gun is empty starts a reload when reserve ammo remains, or falls back to the sidearm when no ammo remains. Reload is cancelled when manually switching slots.
+Supply crates descend under a parachute and can contain grenades, wall kits, medkits, one of five limited-ammo guns (SMG, shotgun, rifle, sniper or rocket launcher), or ammunition compatible with a gun already owned by the squad. Weapon drops equip the gun and fill its magazine with starting reserve ammo. Ammo drops are matched to a gun already owned by a squad member who still has room for rounds; if nobody can use an ammo cache, the roll becomes a weapon drop instead. A compatible cache fills reserve space first, then uses leftover rounds to top up a missing magazine. Fully stocked players leave the cache on the ground for later. If both weapon slots are occupied by different guns, the player must choose whether to replace slot 1 or slot 2; Cancel leaves the airdrop available on the ground. Tap the 0, 1 or 2 weapon tiles to switch; 0 is the infinite sidearm. Holding FIRE while a gun is empty starts a reload when reserve ammo remains, or falls back to the sidearm when no ammo remains. Reload is cancelled when manually switching slots.
 
 ## LAN setup
 The host selects **Multiplayer LAN → Create World** and shares the hotspot IPv4 address. Other devices must join the same hotspot, select **Join World**, and enter that address. Wi-Fi hotspot isolation and device performance vary, so test the actual phones together. Client prediction/interpolation reduces perceived input delay and snapshot stepping; it cannot compensate for a poor hotspot or a heavily loaded device.

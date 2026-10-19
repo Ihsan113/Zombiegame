@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.21
+# Pixel Zombie LAN — wave defense prototype v0.4.23
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -86,6 +86,7 @@ const TURRET_ATTACK_RANGE := 46.0
 const TURRET_DAMAGE := 1.35
 const TURRET_FIRE_INTERVAL := 0.20
 const TURRET_TURN_SPEED := 3.8
+const TURRET_FEET: Array[Vector2] = [Vector2(-27.0, 28.0), Vector2(27.0, 28.0), Vector2(0.0, 31.0)]
 const WALL_ATTACK_RANGE := 50.0
 const WALL_LANE_TOLERANCE := 46.0
 const SNAPSHOT_INTERVAL := 0.0166 # 60 compact snapshots/second at most (one UDP datagram each, ~11 KB/s total).
@@ -156,6 +157,8 @@ var background_texture: Texture2D
 var grenade_texture: Texture2D
 var grenade_explosion_texture: Texture2D
 var barricade_texture: Texture2D
+var turret_base_texture: Texture2D
+var turret_head_texture: Texture2D
 var airdrop_crate_texture: Texture2D
 var parachute_texture: Texture2D
 var airdrop_landing_texture: Texture2D
@@ -164,7 +167,7 @@ var boss_attack_textures: Array[Texture2D] = []
 var weapon_icon_textures: Dictionary = {}
 var active_projectiles: Array[Dictionary] = []
 var combat_effects: Array[Dictionary] = []
-# Local-only presentation state. Kept out of snapshots so v0.4.11 LAN packet layout stays unchanged.
+# Aim-assist preference is local-only; the weapon replacement prompt is serialized with spare player-flag bits.
 var player_death_visuals: Dictionary = {}
 var wave_number := 1
 var wave_total := WAVE_ZOMBIE_COUNT
@@ -220,6 +223,7 @@ var turret_preview_position := Vector2(480.0, 350.0)
 var turret_place_touch_id := -1
 var turret_requested := false
 var aim_marker_enabled := true
+var settings_return_mode := "home"
 var client_input_timer := 0.0
 var snapshot_seq := 0
 var effect_seq := 0
@@ -310,6 +314,8 @@ func _ready() -> void:
     barricade_texture = load("res://assets/barricade_detail.png") as Texture2D
     if barricade_texture == null:
         barricade_texture = load("res://assets/barricade_detail.svg") as Texture2D
+    turret_base_texture = load("res://assets/turret_base.png") as Texture2D
+    turret_head_texture = load("res://assets/turret_head.png") as Texture2D
     airdrop_crate_texture = load("res://assets/airdrop_crate_generated.png") as Texture2D
     if airdrop_crate_texture == null:
         airdrop_crate_texture = load("res://assets/airdrop_crate_detail.svg") as Texture2D
@@ -388,7 +394,8 @@ func _setup_sfx() -> void:
         {"id": "pickup", "path": "res://assets/audio/pickup.wav"},
         {"id": "boss_roar", "path": "res://assets/audio/boss_roar.wav"},
         {"id": "boss_attack", "path": "res://assets/audio/boss_attack.wav"},
-        {"id": "airdrop_incoming", "path": "res://assets/audio/airdrop_incoming.wav"}
+        {"id": "airdrop_incoming", "path": "res://assets/audio/airdrop_incoming.wav"},
+        {"id": "turret_fire", "path": "res://assets/audio/turret_fire.wav"}
     ]
     for clip_data in clips:
         var clip: String = str(clip_data.get("id", ""))
@@ -477,6 +484,8 @@ func _sfx_volume_db(clip: String) -> float:
             return -5.0
         "airdrop_incoming":
             return -10.0
+        "turret_fire":
+            return -7.5
         _:
             return -8.0
 
@@ -487,7 +496,7 @@ func _play_sfx(clip: String) -> void:
     if player == null or player.stream == null:
         return
     var now := Time.get_ticks_msec()
-    var min_gap := 55 if clip == "shot" else (75 if clip == "hit" else (170 if clip == "attack" else (4200 if clip == "boss_roar" else 0)))
+    var min_gap := 55 if clip == "shot" else (75 if clip == "hit" else (90 if clip == "turret_fire" else (170 if clip == "attack" else (4200 if clip == "boss_roar" else 0))))
     if min_gap > 0 and now - int(sfx_last_played.get(clip, 0)) < min_gap:
         return
     sfx_last_played[clip] = now
@@ -1128,6 +1137,9 @@ func _make_player(id: int) -> Dictionary:
         "slot2_mag": 0,
         "slot2_reserve": 0,
         "reload_timer": 0.0,
+        "weapon_replace_pending": false,
+        "pending_weapon_drop_id": -1,
+        "pending_weapon_id": 0,
         "face_x": 1.0,
         "name": "P%d" % id,
         "walking": false,
@@ -1238,6 +1250,9 @@ func _encode_snapshot() -> PackedByteArray:
             pflags |= 1
         if bool(p.get("walking", false)):
             pflags |= 2
+        if bool(p.get("weapon_replace_pending", false)):
+            pflags |= 4
+            pflags |= (clampi(int(p.get("pending_weapon_id", 0)), 0, 7) << 3)
         sp.put_u32(pid & 0xFFFFFFFF)
         sp.put_u16(_qpos(float(p.get("x", 0.0))))
         sp.put_u16(_qpos(float(p.get("y", 0.0))))
@@ -1427,7 +1442,7 @@ func _decode_snapshot(buf: PackedByteArray) -> Dictionary:
         var reload_timer := float(sp.get_u8()) * 0.01
         var pack := sp.get_u32()
         pids.append(pid)
-        pmap[pid] = {"x": px, "y": py, "hp": php, "fl": pflags, "med": pmed, "gren": pgren, "wall": pwall, "turret": pturret, "shoot": pshoot, "hurt": phurt, "active_slot": active_slot, "slot1_type": slot1_type, "slot1_mag": slot1_mag, "slot1_reserve": slot1_reserve, "slot2_type": slot2_type, "slot2_mag": slot2_mag, "slot2_reserve": slot2_reserve, "reload_timer": reload_timer, "ack": pack}
+        pmap[pid] = {"x": px, "y": py, "hp": php, "fl": pflags, "med": pmed, "gren": pgren, "wall": pwall, "turret": pturret, "shoot": pshoot, "hurt": phurt, "active_slot": active_slot, "slot1_type": slot1_type, "slot1_mag": slot1_mag, "slot1_reserve": slot1_reserve, "slot2_type": slot2_type, "slot2_mag": slot2_mag, "slot2_reserve": slot2_reserve, "reload_timer": reload_timer, "replace_pending": (pflags & 4) != 0, "pending_weapon_id": (pflags >> 3) & 7, "ack": pack}
     snap["pids"] = pids
     snap["players"] = pmap
 
@@ -2062,6 +2077,8 @@ func _client_update_render(delta: float) -> void:
         shown["slot2_mag"] = int(stats.get("slot2_mag", 0))
         shown["slot2_reserve"] = int(stats.get("slot2_reserve", 0))
         shown["reload_timer"] = float(stats.get("reload_timer", 0.0))
+        shown["weapon_replace_pending"] = bool(stats.get("replace_pending", false))
+        shown["pending_weapon_id"] = clampi(int(stats.get("pending_weapon_id", 0)), WEAPON_SMG, WEAPON_ROCKET) if bool(stats.get("replace_pending", false)) else 0
         shown["face_x"] = -1.0 if face_left else 1.0
         shown["walking"] = walking
         shown["shoot_timer"] = shoot_timer
@@ -2434,6 +2451,73 @@ func request_switch_weapon(slot: int) -> void:
     if players.has(sender_id):
         _host_switch_weapon(sender_id, slot)
 
+@rpc("any_peer", "call_remote", "reliable", 1)
+func request_replace_airdrop_weapon(slot: int) -> void:
+    if not is_host:
+        return
+    var sender_id := multiplayer.get_remote_sender_id()
+    _host_resolve_weapon_replacement(sender_id, slot)
+
+@rpc("any_peer", "call_remote", "reliable", 1)
+func request_cancel_airdrop_weapon() -> void:
+    if not is_host:
+        return
+    _host_cancel_weapon_replacement(multiplayer.get_remote_sender_id())
+
+func _host_cancel_weapon_replacement(id: int) -> void:
+    if not is_host or not players.has(id):
+        return
+    var p: Dictionary = players[id]
+    var pending_id := int(p.get("pending_weapon_drop_id", -1))
+    for drop_index in range(airdrops.size()):
+        var drop: Dictionary = airdrops[drop_index]
+        if int(drop.get("id", -2)) == pending_id and int(drop.get("reserved_by", -1)) == id:
+            drop.erase("reserved_by")
+            airdrops[drop_index] = drop
+            break
+    p["weapon_replace_pending"] = false
+    p["pending_weapon_drop_id"] = -1
+    p["pending_weapon_id"] = 0
+    players[id] = p
+    if id == local_player_id:
+        ui_status = "WEAPON PICKUP CANCELLED — DROP LEFT ON GROUND"
+
+func _host_resolve_weapon_replacement(id: int, slot: int) -> void:
+    if not is_host or not players.has(id) or (slot != 1 and slot != 2):
+        return
+    var p: Dictionary = players[id]
+    if not bool(p.get("weapon_replace_pending", false)):
+        return
+    var drop_id := int(p.get("pending_weapon_drop_id", -1))
+    var drop_index := -1
+    for i in range(airdrops.size()):
+        if int(airdrops[i].get("id", -2)) == drop_id and int(airdrops[i].get("reserved_by", -1)) == id:
+            drop_index = i
+            break
+    if drop_index < 0:
+        _host_cancel_weapon_replacement(id)
+        return
+    var drop: Dictionary = airdrops[drop_index]
+    var player_pos := Vector2(float(p.get("x", 0.0)), float(p.get("y", 0.0)))
+    var drop_pos := Vector2(float(drop.get("x", 0.0)), float(drop.get("y", 0.0)))
+    if player_pos.distance_to(drop_pos) > 72.0:
+        _host_cancel_weapon_replacement(id)
+        return
+    var weapon_id := clampi(int(drop.get("weapon_id", WEAPON_SMG)), WEAPON_SMG, WEAPON_ROCKET)
+    var granted_slot := _give_weapon(p, weapon_id, slot)
+    if granted_slot <= 0:
+        _host_cancel_weapon_replacement(id)
+        return
+    p["weapon_replace_pending"] = false
+    p["pending_weapon_drop_id"] = -1
+    p["pending_weapon_id"] = 0
+    players[id] = p
+    airdrops.remove_at(drop_index)
+    var effect_pos := drop_pos + Vector2(0.0, 35.0)
+    _add_combat_effect(7, effect_pos, effect_pos, 0.36)
+    _emit_sfx("pickup")
+    ui_status = "AIRDROP: SLOT %d ← %s" % [granted_slot, _weapon_name(weapon_id)]
+
 func _host_switch_weapon(id: int, slot: int) -> void:
     if game_over or not players.has(id):
         return
@@ -2452,7 +2536,13 @@ func _host_switch_weapon(id: int, slot: int) -> void:
     var weapon_id := _active_weapon_id(p)
     ui_status = "WEAPON: %s%s" % [_weapon_name(weapon_id), " · INFINITE AMMO" if weapon_id == WEAPON_SIDEARM else " · %d/%d" % [_slot_mag(p, slot), _slot_reserve(p, slot)]]
 
-func _give_weapon(p: Dictionary, weapon_id: int) -> int:
+func _weapon_pickup_needs_choice(p: Dictionary, weapon_id: int) -> bool:
+    weapon_id = clampi(weapon_id, WEAPON_SMG, WEAPON_ROCKET)
+    if _find_weapon_slot(p, weapon_id) > 0:
+        return false # Duplicate weapons replenish the owned copy instead of asking for a replacement.
+    return _slot_type(p, 1) >= WEAPON_SMG and _slot_type(p, 2) >= WEAPON_SMG
+
+func _give_weapon(p: Dictionary, weapon_id: int, replace_slot: int = 0) -> int:
     weapon_id = clampi(weapon_id, WEAPON_SMG, WEAPON_ROCKET)
     var profile := _weapon_profile(weapon_id)
     var slot := _find_weapon_slot(p, weapon_id)
@@ -2461,14 +2551,22 @@ func _give_weapon(p: Dictionary, weapon_id: int) -> int:
         p["active_slot"] = slot
         p["reload_timer"] = 0.0
         return slot
-    slot = 1 if int(p.get("slot1_type", -1)) < WEAPON_SMG else (2 if int(p.get("slot2_type", -1)) < WEAPON_SMG else 2)
+    if _slot_type(p, 1) < WEAPON_SMG:
+        slot = 1
+    elif _slot_type(p, 2) < WEAPON_SMG:
+        slot = 2
+    elif replace_slot == 1 or replace_slot == 2:
+        slot = replace_slot
+    else:
+        ui_status = "WEAPON INVENTORY FULL — CHOOSE A SLOT TO REPLACE"
+        return 0
     var replaced_type := _slot_type(p, slot)
     p["slot%d_type" % slot] = weapon_id
     _set_slot_ammo(p, slot, int(profile["mag_size"]), int(profile["spawn_reserve"]))
     p["active_slot"] = slot
     p["reload_timer"] = 0.0
     if replaced_type >= WEAPON_SMG and replaced_type != weapon_id:
-        ui_status = "SWAPPED %s → %s" % [_weapon_name(replaced_type), _weapon_name(weapon_id)]
+        ui_status = "SWAPPED SLOT %d: %s → %s" % [slot, _weapon_name(replaced_type), _weapon_name(weapon_id)]
     return slot
 
 func _apply_weapon_damage(index: int, damage: float, impact_pos: Vector2) -> void:
@@ -2921,52 +3019,59 @@ func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid:
     var max_hp := maxf(1.0, float(turret.get("max_hp", TURRET_MAX_HP)))
     var hp_ratio := clampf(float(turret.get("hp", max_hp)) / max_hp, 0.0, 1.0)
     var alpha := 0.48 if is_preview else 1.0
-    var steel := Color("#4d5148", alpha)
-    var dark := Color("#1c2423", alpha)
-    var edge := Color("#8c8d79", alpha)
-    var bronze := Color("#7e6547", alpha)
+    var tint := Color(1.0, 1.0, 1.0, alpha)
     if is_preview and not is_valid:
-        steel = steel.lerp(Color("#8b3439", alpha), 0.48)
-        edge = edge.lerp(Color("#e35a55", alpha), 0.62)
-    draw_ellipse_shadow(pos + Vector2(0.0, 30.0), 29.0, 6.0, 0.40 * alpha)
-    # Tripod feet and hinged support legs.
-    for foot in [Vector2(-24.0, 28.0), Vector2(24.0, 28.0), Vector2(0.0, 32.0)]:
-        var knee := Vector2(0.0, -1.0).lerp(foot, 0.57) + Vector2(0.0, 4.0)
-        draw_line(pos + Vector2(0.0, 2.0), pos + knee, dark, 7.0, true)
-        draw_line(pos + Vector2(0.0, 2.0), pos + knee, steel, 4.0, true)
-        draw_line(pos + knee, pos + foot, dark, 6.0, true)
-        draw_line(pos + knee, pos + foot, edge, 3.0, true)
-        draw_circle(pos + knee, 3.2, dark)
-        draw_circle(pos + knee, 1.5, bronze)
-        draw_rect(Rect2(pos + foot - Vector2(5.0, 1.5), Vector2(10.0, 3.0)), dark)
-        draw_rect(Rect2(pos + foot - Vector2(4.0, 1.0), Vector2(8.0, 1.0)), bronze)
-    draw_rect(Rect2(pos + Vector2(-9.0, -7.0), Vector2(18.0, 20.0)), dark)
-    draw_rect(Rect2(pos + Vector2(-7.0, -7.0), Vector2(14.0, 17.0)), steel)
-    draw_rect(Rect2(pos + Vector2(-4.0, -4.0), Vector2(8.0, 4.0)), bronze)
-    var pivot := pos + Vector2(0.0, -24.0)
-    var raw_angle: float = float(turret.get("angle", 0.0))
-    var flip_x: float = -1.0 if cos(raw_angle) < 0.0 else 1.0
-    var draw_angle: float = wrapf(raw_angle - PI, -PI, PI) if flip_x < 0.0 else raw_angle
-    draw_set_transform(pivot, draw_angle, Vector2(flip_x, 1.0))
-    draw_rect(Rect2(-14.0, -8.0, 31.0, 15.0), dark)
-    draw_rect(Rect2(-12.0, -7.0, 26.0, 12.0), steel)
-    draw_rect(Rect2(-9.0, -10.0, 15.0, 4.0), edge)
-    draw_rect(Rect2(-4.0, -12.0, 9.0, 4.0), bronze)
-    # Brief recoil retracts the barrel slightly on each synchronized shot.
-    var firing_flash: float = clampf(float(turret.get("flash_timer", 0.0)) / 0.075, 0.0, 1.0)
-    var barrel_kick: float = firing_flash * 2.2
-    draw_rect(Rect2(8.0 - barrel_kick, -3.0, 27.0, 5.0), dark)
-    draw_rect(Rect2(11.0 - barrel_kick, -2.0, 24.0, 3.0), edge)
-    draw_rect(Rect2(17.0 - barrel_kick, -5.0, 11.0, 9.0), bronze)
-    draw_rect(Rect2(31.0 - barrel_kick, -2.0, 4.0, 3.0), dark)
-    if firing_flash > 0.01:
-        draw_colored_polygon(PackedVector2Array([Vector2(36.0, 0.0), Vector2(44.0, -5.0), Vector2(41.0, 0.0), Vector2(44.0, 5.0)]), Color("#ffc86b", alpha * firing_flash))
-        draw_circle(Vector2(37.0, 0.0), 2.5 * firing_flash, Color("#fff0ac", alpha * firing_flash))
-    draw_circle(Vector2(-5.0, -1.0), 3.5, dark)
-    draw_circle(Vector2(-5.0, -1.0), 1.8, bronze)
-    draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+        tint = Color(1.0, 0.62, 0.58, alpha)
+
+    draw_ellipse_shadow(pos + Vector2(0.0, 30.0), 33.0, 6.8, 0.44 * alpha)
+    if turret_base_texture != null and turret_head_texture != null:
+        # PNG assets have a true transparent background. Base remains grounded while only
+        # the upper weapon rotates around its yaw ring, avoiding the stiff box-drawn fallback.
+        var base_size := Vector2(72.0, 35.1)
+        draw_texture_rect(turret_base_texture, Rect2(pos + Vector2(-base_size.x * 0.5, -4.4), base_size), false, tint)
+        var pivot := pos + Vector2(0.0, -24.0)
+        var raw_angle: float = float(turret.get("angle", 0.0))
+        var flip_x := -1.0 if cos(raw_angle) < 0.0 else 1.0
+        var draw_angle: float = wrapf(raw_angle - PI, -PI, PI) if flip_x < 0.0 else raw_angle
+        var head_size := Vector2(73.0, 23.2)
+        var firing_flash: float = clampf(float(turret.get("flash_timer", 0.0)) / 0.075, 0.0, 1.0)
+        var kick := firing_flash * 2.0
+        draw_set_transform(pivot, draw_angle, Vector2(flip_x, 1.0))
+        # The yaw ring sits ~39% from the left and close to the bottom edge of the source PNG.
+        var head_rect := Rect2(Vector2(-head_size.x * 0.39 - kick, -head_size.y * 0.94), head_size)
+        draw_texture_rect(turret_head_texture, head_rect, false, tint)
+        draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+        if firing_flash > 0.01:
+            var shot_dir := Vector2(cos(raw_angle), sin(raw_angle))
+            var muzzle := pivot + shot_dir * (head_size.x * 0.63 - kick) + Vector2(-shot_dir.y, shot_dir.x) * (-head_size.y * 0.33)
+            draw_line(muzzle - shot_dir * 4.0, muzzle + shot_dir * (5.0 + 7.0 * firing_flash), Color(1.0, 0.53, 0.15, alpha * firing_flash), 2.8 * firing_flash, true)
+            draw_circle(muzzle + shot_dir * 2.0, 2.8 * firing_flash, Color(1.0, 0.82, 0.40, alpha * firing_flash))
+            draw_circle(muzzle + shot_dir * 4.0, 1.5 * firing_flash, Color(1.0, 0.96, 0.70, alpha * firing_flash))
+    else:
+        # Fail-soft geometry if an imported PNG is unexpectedly missing.
+        var steel := Color("#4d5148", alpha)
+        var dark := Color("#1c2423", alpha)
+        var edge := Color("#8c8d79", alpha)
+        var bronze := Color("#7e6547", alpha)
+        for foot in TURRET_FEET:
+            var knee := Vector2(0.0, 0.0).lerp(foot, 0.57) + Vector2(0.0, 3.0)
+            draw_line(pos + Vector2(0.0, 1.0), pos + knee, dark, 7.0, true)
+            draw_line(pos + Vector2(0.0, 1.0), pos + knee, steel, 4.0, true)
+            draw_line(pos + knee, pos + foot, dark, 6.0, true)
+            draw_line(pos + knee, pos + foot, edge, 3.0, true)
+            draw_circle(pos + knee, 3.2, bronze)
+            draw_rect(Rect2(pos + foot - Vector2(5.0, 1.5), Vector2(10.0, 3.0)), dark)
+        var pivot_fallback := pos + Vector2(0.0, -24.0)
+        var angle_fallback: float = float(turret.get("angle", 0.0))
+        draw_set_transform(pivot_fallback, angle_fallback, Vector2.ONE)
+        draw_rect(Rect2(-13.0, -9.0, 30.0, 16.0), dark)
+        draw_rect(Rect2(-11.0, -7.0, 25.0, 12.0), steel)
+        draw_rect(Rect2(10.0, -3.0, 27.0, 5.0), edge)
+        draw_rect(Rect2(31.0, -2.0, 4.0, 3.0), bronze)
+        draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
     if not is_preview:
-        var hp_rect := Rect2(pos.x - 23.0, pos.y - 53.0, 46.0, 4.0)
+        var hp_rect := Rect2(pos.x - 25.0, pos.y - 56.0, 50.0, 4.5)
         draw_rect(Rect2(hp_rect.position - Vector2(1.0, 1.0), hp_rect.size + Vector2(2.0, 2.0)), Color(0.01, 0.012, 0.014, 0.90))
         draw_rect(hp_rect, Color("#402a26"))
         draw_rect(Rect2(hp_rect.position, Vector2(hp_rect.size.x * hp_ratio, hp_rect.size.y)), Color("#8ec477") if hp_ratio > 0.4 else Color("#d35d4c"))
@@ -2982,13 +3087,13 @@ func _update_turrets(delta: float) -> void:
         turret["flash_timer"] = maxf(0.0, float(turret.get("flash_timer", 0.0)) - delta)
         var turret_pos := Vector2(float(turret.get("x", 0.0)), float(turret.get("y", 0.0)))
         var target_index := -1
-        var nearest_distance: float = TURRET_RANGE
+        var nearest_distance_squared: float = TURRET_RANGE * TURRET_RANGE
         for zombie_index in range(zombies.size()):
             var zombie: Dictionary = zombies[zombie_index]
             var zombie_pos := Vector2(float(zombie.get("x", 0.0)), float(zombie.get("y", 0.0)))
-            var distance := turret_pos.distance_to(zombie_pos)
-            if distance < nearest_distance:
-                nearest_distance = distance
+            var distance_squared := turret_pos.distance_squared_to(zombie_pos)
+            if distance_squared < nearest_distance_squared:
+                nearest_distance_squared = distance_squared
                 target_index = zombie_index
         var desired_angle: float = sin(world_time * 0.63 + float(int(turret.get("id", 0)))) * 0.10
         var target_pos := turret_pos + Vector2.RIGHT * TURRET_RANGE
@@ -3008,6 +3113,7 @@ func _update_turrets(delta: float) -> void:
             _add_combat_effect(14, muzzle, target_pos, 0.12)
             turret["fire_timer"] = TURRET_FIRE_INTERVAL
             turret["flash_timer"] = 0.075
+            _emit_sfx("turret_fire")
             if float(target.get("hp", 0.0)) <= 0.0:
                 _add_combat_effect(4, target_pos, target_pos, 0.32)
                 zombies.remove_at(target_index)
@@ -3272,9 +3378,10 @@ func _grant_airdrop_loot(id: int, drop: Dictionary) -> void:
                 ui_status = "SUPPLY LOOT: +%d medkit(s)" % received_medkits
         "weapon":
             var weapon_drop_id := clampi(int(drop.get("weapon_id", WEAPON_SMG)), WEAPON_SMG, WEAPON_ROCKET)
-            _give_weapon(p, weapon_drop_id)
-            var active_weapon := _active_weapon_id(p)
-            ui_status = "AIRDROP: %s · %d/%d" % [_weapon_name(active_weapon), _slot_mag(p, int(p.get("active_slot", 0))), _slot_reserve(p, int(p.get("active_slot", 0)))]
+            var received_slot := _give_weapon(p, weapon_drop_id)
+            if received_slot > 0:
+                var active_weapon := _active_weapon_id(p)
+                ui_status = "AIRDROP: %s · %d/%d" % [_weapon_name(active_weapon), _slot_mag(p, int(p.get("active_slot", 0))), _slot_reserve(p, int(p.get("active_slot", 0)))]
         "turret":
             var before_turrets := int(p.get("turret_kits", 0))
             p["turret_kits"] = mini(TURRET_KIT_MAX_CARRY, before_turrets + quantity)
@@ -3324,6 +3431,16 @@ func _update_airdrops(delta: float) -> void:
             airdrop_spawn_timer = AIRDROP_FULL_RETRY
     for drop_index in range(airdrops.size() - 1, -1, -1):
         var drop: Dictionary = airdrops[drop_index]
+        var reserved_by := int(drop.get("reserved_by", -1))
+        if reserved_by >= 0:
+            var reserved_player: Dictionary = players.get(reserved_by, {})
+            if reserved_player.is_empty() or float(reserved_player.get("hp", 0.0)) <= 0.0 or not bool(reserved_player.get("weapon_replace_pending", false)):
+                if not reserved_player.is_empty():
+                    reserved_player["weapon_replace_pending"] = false
+                    reserved_player["pending_weapon_drop_id"] = -1
+                    reserved_player["pending_weapon_id"] = 0
+                    players[reserved_by] = reserved_player
+                drop.erase("reserved_by") # Death/disconnect cannot lock a crate for the rest of the match.
         var picked_up := false
         if not bool(drop.get("landed", false)):
             var elapsed := float(drop.get("elapsed", 0.0)) + delta
@@ -3339,8 +3456,9 @@ func _update_airdrops(delta: float) -> void:
                 _emit_sfx("airdrop")
                 ui_status = "SUPPLY DROP LANDED — smoke marking the cache"
         else:
-            drop["despawn_timer"] = float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)) - delta
-            if float(drop["despawn_timer"]) <= 0.0:
+            if int(drop.get("reserved_by", -1)) < 0:
+                drop["despawn_timer"] = float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)) - delta
+            if float(drop.get("despawn_timer", AIRDROP_LAND_LIFETIME)) <= 0.0 and int(drop.get("reserved_by", -1)) < 0:
                 # The host removes the unclaimed crate and broadcasts a small dust/smoke puff.
                 # Drop expiry is authoritative; clients only render the synchronized effect.
                 var expired_pos := Vector2(float(drop.get("x", 0.0)), float(drop.get("y", 0.0)) + 35.0)
@@ -3348,16 +3466,32 @@ func _update_airdrops(delta: float) -> void:
                 airdrops.remove_at(drop_index)
                 continue
             var drop_pos := Vector2(float(drop.get("x", 0.0)), float(drop.get("y", 0.0)))
+            var waiting_for_slot_choice := int(drop.get("reserved_by", -1)) >= 0
             for id_variant in players.keys():
                 var id := int(id_variant)
                 var p: Dictionary = players[id]
                 if float(p.get("hp", 0.0)) <= 0.0:
                     continue
+                if bool(p.get("weapon_replace_pending", false)):
+                    continue
+                if waiting_for_slot_choice and int(drop.get("reserved_by", -1)) != id:
+                    continue
                 var player_pos := Vector2(float(p.get("x", 0.0)), float(p.get("y", 0.0)))
                 if player_pos.distance_to(drop_pos) <= 42.0:
                     var drop_kind := str(drop.get("loot_kind", "grenade"))
-                    if drop_kind == "ammo" and not _can_collect_ammo(p, int(drop.get("weapon_id", WEAPON_SMG))):
-                        continue # Wrong weapon or both reserve and magazine are already full: leave the cache in the world.
+                    var drop_weapon_id := int(drop.get("weapon_id", WEAPON_SMG))
+                    if drop_kind == "ammo" and not _can_collect_ammo(p, drop_weapon_id):
+                        continue # Wrong weapon or full magazine/reserve: leave the cache in the world.
+                    if drop_kind == "weapon" and _weapon_pickup_needs_choice(p, drop_weapon_id):
+                        p["weapon_replace_pending"] = true
+                        p["pending_weapon_drop_id"] = int(drop.get("id", -1))
+                        p["pending_weapon_id"] = clampi(drop_weapon_id, WEAPON_SMG, WEAPON_ROCKET)
+                        players[id] = p
+                        drop["reserved_by"] = id
+                        waiting_for_slot_choice = true
+                        ui_status = "AIRDROP: CHOOSE WHICH WEAPON SLOT TO REPLACE"
+                        _emit_sfx("pickup")
+                        break # Keep the crate in the world while the player makes the choice.
                     _grant_airdrop_loot(id, drop)
                     _add_combat_effect(7, drop_pos + Vector2(0.0, 35.0), drop_pos + Vector2(0.0, 35.0), 0.36)
                     airdrops.remove_at(drop_index)
@@ -3821,6 +3955,8 @@ func _draw() -> void:
         _draw_lobby()
     elif screen_mode == "help":
         _draw_help()
+    elif screen_mode == "settings":
+        _draw_settings()
     elif screen_mode == "pause":
         _draw_game_world()
         _draw_pause_menu()
@@ -3891,14 +4027,15 @@ func _draw_home() -> void:
     var save_available := FileAccess.file_exists(SAVE_PATH)
     var continue_subtitle := "RESUME THE MANUALLY SAVED RUN" if save_available else "NO SAVED RUN — START SOLO FIRST"
     _draw_ui_button("home_continue", Rect2(bx, card_y + 200.0, bw, 50.0), "CONTINUE SAVED", continue_subtitle, Color("#8ca17f"), false)
-    _draw_ui_button("home_controls", Rect2(bx, card_y + 258.0, bw, 46.0), "FIELD MANUAL", "MOVE  /  FIRE  /  HEAL  /  SAVE", Color("#9cae91"), false)
+    _draw_ui_button("home_controls", Rect2(bx, card_y + 252.0, bw, 40.0), "FIELD MANUAL", "MOVE  /  FIRE  /  HEAL  /  SAVE", Color("#9cae91"), false)
+    _draw_ui_button("home_settings", Rect2(bx, card_y + 298.0, bw, 40.0), "USER SETTINGS", "AIM ASSIST / CONTROL PREFERENCES", Color("#a3b48e"), false)
 
-    var signal_rect := Rect2(bx, card_y + 312.0, bw, 35.0)
+    var signal_rect := Rect2(bx, card_y + 344.0, bw, 30.0)
     draw_rect(signal_rect, Color(0.12, 0.045, 0.05, 0.88))
     draw_rect(Rect2(signal_rect.position, Vector2(3, signal_rect.size.y)), Color("#9e4146"))
     draw_circle(Vector2(signal_rect.position.x + 17, signal_rect.position.y + 21), 4.0, Color("#dc685b"))
     draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "LOCAL SIGNAL ONLY  /  UDP %d" % PORT, HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
-    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.13  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
+    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.23  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
 
 func _draw_help() -> void:
     _draw_apocalypse_backdrop(true)
@@ -3936,6 +4073,7 @@ func _draw_lobby() -> void:
     var w := screen_size.x
     var h := screen_size.y
     _draw_ui_button("lobby_back", Rect2(28, 20, 104, 36), "‹  HOME", "", Color("#86958a"), false)
+    _draw_ui_button("lobby_settings", Rect2(w - 156.0, 20.0, 128.0, 36.0), "SETTINGS", "", Color("#9cae91"), false)
     _draw_title_text(Vector2(34, 88), "SAFEHOUSE LOBBY", 29, Color("#f0ead8"))
     draw_string(ui_font, Vector2(36, 109), "FOUR SURVIVORS. ONE LAST STAND. NO INTERNET.", HORIZONTAL_ALIGNMENT_LEFT, w * 0.54, 11, Color("#b4c7b6"))
 
@@ -4262,6 +4400,7 @@ func _draw_game_world() -> void:
         _draw_aim_direction_marker()
     _draw_combat_effects()
     _draw_game_hud()
+    _draw_weapon_replace_prompt()
 
 func _draw_barricade(wall: Dictionary, pos: Vector2) -> void:
     var max_hp := maxf(1.0, float(wall.get("max_hp", 125.0)))
@@ -4577,9 +4716,7 @@ func _draw_player_weapon(pos: Vector2, p: Dictionary) -> void:
     var grip := pos + Vector2(facing_sign * grip_x, grip_y + bob * 0.18)
     var support_hand := pos + Vector2(facing_sign * support_x, support_y + bob * 0.16)
 
-    # Back arm goes behind the gun; this visually connects the shoulder to the fore-end.
-    var rear_shoulder := pos + Vector2(facing_sign * 1.5, -17.0 + bob)
-    _draw_weapon_arm_segment(rear_shoulder, support_hand, Color("#4c5148"), false)
+    # The survivor atlas already contains its arm silhouette; avoid drawing a second long forearm over it.
 
     if weapon_id == WEAPON_SIDEARM:
         # Compact pistol with a forward muzzle and a separate angled grip.
@@ -4602,12 +4739,13 @@ func _draw_player_weapon(pos: Vector2, p: Dictionary) -> void:
             else:
                 draw_texture_rect(texture, pos_rect, false, Color.WHITE)
 
-    # Front arm and hand sit over the trigger/handle, making the weapon feel held rather than pasted on.
-    var front_shoulder := pos + Vector2(facing_sign * 5.0, -13.0 + bob)
-    _draw_weapon_arm_segment(front_shoulder, grip, Color("#5b5c4c"), true)
-    draw_circle(grip, 2.3, Color("#a97550"))
-    draw_circle(grip + Vector2(facing_sign * 0.5, -0.6), 1.1, Color("#d6a06e"))
-    draw_circle(support_hand, 2.0, Color("#916747"))
+    # Tiny outlined hands connect the held sprite without a stretched arm/strap-like line.
+    draw_circle(grip, 2.4, Color("#252a27"))
+    draw_circle(grip, 1.6, Color("#a97550"))
+    draw_circle(grip + Vector2(facing_sign * 0.3, -0.5), 0.8, Color("#d6a06e"))
+    if weapon_id != WEAPON_SIDEARM:
+        draw_circle(support_hand, 2.0, Color("#252a27"))
+        draw_circle(support_hand, 1.35, Color("#916747"))
 
     if recoil > 0.12:
         var muzzle := pos + Vector2(facing_sign * (24.0 - recoil_shift), weapon_y - 1.0)
@@ -4616,16 +4754,6 @@ func _draw_player_weapon(pos: Vector2, p: Dictionary) -> void:
         draw_line(muzzle, muzzle + Vector2(facing_sign * 6.0, -1.0), Color(1.0, 0.82, 0.31, 0.95 * strength), 1.8, true)
         draw_line(muzzle + Vector2(0.0, -1.0), muzzle + Vector2(facing_sign * 3.5, -4.0), Color(1.0, 0.55, 0.15, 0.85 * strength), 1.1, true)
         draw_line(muzzle + Vector2(0.0, 1.0), muzzle + Vector2(facing_sign * 3.5, 3.0), Color(1.0, 0.68, 0.22, 0.85 * strength), 1.0, true)
-
-func _draw_weapon_arm_segment(start: Vector2, finish: Vector2, sleeve_color: Color, include_hand: bool = true) -> void:
-    # Pixel-friendly outlined forearm with a short skin-toned section near the grip.
-    draw_line(start, finish, Color("#252a27"), 5.2, true)
-    var skin_start := start.lerp(finish, 0.70)
-    draw_line(start, finish, sleeve_color, 3.7, true)
-    if include_hand:
-        draw_line(skin_start, finish, Color("#8e6348"), 2.8, true)
-        draw_line(skin_start + Vector2(0.0, -0.6), finish + Vector2(0.0, -0.6), Color("#c08a5b"), 1.0, true)
-        draw_circle(finish, 2.1, Color("#a97550"))
 
 func _draw_aim_direction_marker() -> void:
     # Visual-only aim aid. Actual firing remains host-authoritative and uses the same horizontal lane.
@@ -4761,7 +4889,6 @@ func _draw_game_hud() -> void:
     var turret_label := "DRAG" if turret_place_active else "TUR %d" % turret_kits
     _draw_action_button("game_turret", turret_pos, 27.0 * control_scale, turret_label, Color("#d0ac62") if turret_place_active else Color("#66745d"))
     _draw_weapon_slots(local_p, control_scale)
-    _draw_ui_button("game_aim_toggle", Rect2(w * 0.66 - 43.0 * control_scale, 112.0 * control_scale, 86.0 * control_scale, 34.0 * control_scale), "AIM", "ON" if aim_marker_enabled else "OFF", Color("#8bb775") if aim_marker_enabled else Color("#7b8584"), false)
     _draw_ui_button("game_pause", Rect2(w - 65.0, 72.0, 49.0, 41.0), "Ⅱ", "", Color("#c19a68"), false)
     if SHOW_NET_STATS and _is_connected_client():
         _draw_net_stats()
@@ -4865,13 +4992,18 @@ func _draw_action_button(id: String, pos: Vector2, radius: float, label: String,
             draw_arc(pos + Vector2(0, -4), 8.0, 0, TAU, 20, Color("#d4bc81"), 1.5)
         draw_string(ui_font, pos + Vector2(-radius + 1.0, radius * 0.67), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 2.0, 8, Color.WHITE)
     elif id == "game_turret":
-        draw_line(pos + Vector2(-12.0, 7.0), pos + Vector2(-7.0, -2.0), Color("#28312d"), 4.0, true)
-        draw_line(pos + Vector2(-7.0, -2.0), pos + Vector2(0.0, 7.0), Color("#9fa18a"), 3.0, true)
-        draw_line(pos + Vector2(0.0, 7.0), pos + Vector2(12.0, 7.0), Color("#28312d"), 4.0, true)
-        draw_rect(Rect2(pos.x - 10.0, pos.y - 10.0, 19.0, 11.0), Color("#252d2a"))
-        draw_rect(Rect2(pos.x - 8.0, pos.y - 8.0, 15.0, 7.0), Color("#89907a"))
-        draw_line(pos + Vector2(3.0, -5.0), pos + Vector2(15.0, -5.0), Color("#252d2a"), 4.0, true)
-        draw_line(pos + Vector2(4.0, -5.0), pos + Vector2(15.0, -5.0), Color("#b1a47b"), 1.5, true)
+        if turret_base_texture != null:
+            draw_texture_rect(turret_base_texture, Rect2(pos.x - 15.0, pos.y - 3.0, 30.0, 14.6), false, Color(1.0, 1.0, 1.0, 0.98))
+        else:
+            draw_line(pos + Vector2(-12.0, 7.0), pos + Vector2(0.0, -2.0), Color("#28312d"), 4.0, true)
+            draw_line(pos + Vector2(0.0, -2.0), pos + Vector2(12.0, 7.0), Color("#9fa18a"), 3.0, true)
+        if turret_head_texture != null:
+            draw_set_transform(pos + Vector2(-1.5, -7.0), -0.04, Vector2.ONE)
+            draw_texture_rect(turret_head_texture, Rect2(-8.5, -8.0, 26.0, 8.2), false, Color(1.0, 1.0, 1.0, 0.98))
+            draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+        else:
+            draw_rect(Rect2(pos.x - 8.0, pos.y - 11.0, 18.0, 10.0), Color("#89907a"))
+            draw_line(pos + Vector2(4.0, -7.0), pos + Vector2(15.0, -7.0), Color("#252d2a"), 4.0, true)
         draw_string(ui_font, pos + Vector2(-radius + 1.0, radius * 0.67), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 2.0, 8, Color.WHITE)
     else:
         if barricade_texture != null:
@@ -4881,6 +5013,49 @@ func _draw_action_button(id: String, pos: Vector2, radius: float, label: String,
                 var plank_x: float = pos.x - 12.0 + float(plank_index) * 9.0
                 draw_rect(Rect2(plank_x, pos.y - 12.0, 6.0, 22.0), Color("#c5b58d"))
         draw_string(ui_font, pos + Vector2(-radius + 1.0, radius * 0.67), label, HORIZONTAL_ALIGNMENT_CENTER, radius * 2.0 - 2.0, 8, Color.WHITE)
+
+func _draw_settings() -> void:
+    _draw_apocalypse_backdrop(true)
+    var w := screen_size.x
+    var h := screen_size.y
+    var panel_w := minf(520.0, w - 40.0)
+    var panel_h := minf(330.0, h - 40.0)
+    var panel := Rect2((w - panel_w) * 0.5, (h - panel_h) * 0.5, panel_w, panel_h)
+    _draw_panel(panel, "USER SETTINGS", "LOCAL CONTROL PREFERENCES")
+    draw_string(ui_font, Vector2(panel.position.x + 26.0, panel.position.y + 83.0), "AIM ASSIST DIRECTION MARKER", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 52.0, 15, Color("#f0ead8"))
+    draw_string(ui_font, Vector2(panel.position.x + 26.0, panel.position.y + 105.0), "Show a subtle lane and target cue during survival.", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 52.0, 11, Color("#b4c7b6"))
+    var toggle_rect := Rect2(panel.position.x + 26.0, panel.position.y + 126.0, panel.size.x - 52.0, 54.0)
+    _draw_ui_button("settings_toggle_aim", toggle_rect, "AIM ASSIST  " + ("ON" if aim_marker_enabled else "OFF"), "Tap to change; saved on this device", Color("#8bb775") if aim_marker_enabled else Color("#737f7d"), false)
+    draw_string(ui_font, Vector2(panel.position.x + 26.0, panel.position.y + 213.0), "This option is visual only and does not change weapon damage or LAN authority.", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 52.0, 10, Color("#9eaaa0"))
+    _draw_ui_button("settings_back", Rect2(panel.position.x + 26.0, panel.position.y + panel.size.y - 64.0, panel.size.x - 52.0, 42.0), "‹  BACK", "Return to " + ("lobby" if settings_return_mode == "lobby" else "safehouse"), Color("#c18a55"), false)
+
+func _weapon_replace_prompt_visible() -> bool:
+    if screen_mode != "game" or not players.has(local_player_id):
+        return false
+    return bool(players[local_player_id].get("weapon_replace_pending", false))
+
+func _draw_weapon_replace_prompt() -> void:
+    if not _weapon_replace_prompt_visible():
+        return
+    var local_p: Dictionary = players[local_player_id]
+    var weapon_id := clampi(int(local_p.get("pending_weapon_id", WEAPON_SMG)), WEAPON_SMG, WEAPON_ROCKET)
+    var panel_w := minf(468.0, screen_size.x - 26.0)
+    var panel_h := 184.0
+    var panel := Rect2((screen_size.x - panel_w) * 0.5, (screen_size.y - panel_h) * 0.5, panel_w, panel_h)
+    draw_rect(Rect2(Vector2.ZERO, screen_size), Color(0.005, 0.008, 0.012, 0.54))
+    draw_rect(panel, Color("#101819", 0.98))
+    draw_rect(Rect2(panel.position, Vector2(panel.size.x, 3.0)), Color("#cf4b50"))
+    draw_rect(panel, Color("#728077"), false, 1.5)
+    draw_string(ui_font, panel.position + Vector2(16.0, 25.0), "AIRDROP WEAPON FOUND", HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 32.0, 15, Color("#f1eadf"))
+    draw_string(ui_font, panel.position + Vector2(16.0, 43.0), "%s — choose a slot to replace" % _weapon_name(weapon_id), HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 32.0, 10, Color("#d8bb7c"))
+    var gap := 9.0
+    var card_w := (panel.size.x - 32.0 - gap) * 0.5
+    var card_y := panel.position.y + 54.0
+    var first_slot := int(local_p.get("slot1_type", -1))
+    var second_slot := int(local_p.get("slot2_type", -1))
+    _draw_ui_button("weapon_replace_1", Rect2(panel.position.x + 12.0, card_y, card_w, 55.0), "REPLACE SLOT 1", "%s  %d/%d" % [_weapon_name(first_slot), _slot_mag(local_p, 1), _slot_reserve(local_p, 1)], Color("#c18a55"), false)
+    _draw_ui_button("weapon_replace_2", Rect2(panel.position.x + 20.0 + card_w, card_y, card_w, 55.0), "REPLACE SLOT 2", "%s  %d/%d" % [_weapon_name(second_slot), _slot_mag(local_p, 2), _slot_reserve(local_p, 2)], Color("#c18a55"), false)
+    _draw_ui_button("weapon_replace_cancel", Rect2(panel.position.x + 12.0, panel.position.y + panel.size.y - 35.0, panel.size.x - 24.0, 25.0), "KEEP CURRENT WEAPONS  /  CANCEL", "", Color("#707c76"), false)
 
 func _draw_title_text(pos: Vector2, label: String, size: int, color: Color) -> void:
     draw_string(ui_font, pos + Vector2(3, 4), label, HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(0.0, 0.0, 0.0, 0.75))
@@ -5285,6 +5460,21 @@ func _handle_ui_button(id: String) -> void:
             _start_offline(true)
         "home_controls":
             screen_mode = "help"
+        "home_settings":
+            settings_return_mode = "home"
+            screen_mode = "settings"
+        "lobby_settings":
+            settings_return_mode = "lobby"
+            screen_mode = "settings"
+        "settings_back":
+            screen_mode = "lobby" if settings_return_mode == "lobby" else "home"
+        "settings_toggle_aim":
+            aim_marker_enabled = not aim_marker_enabled
+            var control_settings := ConfigFile.new()
+            control_settings.load("user://settings.cfg")
+            control_settings.set_value("controls", "aim_marker_enabled", aim_marker_enabled)
+            control_settings.save("user://settings.cfg")
+            ui_status = "AIM ASSIST %s — SAVED" % ("ON" if aim_marker_enabled else "OFF")
         "help_back":
             screen_mode = "home"
         "lobby_back":
@@ -5306,13 +5496,6 @@ func _handle_ui_button(id: String) -> void:
         "lobby_leave":
             _leave_world()
             ui_status = "Lobby disconnected"
-        "game_aim_toggle":
-            aim_marker_enabled = not aim_marker_enabled
-            var control_settings := ConfigFile.new()
-            control_settings.load("user://settings.cfg")
-            control_settings.set_value("controls", "aim_marker_enabled", aim_marker_enabled)
-            control_settings.save("user://settings.cfg")
-            ui_status = "AIM ASSIST MARKER %s" % ("ON" if aim_marker_enabled else "OFF")
         "game_pause":
             screen_mode = "pause"
             joystick_vector = Vector2.ZERO
@@ -5363,8 +5546,30 @@ func _handle_ui_button(id: String) -> void:
         "gameover_home":
             _leave_world()
             screen_mode = "home"
+        "weapon_replace_1":
+            if is_host:
+                _host_resolve_weapon_replacement(local_player_id, 1)
+            elif _is_connected_client():
+                rpc_id(1, "request_replace_airdrop_weapon", 1)
+        "weapon_replace_2":
+            if is_host:
+                _host_resolve_weapon_replacement(local_player_id, 2)
+            elif _is_connected_client():
+                rpc_id(1, "request_replace_airdrop_weapon", 2)
+        "weapon_replace_cancel":
+            if is_host:
+                _host_cancel_weapon_replacement(local_player_id)
+            elif _is_connected_client():
+                rpc_id(1, "request_cancel_airdrop_weapon")
 
 func _handle_press(pos: Vector2, touch_id: int = -1) -> bool:
+    if _weapon_replace_prompt_visible():
+        for prompt_id in ["weapon_replace_1", "weapon_replace_2", "weapon_replace_cancel"]:
+            var prompt_rect: Rect2 = button_rects.get(prompt_id, Rect2())
+            if prompt_rect.has_point(pos):
+                _handle_ui_button(prompt_id)
+                return true
+        return true # The player must explicitly choose a replacement or cancel.
     for id in button_rects.keys():
         var rect: Rect2 = button_rects[id]
         if rect.has_point(pos):
@@ -5406,6 +5611,9 @@ func _input(event: InputEvent) -> void:
             _set_turret_preview_from_pointer(event.position)
 
 func _touch_start(index: int, pos: Vector2) -> void:
+    if _weapon_replace_prompt_visible():
+        _handle_press(pos, index)
+        return
     if screen_mode == "game":
         var grenade_rect: Rect2 = button_rects.get("game_grenade", Rect2())
         if grenade_rect.has_point(pos):

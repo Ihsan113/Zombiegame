@@ -1,4 +1,14 @@
-# Implementation notes — v0.4.22 hotfix (includes v0.4.21 features)
+# Implementation notes v0.4.23
+
+- Turret base/head generated as separate transparent PNGs so the head can rotate independently.
+- Turret firing sound is a compact local WAV and participates in existing SFX broadcast.
+- Weapon replacement choice is host-authoritative; reserved drops remain in world until selected or canceled. Pending prompt uses spare bits in the existing player flags, avoiding a packet-size change.
+- Aim-assist preference moved into User Settings outside live gameplay.
+- Turret target scan uses squared distance to reduce repeated square-root work.
+- Reserved weapon crate does not despawn while a slot-choice prompt is open and is released on cancel, death, or disconnect.
+- `tools/build_turret_assets.py` and `tools/generate_turret_fire_sfx.py` regenerate the two turret PNG layers and the compact one-shot firing sound.
+
+# Implementation notes — v0.4.23 hotfix (includes v0.4.21 features)
 
 ## v0.4.21 turret and aim update
 
@@ -120,7 +130,7 @@ New draw-time lower-body gait, weapon grip/recoil, boss movement aura and attack
 The `Snapshot codec test` workflow step now uses `tee` for live console output and a 90-second `timeout`. `tests/codec_test.gd` prints checkpoints before/after potentially expensive operations. This is intended to prevent unbounded waiting and make the next failing run provide a useful last checkpoint; it does not claim to have confirmed the root cause until the rerun completes.
 
 
-### v0.4.22 codec test fixes
+### v0.4.23 codec test fixes
 - Test scene is marked offline before any host-side helper emits sound.
 - Multiplayer event relay now checks that the node is in the scene tree and `get_multiplayer()` returns a valid API/peer.
 - Turret codec tests append dictionaries to the typed zombie array instead of assigning a plain `Array`; timer and active world effects are reset to make the simulation deterministic.

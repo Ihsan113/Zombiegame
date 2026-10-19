@@ -84,6 +84,8 @@ func _initialize() -> void:
             test_player["slot2_mag"] = 1
             test_player["slot2_reserve"] = 3
             test_player["reload_timer"] = 0.73
+            test_player["weapon_replace_pending"] = true
+            test_player["pending_weapon_id"] = game.WEAPON_SNIPER
             game.players[ids[0]] = test_player
             game.airdrops[0]["loot_kind"] = "weapon"
             game.airdrops[0]["weapon_id"] = game.WEAPON_SNIPER
@@ -113,6 +115,7 @@ func _initialize() -> void:
                 check(int(b.slot1_type) == game.WEAPON_SMG and int(b.slot1_mag) == 21 and int(b.slot1_reserve) == 63, "slot 1 weapon/ammo round-trip")
                 check(int(b.slot2_type) == game.WEAPON_ROCKET and int(b.slot2_mag) == 1 and int(b.slot2_reserve) == 3, "slot 2 weapon/ammo round-trip")
                 check(near(float(b.reload_timer), 0.73, 0.02), "reload timer round-trips")
+                check(bool(b.replace_pending) and int(b.pending_weapon_id) == game.WEAPON_SNIPER, "weapon replacement prompt round-trips in spare player flags")
         for z in game.zombies:
             var zr: Dictionary = snap.zombies[int(z.id) & 0xFFFFFFFF]
             check(near(float(z.x), float(zr.x), 0.07) and near(float(z.y), float(zr.y), 0.07), "zombie pos")
@@ -172,7 +175,34 @@ func _initialize() -> void:
     check(int(weapon_inventory.slot1_mag) == 4 and int(weapon_inventory.slot1_reserve) == 0, "partial magazine reload transfers only available ammo")
     check(int(weapon_inventory.slot1_reserve) >= 0, "weapon reserve never becomes negative")
 
-    print("[codec checkpoint] PASS: weapon profiles and reload arithmetic")
+    var replacement_inventory := {"active_slot": 1, "slot1_type": game.WEAPON_SMG, "slot1_mag": 11, "slot1_reserve": 40, "slot2_type": game.WEAPON_SHOTGUN, "slot2_mag": 3, "slot2_reserve": 12, "reload_timer": 0.0}
+    check(game._weapon_pickup_needs_choice(replacement_inventory, game.WEAPON_SNIPER), "full weapon inventory requests explicit slot selection")
+    check(game._give_weapon(replacement_inventory, game.WEAPON_SNIPER) == 0, "full inventory does not silently overwrite either slot")
+    check(int(replacement_inventory.slot1_type) == game.WEAPON_SMG and int(replacement_inventory.slot2_type) == game.WEAPON_SHOTGUN, "unselected weapon slots remain unchanged")
+    check(game._give_weapon(replacement_inventory, game.WEAPON_SNIPER, 2) == 2, "explicit slot 2 replacement succeeds")
+    check(int(replacement_inventory.slot2_type) == game.WEAPON_SNIPER and int(replacement_inventory.slot1_type) == game.WEAPON_SMG, "only the selected weapon slot is replaced")
+
+    print("[codec checkpoint] PASS: weapon profiles, reload arithmetic, and replacement choice")
+
+    game.is_host = true
+    game.is_offline = true
+    game.local_player_id = 1
+    game.players.clear()
+    game.airdrops.clear()
+    game.players[1] = {"x": 320.0, "y": 390.0, "hp": 100.0, "medkits": 2, "ammo": -1, "grenades": 3, "wall_kits": 2, "turret_kits": 0, "active_slot": 1, "slot1_type": game.WEAPON_SMG, "slot1_mag": 11, "slot1_reserve": 40, "slot2_type": game.WEAPON_SHOTGUN, "slot2_mag": 3, "slot2_reserve": 12, "reload_timer": 0.0, "weapon_replace_pending": true, "pending_weapon_drop_id": 76501, "pending_weapon_id": game.WEAPON_SNIPER}
+    game.airdrops.append({"id": 76501, "x": 320.0, "y": 390.0, "landed": true, "despawn_timer": 12.0, "loot_kind": "weapon", "weapon_id": game.WEAPON_SNIPER, "reserved_by": 1})
+    game._host_resolve_weapon_replacement(1, 2)
+    var resolved_pickup: Dictionary = game.players[1]
+    check(int(resolved_pickup.slot1_type) == game.WEAPON_SMG and int(resolved_pickup.slot2_type) == game.WEAPON_SNIPER, "host pickup resolver replaces only selected slot and leaves the other weapon untouched")
+    check(game.airdrops.is_empty() and not bool(resolved_pickup.weapon_replace_pending), "chosen weapon consumes reserved drop and closes prompt")
+    game.players[1]["weapon_replace_pending"] = true
+    game.players[1]["pending_weapon_drop_id"] = 76502
+    game.players[1]["pending_weapon_id"] = game.WEAPON_ROCKET
+    game.airdrops.append({"id": 76502, "x": 320.0, "y": 390.0, "landed": true, "despawn_timer": 12.0, "loot_kind": "weapon", "weapon_id": game.WEAPON_ROCKET, "reserved_by": 1})
+    game._host_cancel_weapon_replacement(1)
+    check(game.airdrops.size() == 1 and not game.airdrops[0].has("reserved_by"), "cancel releases weapon crate instead of consuming it")
+    check(not bool(game.players[1].get("weapon_replace_pending", true)), "cancel closes weapon replacement prompt")
+    print("[codec checkpoint] PASS: host replacement selection and cancellation")
     # Ammo airdrops must match an owned firearm and never be wasted at a full reserve.
     var ammo_profile: Dictionary = game._weapon_profile(game.WEAPON_SMG)
     var ammo_inventory := {"active_slot": 0, "slot1_type": game.WEAPON_SMG, "slot1_mag": 0, "slot1_reserve": int(ammo_profile.reserve_cap), "slot2_type": -1, "slot2_mag": 0, "slot2_reserve": 0, "reload_timer": 0.0}
@@ -232,6 +262,9 @@ func _initialize() -> void:
             previous_frame = attack_frame
 
     print("[codec checkpoint] PASS: boss attack snapshot and frames")
+    # Asset imports for the rotating turret must remain transparent PNG cutouts and the custom SFX must exist.
+    check(game.turret_base_texture != null and game.turret_head_texture != null, "turret base/head PNG assets load")
+    check(ResourceLoader.exists("res://assets/audio/turret_fire.wav"), "turret fire SFX resource exists")
     # Auto-turret placement, aim tracking, automatic fire and zombie destruction.
     game.players.clear()
     game.zombies.clear()

@@ -95,8 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=34' not in preset or 'version/name="0.4.22"' not in preset:
-              raise SystemExit('Android export preset must report version code 34 / version 0.4.22')
+          if 'version/code=35' not in preset or 'version/name="0.4.23"' not in preset:
+              raise SystemExit('Android export preset must report version code 35 / version 0.4.23')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -113,7 +113,7 @@ jobs:
               width, height = struct.unpack('>II', data[16:24])
               color_type = data[25]
               return width, height, color_type
-          for image_name in ['grenade_explosion_asset.png', 'airdrop_crate_generated.png', 'airdrop_parachute_generated.png', 'airdrop_landing_dust_generated.png', 'boss_brute.png', 'boss_attack_slash_sheet.png', 'boss_attack_slam_sheet.png', 'boss_attack_lunge_sheet.png']:
+          for image_name in ['grenade_explosion_asset.png', 'airdrop_crate_generated.png', 'airdrop_parachute_generated.png', 'airdrop_landing_dust_generated.png', 'boss_brute.png', 'boss_attack_slash_sheet.png', 'boss_attack_slam_sheet.png', 'boss_attack_lunge_sheet.png', 'turret_base.png', 'turret_head.png']:
               image_path = root / 'assets' / image_name
               if not image_path.is_file():
                   raise SystemExit('Missing generated VFX PNG: ' + str(image_path))
@@ -124,6 +124,9 @@ jobs:
                   raise SystemExit('Unexpected generated VFX dimensions: ' + str(image_path))
               if image_name.startswith('boss_attack_') and (image_width != 1680 or image_height != 226):
                   raise SystemExit('Boss attack sheets must be 5 RGBA frames of 336x226: ' + str(image_path))
+          turret_sfx = root / 'assets' / 'audio' / 'turret_fire.wav'
+          if not turret_sfx.is_file() or turret_sfx.stat().st_size < 1000:
+              raise SystemExit('Missing/empty turret firing SFX: ' + str(turret_sfx))
           clean_atlas = root / 'assets' / 'sprite_atlas_player_clean.png'
           if not clean_atlas.is_file():
               raise SystemExit('Missing clean survivor atlas; gun must not be baked into the player sprite.')
@@ -173,7 +176,14 @@ jobs:
               'func _draw_turret_entity(turret: Dictionary, is_preview: bool = false, is_valid: bool = true) -> void:',
               'var aim_marker_enabled := true',
               'func _draw_aim_direction_marker() -> void:',
-              'game_aim_toggle',
+              'func _draw_settings() -> void:',
+              'settings_toggle_aim',
+              'func _weapon_pickup_needs_choice(p: Dictionary, weapon_id: int) -> bool:',
+              'func _host_resolve_weapon_replacement(id: int, slot: int) -> void:',
+              'weapon_replace_1',
+              'res://assets/turret_base.png',
+              'res://assets/turret_head.png',
+              'res://assets/audio/turret_fire.wav',
               'res://assets/sprite_atlas_player_clean.png',
               'func _snap_wall_preview_to_neighbour(desired: Vector2, player_pos: Vector2) -> Vector2:',
               'var snap_spacing: float = BARRICADE_RECT_SIZE.x + BARRICADE_JOIN_GAP',
@@ -231,7 +241,6 @@ jobs:
               'func _begin_grenade_aim(touch_id: int = -1) -> void',
               'func _draw_wall_placement_preview()',
               'func _draw_aim_direction_marker() -> void:',
-              'func _draw_weapon_arm_segment(start: Vector2, finish: Vector2, sleeve_color: Color, include_hand: bool = true) -> void:',
               'func _wall_placement_is_valid(id: int, wall_pos: Vector2)',
               'func _set_wall_preview_from_pointer(pointer_pos: Vector2)',
               'grenade_texture = load("res://assets/grenade_detail.svg") as Texture2D',
@@ -268,7 +277,7 @@ jobs:
           if 'ENetMultiplayerPeer.COMPRESS_FASTLZ' in script or 'peer.compression_mode' in script:
               raise SystemExit('Invalid Godot 4.7 compression API: configure peer.host.compress(ENetConnection.COMPRESS_FASTLZ) after creating the peer.')
           if 'const SNAPSHOT_HEADER_BYTES := 31' not in script or 'const PLAYER_RECORD_BYTES := 30' not in script or 'const DROP_RECORD_BYTES := 27' not in script or 'const EFFECT_RECORD_BYTES := 16' not in script:
-              raise SystemExit('The v0.4.21 snapshot layout must retain its 30-byte player record, 8-byte turret record and 27-byte drop record.')
+              raise SystemExit('The v0.4.23 snapshot layout must retain its 30-byte player record, 8-byte turret record and 27-byte drop record.')
           if 'rpc("receive_world", _encode_snapshot()' not in script:
               raise SystemExit('Host snapshot broadcast is missing.')
           if script.count('peer.host.compress(ENetConnection.COMPRESS_FASTLZ)') != 2:
@@ -281,7 +290,7 @@ jobs:
               raise SystemExit('Missing arena/animation implementation markers: ' + ', '.join(missing_markers))
           import wave
           audio_dir = root / 'assets' / 'audio'
-          clips = ['shot', 'hit', 'attack', 'death', 'heal', 'wave_clear', 'wave_start', 'game_over', 'grenade_throw', 'explosion', 'airdrop', 'wall_build', 'wall_break', 'pickup', 'boss_roar', 'boss_attack', 'airdrop_incoming']
+          clips = ['shot', 'hit', 'attack', 'death', 'heal', 'wave_clear', 'wave_start', 'game_over', 'grenade_throw', 'explosion', 'airdrop', 'wall_build', 'wall_break', 'pickup', 'boss_roar', 'boss_attack', 'airdrop_incoming', 'turret_fire']
           for clip in clips:
               audio_path = audio_dir / (clip + '.wav')
               if not audio_path.is_file() or audio_path.stat().st_size < 1000:
@@ -304,10 +313,13 @@ jobs:
                   raise SystemExit('Malformed SVG ' + str(svg_path) + ': ' + str(exc))
           if 'if int(p.get("ammo", 120)) <= 0' in script:
               raise SystemExit('Legacy generic-ammo counter must not gate finite firearm ammo')
-          weapon_markers = ['loot_kind = "ammo"', 'loot_kind = "weapon"', 'WEAPON_SIDEARM := 0', 'WEAPON_ROCKET := 5', 'func _give_weapon(p: Dictionary, weapon_id: int) -> int:', 'slot1_reserve', 'slot2_reserve', 'AMMO EMPTY — SWITCHED TO SIDEARM']
+          weapon_markers = ['loot_kind = "ammo"', 'loot_kind = "weapon"', 'WEAPON_SIDEARM := 0', 'WEAPON_ROCKET := 5', 'func _give_weapon(p: Dictionary, weapon_id: int, replace_slot: int = 0) -> int:', 'slot1_reserve', 'slot2_reserve', 'AMMO EMPTY — SWITCHED TO SIDEARM']
           codec_test = (root / 'tests/codec_test.gd').read_text()
           if '_can_collect_ammo' not in codec_test or 'reserve-full ammo cache tops up the magazine' not in codec_test or 'partial reserve space is filled before excess ammo tops up the magazine' not in codec_test or 'empty firearm with no reserve switches to default sidearm' not in codec_test or 'weapon airdrop subtype round-trips' not in codec_test or 'has a dedicated firing effect' not in codec_test:
               raise SystemExit('Weapon profile, codec, fallback and ammo pickup regression tests are missing')
+          for pickup_test_marker in ['host pickup resolver replaces only selected slot', 'cancel releases weapon crate instead of consuming it']:
+              if pickup_test_marker not in codec_test:
+                  raise SystemExit('Missing weapon replacement regression test: ' + pickup_test_marker)
           for turret_test_marker in ['turret spot inside placement ring is valid', 'auto-turret tracks and damages a zombie in range', 'zombie melee can destroy a turret']:
               if turret_test_marker not in codec_test:
                   raise SystemExit('Missing turret regression test: ' + turret_test_marker)
@@ -337,8 +349,8 @@ jobs:
           script = (root / 'scripts/game.gd').read_text()
           for marker in ['func _setup_music() -> void:', 'AudioStreamWAV.LOOP_FORWARD', 'AudioStreamMP3', 'mp3_stream.loop = true', 'func _sync_music_state() -> void:', 'AIRDROP_INTERVAL_MIN := 24.0', 'AIRDROP_INTERVAL_MAX := 34.0', '_emit_sfx("boss_roar")', '_emit_sfx("boss_attack")']:
               if marker not in script:
-                  raise SystemExit('Missing v0.4.21 animation/audio/airdrop feature marker: ' + marker)
-          print(f'Validated {len(refs)} resource references, landscape/version settings, clean RGBA survivor atlas, five RGBA firearm sprites, destructible deployable auto-turrets, aim marker toggle, finite firearm ammo with infinite sidearm fallback, compatible ammo pickup, hold-drag controls, death/bone visuals, grenade blast, more frequent airdrops, gameplay music, boss/airdrop SFX, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
+                  raise SystemExit('Missing v0.4.23 animation/audio/airdrop feature marker: ' + marker)
+          print(f'Validated {len(refs)} resource references, landscape/version settings, clean RGBA survivor atlas, five RGBA firearm sprites, destructible deployable auto-turrets with PNG layers/SFX, settings-based aim marker toggle, explicit airdrop slot replacement, finite firearm ammo with infinite sidearm fallback, compatible ammo pickup, hold-drag controls, death/bone visuals, grenade blast, more frequent airdrops, gameplay music, boss/airdrop SFX, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
           PYCODE
 
       - name: Import and validate project scripts
@@ -398,7 +410,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.22-APK
+          name: PixelZombieLAN-v0.4.23-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -407,15 +419,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.22-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.23-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.22-source.zip
+          test -s build/PixelZombieLAN-v0.4.23-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.22-source
-          path: build/PixelZombieLAN-v0.4.22-source.zip
+          name: PixelZombieLAN-v0.4.23-source
+          path: build/PixelZombieLAN-v0.4.23-source.zip
           if-no-files-found: error
           retention-days: 14

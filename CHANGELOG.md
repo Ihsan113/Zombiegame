@@ -1,10 +1,20 @@
-## v0.4.22 — codec test runtime fixes
+# Pixel Zombie LAN v0.4.23
+
+- Replaced procedural turret geometry with transparent generated PNG base/head sprites; only the head rotates around its pivot.
+- Added compact generated turret-fire SFX and connected it to synchronized turret firing.
+- Removed long overlaid weapon-arm strokes that created a stray diagonal shape near the survivor.
+- Moved the aim-assist toggle out of combat HUD into User Settings, accessible from home and lobby; preference remains local and persistent.
+- Added explicit weapon airdrop replacement choice when both slots are occupied: choose slot 1, slot 2, or cancel; the crate remains available until resolved. The player flags use spare bits, keeping the 30-byte player record unchanged.
+- Reduced turret target acquisition overhead by using squared-distance comparisons; kept host-authoritative simulation and four-player LAN limits.
+- Reserved weapon drops are released if their chooser dies or disconnects; the prompt intercepts taps before underlying combat controls.
+
+## v0.4.23 — codec test runtime fixes
 
 - Made offline codec tests explicitly offline before exercising loot/fire functions, preventing sound events from dereferencing a null MultiplayerAPI.
 - Guarded `_emit_sfx` and `_is_connected_client` when the MultiplayerAPI or peer is unavailable.
 - Fixed typed `Array[Dictionary]` test fixtures by using `clear()` + `append()` rather than assigning an untyped array.
 - Reset test projectiles/grenades/airdrops and hold the airdrop spawn timer during the turret-destruction simulation for deterministic results.
-- Android version code/name: 34 / 0.4.22.
+- Android version code/name: 35 / 0.4.23.
 
 ## v0.4.21 — Deployable auto-turret and survivor weapon correction
 
