@@ -1,4 +1,11 @@
-# Changelog
+# Changelog — Pixel Zombie LAN
+
+## v0.4.20 — Weapon grip, aim marker, barricade depth and supplied music
+- Tightened per-weapon on-character placement and added outlined arms/hands connecting the firearm to the survivor. The rendered muzzle flash is aligned to the combat ray origin.
+- Added a visual-only horizontal firing guide with a bracket reticle; its color indicates whether a zombie is in the selected weapon’s valid lane/range. No gameplay hit logic or snapshot fields changed.
+- Preserved the 4 px horizontal barricade gap, reduced vertical row spacing to 60 px, and added vertical snapping for tighter upper/lower rows.
+- Integrated the user-provided 151-second stereo MP3 as looping gameplay ambience at -20 dB, with the existing WAV as fallback. Pause/exit audio behavior remains unchanged.
+- Android version code/name: 32 / 0.4.20.
 
 ## 0.4.19 — Animation, Airdrop & Audio Pass
 

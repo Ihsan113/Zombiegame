@@ -95,8 +95,8 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=31' not in preset or 'version/name="0.4.19"' not in preset:
-              raise SystemExit('Android export preset must report version code 31 / version 0.4.19')
+          if 'version/code=32' not in preset or 'version/name="0.4.20"' not in preset:
+              raise SystemExit('Android export preset must report version code 32 / version 0.4.20')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -157,7 +157,7 @@ jobs:
               'func _draw_barricade_grounding(pos: Vector2, strength: float) -> void:',
               'const BARRICADE_FEET: Array[Vector2]',
               'const BARRICADE_JOIN_GAP := 4.0',
-              'const BARRICADE_VERTICAL_SPACING := 88.0',
+              'const BARRICADE_VERTICAL_SPACING := 60.0',
               'func _snap_wall_preview_to_neighbour(desired: Vector2, player_pos: Vector2) -> Vector2:',
               'var snap_spacing: float = BARRICADE_RECT_SIZE.x + BARRICADE_JOIN_GAP',
               'func _host_track_arrival(track: Dictionary, vt_before: float) -> void:',
@@ -213,6 +213,8 @@ jobs:
               'func _update_grenade_target_from_pointer(pointer_pos: Vector2) -> void',
               'func _begin_grenade_aim(touch_id: int = -1) -> void',
               'func _draw_wall_placement_preview()',
+              'func _draw_aim_direction_marker() -> void:',
+              'func _draw_weapon_arm_segment(start: Vector2, finish: Vector2, sleeve_color: Color, include_hand: bool = true) -> void:',
               'func _wall_placement_is_valid(id: int, wall_pos: Vector2)',
               'func _set_wall_preview_from_pointer(pointer_pos: Vector2)',
               'grenade_texture = load("res://assets/grenade_detail.svg") as Texture2D',
@@ -249,7 +251,7 @@ jobs:
           if 'ENetMultiplayerPeer.COMPRESS_FASTLZ' in script or 'peer.compression_mode' in script:
               raise SystemExit('Invalid Godot 4.7 compression API: configure peer.host.compress(ENetConnection.COMPRESS_FASTLZ) after creating the peer.')
           if 'const SNAPSHOT_HEADER_BYTES := 31' not in script or 'const PLAYER_RECORD_BYTES := 29' not in script or 'const DROP_RECORD_BYTES := 27' not in script or 'const EFFECT_RECORD_BYTES := 16' not in script:
-              raise SystemExit('The v0.4.19 snapshot layout must retain its 29-byte player record and 27-byte drop record.')
+              raise SystemExit('The v0.4.20 snapshot layout must retain its 29-byte player record and 27-byte drop record.')
           if 'rpc("receive_world", _encode_snapshot()' not in script:
               raise SystemExit('Host snapshot broadcast is missing.')
           if script.count('peer.host.compress(ENetConnection.COMPRESS_FASTLZ)') != 2:
@@ -309,10 +311,13 @@ jobs:
           with wave.open(str(music_path), 'rb') as stream:
               if stream.getnchannels() != 1 or stream.getframerate() != 22050 or stream.getsampwidth() != 2:
                   raise SystemExit('Unexpected gameplay ambience format: ' + str(music_path))
+          mp3_music_path = audio_dir / 'gameplay_tension_ambience.mp3'
+          if not mp3_music_path.is_file() or mp3_music_path.stat().st_size < 1000000:
+              raise SystemExit('Missing supplied gameplay ambience MP3: ' + str(mp3_music_path))
           script = (root / 'scripts/game.gd').read_text()
-          for marker in ['func _setup_music() -> void:', 'AudioStreamWAV.LOOP_FORWARD', 'func _sync_music_state() -> void:', 'AIRDROP_INTERVAL_MIN := 24.0', 'AIRDROP_INTERVAL_MAX := 34.0', '_emit_sfx("boss_roar")', '_emit_sfx("boss_attack")']:
+          for marker in ['func _setup_music() -> void:', 'AudioStreamWAV.LOOP_FORWARD', 'AudioStreamMP3', 'mp3_stream.loop = true', 'func _sync_music_state() -> void:', 'AIRDROP_INTERVAL_MIN := 24.0', 'AIRDROP_INTERVAL_MAX := 34.0', '_emit_sfx("boss_roar")', '_emit_sfx("boss_attack")']:
               if marker not in script:
-                  raise SystemExit('Missing v0.4.19 animation/audio/airdrop feature marker: ' + marker)
+                  raise SystemExit('Missing v0.4.20 animation/audio/airdrop feature marker: ' + marker)
           print(f'Validated {len(refs)} resource references, landscape/version settings, five RGBA firearm sprites, finite firearm ammo with infinite sidearm fallback, compatible ammo pickup, hold-drag controls, death/bone visuals, grenade blast, more frequent airdrops, gameplay music, boss/airdrop SFX, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
           PYCODE
 
@@ -361,7 +366,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.19-APK
+          name: PixelZombieLAN-v0.4.20-APK
           path: build/PixelZombieLAN.apk
           if-no-files-found: error
           retention-days: 14
@@ -370,15 +375,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.19-source.zip \
+          zip -r build/PixelZombieLAN-v0.4.20-source.zip \
             project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
             README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.19-source.zip
+          test -s build/PixelZombieLAN-v0.4.20-source.zip
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.19-source
-          path: build/PixelZombieLAN-v0.4.19-source.zip
+          name: PixelZombieLAN-v0.4.20-source
+          path: build/PixelZombieLAN-v0.4.20-source.zip
           if-no-files-found: error
           retention-days: 14

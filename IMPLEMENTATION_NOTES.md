@@ -1,3 +1,11 @@
+# Implementation notes — v0.4.20
+
+- On-player firearm draw sizes were reduced to fit the survivor scale. The muzzle is anchored around `face * 24 px`, matching the authoritative shot origin. Per-weapon grip ratios anchor the trigger and support hands; outlined arm segments render behind/in front of the weapon to reduce the floating-sprite appearance.
+- `_draw_aim_direction_marker()` is presentation-only. It finds the nearest zombie satisfying the active weapon's forward projection, effective range and lane tolerance, then draws a dashed horizontal guide and bracket marker at that projection. Green indicates a valid zombie; amber indicates direction/range only. Host-side hit checks remain unchanged.
+- `BARRICADE_JOIN_GAP` remains 4 px. `BARRICADE_VERTICAL_SPACING` is now 60 px, with lower rows depth-rendered in front; `_snap_wall_preview_to_neighbour()` supports horizontal or vertical neighbours within arena/range limits.
+- The provided `assets/audio/gameplay_tension_ambience.mp3` (151.249 s, stereo, 44.1 kHz) is loaded as `AudioStreamMP3` with looping enabled and -20 dB playback. `combat_ambience_loop.wav` remains as the fallback; `_sync_music_state()` still controls gameplay/pause/exit behavior.
+- Godot headless validation and Android export must run through the Godot 4.7.2 workflow; this edit environment does not have a Godot executable.
+
 ## v0.4.19 animation, airdrop and audio notes
 - `_draw_atlas_character()` uses the existing 64×80 (or 80×80 SVG layout) cell as a static atlas and splits the lower 32 px into a separate rotated layer during movement. The split intentionally overlaps the torso slice by five source pixels to avoid a visible seam; all gait state is local presentation only.
 - `_draw_player_weapon()` places the currently selected weapon above the body, mirrors it for facing direction, adds a small hand-grip overlay, and reads `shoot_timer` for recoil/muzzle feedback. No weapon ID, ammo record or snapshot bytes changed. Existing weapon IDs map 1=UMP/SMG, 2=shotgun, 3=Renbo LMG, 4=AWM/sniper and 5=RPG/rocket.
@@ -11,8 +19,6 @@
 - Profiles are defined in `_weapon_profile()`. Values are balance defaults: SMG 30/180 rounds, 110 ms interval; shotgun 6/36, five pellets with 720 ms interval; rifle 30/180, 190 ms; sniper 5/30, 900 ms; rocket 1/12, 1000 ms with 86 px blast radius. Magazine reloads consume only existing reserve ammo. Sidearm is infinite and active fallback if a gun has no rounds remaining.
 - Supply ammo rolls are chosen only from a squad-owned gun that can accept more rounds; a solo run without an owned gun (or a squad with all gun ammo full) receives a weapon instead of dead ammo. Ammo first fills reserve space, then uses any leftover pack rounds to top up a missing magazine; an entirely full cache remains on the ground. Tests cover weapon/ammo subtype round-trip, reserve-full top-up, partial reserve-space distribution and infinite sidearm fallback. Install v0.4.18 on all LAN devices because the player snapshot record changed length.
 - The local editing environment has no Godot executable. Static resource, asset, codec-layout and package checks can run here, but Godot 4.7.2 parsing/import, headless codec execution, network loopback and Android export must be verified through CI.
-
-# Implementation notes — v0.4.19
 
 ## v0.4.17 Brute animation / combat notes
 - Runtime attack sheets are `assets/boss_attack_slash_sheet.png`, `assets/boss_attack_slam_sheet.png`, and `assets/boss_attack_lunge_sheet.png`. Each is a 1680×226 RGBA strip of five 336×226 frames, sliced from the provided reference artwork in `art_source/boss_brute_spritesheet_source.jpg` by `tools/build_boss_attack_sheets.py`.

@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.19
+# Pixel Zombie LAN — wave defense prototype v0.4.20
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -64,7 +64,7 @@ const WALL_PLACE_RANGE_RATIO := 0.145
 const BARRICADE_RECT_OFFSET := Vector2(-29.9, -39.3)
 const BARRICADE_RECT_SIZE := Vector2(60.0, 88.0)
 const BARRICADE_JOIN_GAP := 4.0 # Only a small visual gap is needed; older 132 px spacing left barricades disconnected.
-const BARRICADE_VERTICAL_SPACING := 88.0 # Prevent actual sprite overlap when walls are staggered vertically.
+const BARRICADE_VERTICAL_SPACING := 60.0 # Tighter top/bottom rows; depth sorting lets the lower barricade overlap the upper sprite naturally.
 const BARRICADE_FEET: Array[Vector2] = [Vector2(-23.1, 15.3), Vector2(-1.5, 8.2), Vector2(1.5, 43.8), Vector2(23.1, 36.7)]
 const BARRICADE_FOOT_RX: Array[float] = [9.0, 8.0, 10.0, 9.0]
 const BARRICADE_SHADOW_OFFSET := Vector2(-21.0, 6.0) # sun sits low behind the skyline, shadows fall toward the camera
@@ -378,15 +378,26 @@ func _setup_sfx() -> void:
         sfx_players[clip] = player
 
 func _setup_music() -> void:
-    var music_stream := load("res://assets/audio/combat_ambience_loop.wav") as AudioStreamWAV
+    # Prefer the atmospheric loop supplied for v0.4.20. Keep the existing WAV as a safe fallback
+    # so a failed MP3 import never leaves gameplay silent.
+    var music_stream: AudioStream = null
+    var mp3_stream := load("res://assets/audio/gameplay_tension_ambience.mp3") as AudioStreamMP3
+    if mp3_stream != null:
+        mp3_stream.loop = true
+        music_stream = mp3_stream
+    else:
+        var fallback_stream := load("res://assets/audio/combat_ambience_loop.wav") as AudioStreamWAV
+        if fallback_stream != null:
+            fallback_stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
+            music_stream = fallback_stream
     if music_stream == null:
-        push_warning("Pixel Zombie LAN: gameplay ambience could not be loaded; continuing without music.")
+        push_warning("Pixel Zombie LAN: gameplay music could not be loaded; continuing without music.")
         return
-    music_stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
     music_player = AudioStreamPlayer.new()
     music_player.name = "GameplayMusic"
     music_player.stream = music_stream
-    music_player.volume_db = -18.0
+    # Keep the atmospheric drone underneath gunfire, hits, and boss cues.
+    music_player.volume_db = -20.0
     add_child(music_player)
 
 func _sync_music_state() -> void:
@@ -2595,38 +2606,46 @@ func _wall_placement_is_valid(id: int, wall_pos: Vector2) -> bool:
         var existing_pos := Vector2(float(existing.get("x", 0.0)), float(existing.get("y", 0.0)))
         var separation_x: float = absf(existing_pos.x - wall_pos.x)
         var separation_y: float = absf(existing_pos.y - wall_pos.y)
-        # Test the actual rendered footprint instead of a 132 px radius. At the same depth,
-        # barricades may sit only 4 px apart, while staggered rows must not overlap vertically.
+        # Test actual row spacing: horizontal neighbours keep a 4 px join gap, while the
+        # lower row can overlap the upper sprite by depth and render naturally in front.
         if separation_x < BARRICADE_RECT_SIZE.x + BARRICADE_JOIN_GAP and separation_y < BARRICADE_VERTICAL_SPACING:
             return false
     return true
 
 func _snap_wall_preview_to_neighbour(desired: Vector2, player_pos: Vector2) -> Vector2:
-    # When dragging near either end of an existing barricade, snap to its next slot and
-    # inherit the exact lane depth. This makes long, continuous barricade lines easy to build.
+    # Snap horizontal chains to the 4 px visual join gap and vertical rows to a much tighter
+    # 60 px lane step. Lower rows are depth-sorted in front, so their sprite can naturally
+    # overlap the upper row without looking like two isolated walls.
     var best_position := desired
     var best_error := 46.0
     var snap_spacing: float = BARRICADE_RECT_SIZE.x + BARRICADE_JOIN_GAP
+    var vertical_spacing: float = BARRICADE_VERTICAL_SPACING
     var max_distance: float = screen_size.x * WALL_PLACE_RANGE_RATIO
     for existing in barricades:
         var existing_pos := Vector2(float(existing.get("x", 0.0)), float(existing.get("y", 0.0)))
         var delta_to_desired := desired - existing_pos
-        if absf(delta_to_desired.y) > 44.0:
-            continue
-        if absf(delta_to_desired.x) < 38.0 or absf(delta_to_desired.x) > 112.0:
-            continue
-        var side := -1.0 if delta_to_desired.x < 0.0 else 1.0
-        var candidate := Vector2(existing_pos.x + side * snap_spacing, existing_pos.y)
-        candidate.x = clampf(candidate.x, 44.0, maxf(45.0, screen_size.x - 44.0))
-        candidate.y = clampf(candidate.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
-        var snap_error: float = desired.distance_to(candidate)
-        if snap_error >= best_error:
-            continue
-        var player_distance: float = player_pos.distance_to(candidate)
-        if player_distance < WALL_MIN_PLAYER_DISTANCE or player_distance > max_distance:
-            continue
-        best_position = candidate
-        best_error = snap_error
+
+        # Horizontal neighbour: inherit the exact lane depth.
+        if absf(delta_to_desired.y) <= 44.0 and absf(delta_to_desired.x) >= 38.0 and absf(delta_to_desired.x) <= 112.0:
+            var side_x := -1.0 if delta_to_desired.x < 0.0 else 1.0
+            var horizontal_candidate := Vector2(existing_pos.x + side_x * snap_spacing, existing_pos.y)
+            horizontal_candidate.x = clampf(horizontal_candidate.x, 44.0, maxf(45.0, screen_size.x - 44.0))
+            horizontal_candidate.y = clampf(horizontal_candidate.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+            var horizontal_error: float = desired.distance_to(horizontal_candidate)
+            if horizontal_error < best_error and player_pos.distance_to(horizontal_candidate) >= WALL_MIN_PLAYER_DISTANCE and player_pos.distance_to(horizontal_candidate) <= max_distance:
+                best_position = horizontal_candidate
+                best_error = horizontal_error
+
+        # Vertical neighbour: align x with a nearby barricade and reduce the old oversized row gap.
+        if absf(delta_to_desired.x) <= 48.0 and absf(delta_to_desired.y) >= 24.0 and absf(delta_to_desired.y) <= vertical_spacing * 2.0:
+            var side_y := -1.0 if delta_to_desired.y < 0.0 else 1.0
+            var vertical_candidate := Vector2(existing_pos.x, existing_pos.y + side_y * vertical_spacing)
+            vertical_candidate.x = clampf(vertical_candidate.x, 44.0, maxf(45.0, screen_size.x - 44.0))
+            vertical_candidate.y = clampf(vertical_candidate.y, _arena_top() + ARENA_TOP_CLEARANCE, _arena_bottom() - ARENA_BOTTOM_CLEARANCE)
+            var vertical_error: float = desired.distance_to(vertical_candidate)
+            if vertical_error < best_error and player_pos.distance_to(vertical_candidate) >= WALL_MIN_PLAYER_DISTANCE and player_pos.distance_to(vertical_candidate) <= max_distance:
+                best_position = vertical_candidate
+                best_error = vertical_error
     return best_position
 
 func _set_wall_preview_from_pointer(pointer_pos: Vector2) -> void:
@@ -3780,6 +3799,8 @@ func _draw_game_world() -> void:
         _draw_grenade_aim_preview()
     if wall_place_active:
         _draw_wall_placement_preview()
+    if screen_mode == "game":
+        _draw_aim_direction_marker()
     _draw_combat_effects()
     _draw_game_hud()
 
@@ -4051,25 +4072,61 @@ func _draw_player_weapon(pos: Vector2, p: Dictionary) -> void:
     var bob := gait * (1.2 if moving else 0.35)
     var shoot_timer := float(p.get("shoot_timer", 0.0))
     var recoil := clampf(shoot_timer / 0.19, 0.0, 1.0)
-    var weapon_y := -12.0 + bob - recoil * 1.1
-    var draw_w := 39.0
+    var weapon_y := -14.0 + bob - recoil * 1.0
+
+    # Weapon sprites are long side-on illustrations. Fit them compactly and anchor their muzzle
+    # to the same ~24 px firing origin used by the actual gameplay ray, instead of floating far
+    # outside the survivor's hands. Each weapon has its own trigger and foregrip position.
+    var draw_w := 34.0
+    var grip_ratio := 0.54
+    var support_ratio := 0.74
+    match weapon_id:
+        WEAPON_SIDEARM:
+            draw_w = 18.0
+            grip_ratio = 0.25
+            support_ratio = 0.74
+        WEAPON_SMG:
+            draw_w = 34.0
+            grip_ratio = 0.55
+            support_ratio = 0.76
+        WEAPON_SHOTGUN:
+            draw_w = 36.0
+            grip_ratio = 0.19
+            support_ratio = 0.61
+        WEAPON_RIFLE:
+            draw_w = 38.0
+            grip_ratio = 0.49
+            support_ratio = 0.71
+        WEAPON_SNIPER:
+            draw_w = 43.0
+            grip_ratio = 0.38
+            support_ratio = 0.72
+        WEAPON_ROCKET:
+            draw_w = 38.0
+            grip_ratio = 0.57
+            support_ratio = 0.77
+
+    var recoil_shift := recoil * 1.8
+    var weapon_center := pos + Vector2(facing_sign * (24.0 - draw_w * 0.5 - recoil_shift), weapon_y)
+    var grip_x := 24.0 - draw_w * (1.0 - grip_ratio) - recoil_shift
+    var support_x := 24.0 - draw_w * (1.0 - support_ratio) - recoil_shift
+    var grip_y := weapon_y + 2.0
+    var support_y := weapon_y + 1.0
+    var grip := pos + Vector2(facing_sign * grip_x, grip_y + bob * 0.18)
+    var support_hand := pos + Vector2(facing_sign * support_x, support_y + bob * 0.16)
+
+    # Back arm goes behind the gun; this visually connects the shoulder to the fore-end.
+    var rear_shoulder := pos + Vector2(facing_sign * 1.5, -21.0 + bob)
+    _draw_weapon_arm_segment(rear_shoulder, support_hand, Color("#4c5148"), false)
+
     if weapon_id == WEAPON_SIDEARM:
-        draw_w = 20.0
-    elif weapon_id == WEAPON_SMG:
-        draw_w = 36.0
-    elif weapon_id == WEAPON_SHOTGUN:
-        draw_w = 38.0
-    elif weapon_id == WEAPON_RIFLE:
-        draw_w = 42.0
-    elif weapon_id == WEAPON_SNIPER:
-        draw_w = 47.0
-    elif weapon_id == WEAPON_ROCKET:
-        draw_w = 42.0
-    var weapon_center := pos + Vector2(facing_sign * (17.0 - recoil * 3.0), weapon_y)
-    if weapon_id == WEAPON_SIDEARM:
-        var hand := pos + Vector2(facing_sign * 7.0, -6.0 + bob)
-        draw_line(hand, hand + Vector2(facing_sign * 19.0, -1.0 - recoil), Color("#333632"), 4.0, true)
-        draw_line(hand + Vector2(facing_sign * 3.0, -1.0), hand + Vector2(facing_sign * 15.0, -1.0), Color("#a9b2aa"), 1.0, true)
+        # Compact pistol with a forward muzzle and a separate angled grip.
+        var pistol_muzzle := pos + Vector2(facing_sign * (24.0 - recoil_shift), weapon_y - 1.0)
+        var pistol_rear := pos + Vector2(facing_sign * (7.0 - recoil_shift), weapon_y - 1.0)
+        draw_line(pistol_rear, pistol_muzzle, Color("#202521"), 5.0, true)
+        draw_line(pistol_rear + Vector2(0.0, -0.5), pistol_muzzle + Vector2(0.0, -0.5), Color("#9ba49b"), 1.4, true)
+        draw_line(pos + Vector2(facing_sign * (grip_x + 2.0), weapon_y + 1.0), pos + Vector2(facing_sign * (grip_x + 0.5), weapon_y + 7.0), Color("#242923"), 4.0, true)
+        draw_line(pos + Vector2(facing_sign * (grip_x + 2.0), weapon_y + 1.0), pos + Vector2(facing_sign * (grip_x + 0.5), weapon_y + 6.0), Color("#8b765e"), 1.6, true)
     else:
         var texture: Texture2D = weapon_icon_textures.get(weapon_id) as Texture2D
         if texture != null:
@@ -4082,17 +4139,81 @@ func _draw_player_weapon(pos: Vector2, p: Dictionary) -> void:
                 draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
             else:
                 draw_texture_rect(texture, pos_rect, false, Color.WHITE)
-    # Small skin-toned grip hand overlays the stock/handle so the weapon reads as held, not floating.
-    var grip := pos + Vector2(facing_sign * 8.5, -6.4 + bob - recoil * 0.6)
-    draw_circle(grip, 2.2, Color("#b9825a"))
-    draw_rect(Rect2(grip + Vector2(-1.4, -0.3), Vector2(2.8, 1.5)), Color("#e0b07a"))
+
+    # Front arm and hand sit over the trigger/handle, making the weapon feel held rather than pasted on.
+    var front_shoulder := pos + Vector2(facing_sign * 5.0, -17.0 + bob)
+    _draw_weapon_arm_segment(front_shoulder, grip, Color("#5b5c4c"), true)
+    draw_circle(grip, 2.3, Color("#a97550"))
+    draw_circle(grip + Vector2(facing_sign * 0.5, -0.6), 1.1, Color("#d6a06e"))
+    draw_circle(support_hand, 2.0, Color("#916747"))
+
     if recoil > 0.12:
-        var muzzle := pos + Vector2(facing_sign * (draw_w + 1.0 - recoil * 2.4), weapon_y)
+        var muzzle := pos + Vector2(facing_sign * (24.0 - recoil_shift), weapon_y - 1.0)
         var strength := clampf(recoil * 1.2, 0.0, 1.0)
-        draw_circle(muzzle, 3.2 * strength, Color(1.0, 0.35, 0.06, 0.80 * strength))
-        draw_line(muzzle + Vector2(-2.0, 0.0), muzzle + Vector2(facing_sign * 7.0, -1.0), Color(1.0, 0.82, 0.31, 0.95 * strength), 2.0, true)
-        draw_line(muzzle + Vector2(0.0, -1.0), muzzle + Vector2(facing_sign * 4.0, -5.0), Color(1.0, 0.55, 0.15, 0.85 * strength), 1.3, true)
-        draw_line(muzzle + Vector2(0.0, 1.0), muzzle + Vector2(facing_sign * 4.0, 4.0), Color(1.0, 0.68, 0.22, 0.85 * strength), 1.2, true)
+        draw_circle(muzzle, 3.0 * strength, Color(1.0, 0.35, 0.06, 0.80 * strength))
+        draw_line(muzzle, muzzle + Vector2(facing_sign * 6.0, -1.0), Color(1.0, 0.82, 0.31, 0.95 * strength), 1.8, true)
+        draw_line(muzzle + Vector2(0.0, -1.0), muzzle + Vector2(facing_sign * 3.5, -4.0), Color(1.0, 0.55, 0.15, 0.85 * strength), 1.1, true)
+        draw_line(muzzle + Vector2(0.0, 1.0), muzzle + Vector2(facing_sign * 3.5, 3.0), Color(1.0, 0.68, 0.22, 0.85 * strength), 1.0, true)
+
+func _draw_weapon_arm_segment(start: Vector2, finish: Vector2, sleeve_color: Color, include_hand: bool = true) -> void:
+    # Pixel-friendly outlined forearm with a short skin-toned section near the grip.
+    draw_line(start, finish, Color("#252a27"), 5.2, true)
+    var skin_start := start.lerp(finish, 0.70)
+    draw_line(start, finish, sleeve_color, 3.7, true)
+    if include_hand:
+        draw_line(skin_start, finish, Color("#8e6348"), 2.8, true)
+        draw_line(skin_start + Vector2(0.0, -0.6), finish + Vector2(0.0, -0.6), Color("#c08a5b"), 1.0, true)
+        draw_circle(finish, 2.1, Color("#a97550"))
+
+func _draw_aim_direction_marker() -> void:
+    # Visual-only aim aid. Actual firing remains host-authoritative and uses the same horizontal lane.
+    if not players.has(local_player_id):
+        return
+    var p: Dictionary = players[local_player_id]
+    if float(p.get("hp", 0.0)) <= 0.0:
+        return
+    var player_pos := Vector2(float(p.get("x", screen_size.x * 0.5)), float(p.get("y", screen_size.y * 0.68)))
+    var facing := Vector2.LEFT if float(p.get("face_x", 1.0)) < 0.0 else Vector2.RIGHT
+    var weapon_id := _active_weapon_id(p)
+    var profile := _weapon_profile(weapon_id)
+    var max_range: float = minf(float(profile.get("range", SHOT_RANGE_MAX)), screen_size.x * 0.90)
+    var projection_limit := max_range
+    var has_target := false
+    for zombie in zombies:
+        var zombie_pos := Vector2(float(zombie.get("x", 0.0)), float(zombie.get("y", 0.0)))
+        var offset := zombie_pos - player_pos
+        var projection := offset.dot(facing)
+        if projection > 16.0 and projection <= projection_limit and absf(offset.y) <= float(profile.get("lane", SHOT_LANE_TOLERANCE)):
+            projection_limit = projection
+            has_target = true
+    var muzzle := player_pos + facing * 24.0 + Vector2(0.0, -5.0)
+    var marker_x := clampf(player_pos.x + facing.x * projection_limit, 8.0, maxf(8.0, screen_size.x - 8.0))
+    var marker_pos := Vector2(marker_x, player_pos.y - 5.0)
+    var marker_color := Color("#b5df91") if has_target else Color("#d5c79a")
+    var available_distance := maxf(0.0, (marker_pos.x - muzzle.x) * facing.x)
+
+    # Light dashed lane guide helps players see exactly which left/right direction FIRE will use.
+    var dash := 0.0
+    while dash < available_distance - 7.0:
+        var seg_start := muzzle + Vector2(facing.x * dash, 0.0)
+        var seg_end := muzzle + Vector2(facing.x * minf(dash + 4.0, available_distance - 5.0), 0.0)
+        draw_line(seg_start, seg_end, Color(marker_color.r, marker_color.g, marker_color.b, 0.34), 1.0, true)
+        dash += 10.0
+
+    # Small chevron near the player gives a clear direction cue even when the range marker is off-screen.
+    var cue := muzzle + facing * 14.0
+    draw_line(cue + Vector2(-facing.x * 4.0, -3.0), cue + Vector2(0.0, 0.0), Color(marker_color.r, marker_color.g, marker_color.b, 0.88), 1.5, true)
+    draw_line(cue + Vector2(0.0, 0.0), cue + Vector2(-facing.x * 4.0, 3.0), Color(marker_color.r, marker_color.g, marker_color.b, 0.88), 1.5, true)
+
+    # Bracket reticle: green means a zombie is currently inside this weapon's effective firing lane.
+    var radius := 7.0 if has_target else 6.0
+    draw_arc(marker_pos, radius, 0.0, TAU, 24, Color(marker_color.r, marker_color.g, marker_color.b, 0.90), 1.2)
+    var tick := 3.0
+    draw_line(marker_pos + Vector2(-radius - tick, 0.0), marker_pos + Vector2(-radius + 1.0, 0.0), marker_color, 1.2, true)
+    draw_line(marker_pos + Vector2(radius - 1.0, 0.0), marker_pos + Vector2(radius + tick, 0.0), marker_color, 1.2, true)
+    draw_line(marker_pos + Vector2(0.0, -radius - tick), marker_pos + Vector2(0.0, -radius + 1.0), marker_color, 1.2, true)
+    draw_line(marker_pos + Vector2(0.0, radius - 1.0), marker_pos + Vector2(0.0, radius + tick), marker_color, 1.2, true)
+    draw_circle(marker_pos, 1.2, Color(marker_color.r, marker_color.g, marker_color.b, 0.95))
 
 func _draw_game_hud() -> void:
     var w := screen_size.x

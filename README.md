@@ -1,6 +1,13 @@
-# Pixel Zombie LAN — v0.4.19
+# Pixel Zombie LAN — v0.4.20
 
 A landscape Android zombie wave-defense game made with Godot 4. It supports solo offline play and a host-authoritative LAN session for up to four devices through the same Wi-Fi hotspot. No internet is needed after installation.
+
+## v0.4.20 — Weapon grip, aim guide, tighter barricade rows and supplied ambience
+- Reworked survivor weapon rendering: firearms are scaled/placed around the gameplay muzzle, mirrored for facing, and connected to the character with outlined arms and hands. Recoil flash now lines up with the actual shot origin.
+- Added a visual-only horizontal aim guide. Dashed guide + bracket marker show the current direction and nearest eligible zombie; the marker turns muted green when a zombie is inside the active weapon's effective range/lane. Hit logic and LAN packets are unchanged.
+- Kept horizontal barricade join spacing at 4 px, reduced vertical row spacing from 88 px to 60 px, and added vertical-row snapping for tighter upper/lower barricade placement.
+- Added the supplied 151-second stereo MP3 as the primary looping gameplay ambience at -20 dB under gunfire/SFX. The existing WAV ambience remains a fallback; music still starts only during gameplay, pauses on Pause, and stops when leaving/game over.
+- Android version code/name: 32 / 0.4.20. Snapshot layout and LAN wire protocol remain unchanged.
 
 ## v0.4.19 — movement animation, more frequent airdrops, and combat audio
 - Walking visuals split the source sprite at the hips and animate the lower-body layer with a stronger gait; player weapon placement sways with movement, adds a grip-hand overlay, recoil and a brief pixel muzzle flash. Zombie and boss movement use stronger stride sway, with the Brute retaining its dedicated attack-frame sheets.
@@ -46,7 +53,7 @@ A landscape Android zombie wave-defense game made with Godot 4. It supports solo
 
 ## Controls
 - Left virtual analog: move in the lower defense lane.
-- Hold FIRE: repeat shots in the last left/right facing direction. The sidearm has infinite ammo; airdrop weapons use finite magazines and reserve ammo.
+- Hold FIRE: repeat shots in the last left/right facing direction. The visual aim guide and bracket marker show the current shot lane; green means a zombie is within the active weapon range/lane. This is visual assistance only. The sidearm has infinite ammo; airdrop weapons use finite magazines and reserve ammo.
 - HEAL: consume one medkit to restore up to 35 HP.
 - GREN: hold and drag to the landing point, then release to throw. The dotted arc and landing marker show the aim.
 - WALL: hold and drag the A-frame barricade preview, then release when it is green. Red indicates invalid placement. Barricades block aligned zombies, have HP and can be destroyed.
