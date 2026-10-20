@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.36
+# Pixel Zombie LAN — wave defense prototype v0.4.37
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -118,20 +118,33 @@ const MAX_GRENADES_PER_SNAPSHOT := 8
 const MAX_EFFECTS_PER_SNAPSHOT := 24
 const EFFECT_REDUNDANCY_MS := 220
 const SNAPSHOT_BUFFER_MAX := 40
-const INTERP_DELAY_MIN := 0.050
-const INTERP_DELAY_MAX := 0.30
+const INTERP_DELAY_MIN := 0.034   # ~2 snapshot intervals; the adaptive buffer never goes below this
+const INTERP_DELAY_MAX := 0.16    # longer stalls are hidden by the catch-up clock below, not by more delay
 const INTERP_ADAPT_RATE := 0.10
-const EXTRAPOLATE_MAX := 0.12
+const INTERP_MARGIN := 0.006
+const INTERP_RAISE_RATE := 0.40   # buffer target may grow 400 ms/s (react to a bad link quickly) ...
+const INTERP_LOWER_RATE := 0.06   # ... but shrinks slowly (no oscillation)
+const JITTER_WINDOW := 150        # recent arrivals used for the jitter percentile (~2.5 s at 60 Hz)
+const JITTER_PERCENTILE := 0.92
+const JITTER_RECALC_EVERY := 15
+const PLAY_CATCHUP_GAIN := 4.0
+const PLAY_CATCHUP_MAX := 0.60    # after a stall the render clock fast-forwards at most 1.6x instead of teleporting
+const PLAY_SLOWDOWN_GAIN := 3.0
+const PLAY_SLOWDOWN_MAX := 0.15
+const PLAY_RESYNC := 0.75         # a clock error this large (a >0.75 s outage) is re-anchored in one step
+const EXTRAPOLATE_MAX := 0.10
 const TELEPORT_DISTANCE := 150.0
 const CLOCK_DRIFT_RATE := 0.002
 const JITTER_SMOOTHING := 0.08
 const COMMAND_BYTES := 8
-const COMMAND_MAX_PER_PACKET := 8
+const COMMAND_MAX_PER_PACKET := 24 # un-acked commands are re-sent; 24 covers a ~400 ms Wi-Fi freeze without losing movement
+const INPUT_SEND_MIN_GAP := 0.0095  # client sends one command packet per rendered frame (up to ~105/s)
+const SNAPSHOT_SEND_MIN_GAP := 0.0095 # host sends one snapshot per rendered frame (up to ~105/s), evenly spaced
 const COMMAND_HISTORY_MAX := 240
 const COMMAND_DT_UNIT := 0.0001
 const COMMAND_MAX_DT := 0.1
 const COMMAND_BUDGET_START := 0.25
-const COMMAND_BUDGET_MAX := 0.4
+const COMMAND_BUDGET_MAX := 0.6
 const COMMAND_BUDGET_RATE := 1.12
 const COMMAND_STALE_MS := 250
 const PRED_SNAP_DISTANCE := 90.0
@@ -139,16 +152,23 @@ const PRED_DEADZONE := 0.35
 const PRED_CORRECTION_RATE := 10.0
 # Host-side smooth view of remote survivors (what the host DRAWS; gameplay keeps the exact position).
 const HOST_VIEW_DELAY_MIN := 0.030
-const HOST_VIEW_DELAY_MAX := 0.200
+const HOST_VIEW_DELAY_MAX := 0.130
 const HOST_VIEW_DELAY_PAD := 0.012
 const HOST_VIEW_EXTRAPOLATE_MAX := 0.10
 const HOST_VIEW_SNAP_DISTANCE := 70.0
-const HOST_VIEW_RESYNC_S := 0.25
+const HOST_VIEW_RESYNC_S := 0.75
+const HOST_VIEW_CATCHUP_GAIN := 4.0
+const HOST_VIEW_CATCHUP_MAX := 0.60
+const HOST_VIEW_SLOWDOWN_MAX := 0.15
 const HOST_VIEW_PLL_GAIN := 2.0
 const HOST_VIEW_PLL_MAX := 0.10
 const HOST_VIEW_OFFSET_LEAK := 0.01
 const HOST_VIEW_JITTER_DECAY := 0.97
-const HOST_VIEW_SAMPLES_MAX := 90
+const HOST_VIEW_SAMPLES_MAX := 120
+const VIS_SPEED_LIMIT_PLAYER := 330.0 # px/s: remote survivors never visually move faster than this ...
+const VIS_SPEED_LIMIT_ZOMBIE := 150.0 # ... so a late/corrected snapshot is absorbed smoothly (no pops)
+const VIS_SPEED_LIMIT_BOSS := 260.0
+const OFFSET_TRACK_MAX_EXCESS := 0.060 # delayed (stalled) packets never drag the best-path clock estimate upward
 const FIRE_COOLDOWN_MS := 280
 const FIRE_REMOTE_TOLERANCE_MS := 220 # host accepts slightly early remote shots to absorb Wi-Fi jitter
 const ENET_THROTTLE_INTERVAL_MS := 1000
@@ -256,6 +276,16 @@ var clock_offset_ms := 0.0
 var clock_ready := false
 var jitter_ms := 0.0
 var interp_delay := 0.10
+var render_dt := 0.0
+var play_t := 0.0                 # client render clock on the host timeline (rate-controlled, never teleports)
+var play_ready := false
+var jitter_ring := PackedFloat32Array()
+var jitter_ring_pos := 0
+var jitter_count := 0
+var jitter_p_ms := 0.0            # p92 of recent arrival deviation: what the buffer must absorb
+var spacing_peak_ms := 17.0       # decaying peak of host snapshot spacing
+var last_host_ms_seen := -1
+var prewarm_frames_left := 3
 var last_snapshot_seq := -1
 var render_time := 0.0
 var render_starved := false
@@ -381,11 +411,14 @@ func _process(delta: float) -> void:
         if is_host:
             input_vectors[local_player_id] = joystick_vector
             _host_simulate(minf(delta, 0.1))
+            if delta > 0.1:
+                # The simulation step is capped at 0.1 s, but real time kept flowing: credit the remote
+                # movement budgets for it so a host hitch never makes clients rubber-band.
+                _credit_command_budgets((minf(delta, 0.3) - 0.1) * COMMAND_BUDGET_RATE)
+            # One snapshot per rendered frame (<= ~105/s): evenly spaced, freshest possible state.
             snapshot_timer += delta
-            if snapshot_timer >= SNAPSHOT_INTERVAL - delta * 0.5:
-                snapshot_timer -= SNAPSHOT_INTERVAL
-                if snapshot_timer > SNAPSHOT_INTERVAL or snapshot_timer < -SNAPSHOT_INTERVAL:
-                    snapshot_timer = 0.0
+            if snapshot_timer >= SNAPSHOT_SEND_MIN_GAP:
+                snapshot_timer = 0.0
                 _broadcast_world()
         elif _is_connected_client():
             _client_network_tick(delta)
@@ -397,7 +430,18 @@ func _process(delta: float) -> void:
     if _is_connected_client():
         _update_net_stats(delta)
     _update_player_death_visuals(delta)
+    # Everything queued this frame (snapshot, input commands, fire/action requests, SFX events) leaves
+    # right now instead of waiting for the next frame's poll: saves up to one frame per hop.
+    _net_flush()
     queue_redraw()
+
+func _net_flush() -> void:
+    if peer != null and peer.host != null:
+        peer.host.flush()
+
+func _credit_command_budgets(extra: float) -> void:
+    for id_variant in cmd_budget.keys():
+        cmd_budget[id_variant] = minf(COMMAND_BUDGET_MAX, float(cmd_budget[id_variant]) + extra)
 
 func _setup_sfx() -> void:
     # Literal resource paths are intentional: Godot's exporter and CI can verify every sound.
@@ -1696,6 +1740,7 @@ func _host_track_get(id: int, p: Dictionary) -> Dictionary:
             "s": [Vector3(0.0, float(p.get("x", 0.0)), float(p.get("y", 0.0)))],
             "vt": 0.0, "off": 0.0, "ready": false, "rt": 0.0, "rt_ready": false,
             "jit": 0.0, "span": INPUT_INTERVAL, "last_s": 0.0,
+            "jr": [], "jp": 0, "jn": 0,
         }
     return host_track[id]
 
@@ -1715,10 +1760,23 @@ func _host_track_arrival(track: Dictionary, vt_before: float) -> void:
         track["ready"] = true
     elif off_i < float(track["off"]):
         track["off"] = off_i
-    else:
+    elif off_i - float(track["off"]) < OFFSET_TRACK_MAX_EXCESS:
         track["off"] = float(track["off"]) + (off_i - float(track["off"])) * HOST_VIEW_OFFSET_LEAK
     var excess := maxf(0.0, off_i - float(track["off"]))
-    track["jit"] = maxf(excess, float(track["jit"]) * HOST_VIEW_JITTER_DECAY)
+    # Same idea as the client's buffer: p92 of the last ~2.5 s of arrival lateness, not a single spike.
+    var ring: Array = track["jr"]
+    if ring.size() < JITTER_WINDOW:
+        ring.append(excess)
+    else:
+        ring[int(track["jp"])] = excess
+        track["jp"] = (int(track["jp"]) + 1) % JITTER_WINDOW
+    track["jn"] = int(track["jn"]) + 1
+    if int(track["jn"]) % JITTER_RECALC_EVERY == 0 and ring.size() >= 12:
+        var sorted_ring := ring.duplicate()
+        sorted_ring.sort()
+        track["jit"] = float(sorted_ring[mini(sorted_ring.size() - 1, int(float(sorted_ring.size()) * JITTER_PERCENTILE))])
+    elif ring.size() < 12:
+        track["jit"] = maxf(float(track["jit"]), excess) # until the window fills, be conservative
     var span := vt_end - vt_before
     if span > 0.0:
         track["span"] = lerpf(float(track["span"]), clampf(span, 0.005, 0.12), 0.1)
@@ -1745,14 +1803,24 @@ func _update_host_view() -> void:
             continue
         var delay := clampf(float(track["span"]) + float(track["jit"]) + HOST_VIEW_DELAY_PAD, HOST_VIEW_DELAY_MIN, HOST_VIEW_DELAY_MAX)
         var target_rt := now_s - float(track["off"]) - delay
+        var samples: Array = track["s"]
+        var newest_sample: Vector3 = samples[samples.size() - 1]
         if not bool(track["rt_ready"]) or absf(target_rt - float(track["rt"])) > HOST_VIEW_RESYNC_S:
             track["rt"] = target_rt
             track["rt_ready"] = true
         else:
+            # Rate-controlled playhead: after a link freeze the burst of buffered commands is played back
+            # up to 1.6x fast until the view has caught up, instead of teleporting the survivor.
             var err := target_rt - float(track["rt"])
-            track["rt"] = float(track["rt"]) + frame_dt * (1.0 + clampf(err * HOST_VIEW_PLL_GAIN, -HOST_VIEW_PLL_MAX, HOST_VIEW_PLL_MAX))
+            var play_rate := 1.0
+            if err > 0.0:
+                play_rate += minf(err * HOST_VIEW_CATCHUP_GAIN, HOST_VIEW_CATCHUP_MAX)
+            else:
+                play_rate += maxf(err * HOST_VIEW_PLL_GAIN, -HOST_VIEW_SLOWDOWN_MAX)
+            track["rt"] = float(track["rt"]) + frame_dt * play_rate
+        # The playhead never runs further past the newest known sample than the coast budget.
+        track["rt"] = minf(float(track["rt"]), newest_sample.x + HOST_VIEW_EXTRAPOLATE_MAX)
         var rt := float(track["rt"])
-        var samples: Array = track["s"]
         while samples.size() > 2:
             var second: Vector3 = samples[1]
             if second.x > rt:
@@ -1775,12 +1843,15 @@ func _update_host_view() -> void:
             var prev: Vector3 = samples[count - 2]
             var last_seg := last.x - prev.x
             if last_seg > 0.0005:
-                var ahead := minf(rt - last.x, HOST_VIEW_EXTRAPOLATE_MAX)
+                var ahead := clampf(rt - last.x, 0.0, HOST_VIEW_EXTRAPOLATE_MAX)
+                ahead *= 1.0 - 0.5 * ahead / HOST_VIEW_EXTRAPOLATE_MAX # damped: eases to a stop instead of overshooting
                 view += Vector2(last.y - prev.y, last.z - prev.z) / last_seg * ahead
         if view.distance_to(auth) > HOST_VIEW_SNAP_DISTANCE:
             view = auth
             track["s"] = [Vector3(float(track["vt"]), auth.x, auth.y)]
             track["rt_ready"] = false
+        elif host_view.has(id):
+            view = _limit_visual_step(host_view[id], view, VIS_SPEED_LIMIT_PLAYER, frame_dt)
         host_view[id] = view
 
 func _player_draw_pos(id: int, p: Dictionary) -> Vector2:
@@ -1830,6 +1901,14 @@ func _reset_client_interpolation() -> void:
     seen_effects.clear()
     zombie_cache.clear()
     clock_ready = false
+    play_ready = false
+    jitter_ring.clear()
+    jitter_ring_pos = 0
+    jitter_count = 0
+    jitter_p_ms = 0.0
+    spacing_peak_ms = 17.0
+    last_host_ms_seen = -1
+    interp_delay = 0.10
     last_snapshot_seq = -1
     pred_ready = false
     pred_unacked.clear()
@@ -1857,7 +1936,8 @@ func _ingest_snapshot(buf: PackedByteArray, mode: int) -> void:
         last_snapshot_seq = seq
         # Clock alignment: the minimum observed (receive - host) offset is the best-case path;
         # anything above it counts as jitter and widens the interpolation delay.
-        var sample := float(now_ms) - float(int(snap["host_ms"]))
+        var host_ms := int(snap["host_ms"])
+        var sample := float(now_ms) - float(host_ms)
         if not clock_ready or mode == 1:
             clock_offset_ms = sample
             clock_ready = true
@@ -1867,9 +1947,14 @@ func _ingest_snapshot(buf: PackedByteArray, mode: int) -> void:
             if deviation < 0.0:
                 clock_offset_ms = sample
                 deviation = 0.0
-            else:
+            elif deviation < OFFSET_TRACK_MAX_EXCESS * 1000.0:
                 clock_offset_ms += deviation * CLOCK_DRIFT_RATE
             jitter_ms += (deviation - jitter_ms) * JITTER_SMOOTHING
+            _record_arrival_jitter(deviation)
+            if last_host_ms_seen >= 0 and host_ms > last_host_ms_seen and host_ms - last_host_ms_seen < 400:
+                var gap := float(host_ms - last_host_ms_seen)
+                spacing_peak_ms = maxf(gap, spacing_peak_ms * 0.985 + gap * 0.015)
+        last_host_ms_seen = host_ms
         snap["recv"] = now_ms
         snap_buffer.append(snap)
         while snap_buffer.size() > SNAPSHOT_BUFFER_MAX:
@@ -2070,8 +2155,23 @@ func _predict_local_fire() -> bool:
 
 # --- client: render-state construction --------------------------------------
 
+func _record_arrival_jitter(deviation_ms: float) -> void:
+    # Rolling window of how late each snapshot arrived relative to the best path seen so far.
+    if jitter_ring.size() < JITTER_WINDOW:
+        jitter_ring.append(deviation_ms)
+    else:
+        jitter_ring[jitter_ring_pos] = deviation_ms
+        jitter_ring_pos = (jitter_ring_pos + 1) % JITTER_WINDOW
+    jitter_count += 1
+    if jitter_count % JITTER_RECALC_EVERY == 0 and jitter_ring.size() >= 12:
+        var sorted_copy := jitter_ring.duplicate()
+        sorted_copy.sort()
+        jitter_p_ms = sorted_copy[mini(sorted_copy.size() - 1, int(float(sorted_copy.size()) * JITTER_PERCENTILE))]
+
 func _target_interp_delay() -> float:
-    return clampf(SNAPSHOT_INTERVAL * 2.0 + jitter_ms * 0.002 + 0.015, INTERP_DELAY_MIN, INTERP_DELAY_MAX)
+    # Buffer = worst typical snapshot spacing + the p92 lateness of recent arrivals + a small margin.
+    # (A freeze longer than this is handled by the catch-up render clock instead of by more delay.)
+    return clampf((spacing_peak_ms + jitter_p_ms) * 0.001 + INTERP_MARGIN, INTERP_DELAY_MIN, INTERP_DELAY_MAX)
 
 func _find_record(records: Array, record_id: int, fallback: Dictionary) -> Dictionary:
     for record in records:
@@ -2079,13 +2179,46 @@ func _find_record(records: Array, record_id: int, fallback: Dictionary) -> Dicti
             return record
     return fallback
 
+func _limit_visual_step(prev: Vector2, target: Vector2, max_speed: float, delta: float) -> Vector2:
+    # Slew-rate limiter for what is DRAWN. In steady motion the target is always within one frame's
+    # normal step so this is a no-op (zero added lag); when an extrapolated/corrected target jumps,
+    # the drawn entity glides to it at a believable speed instead of popping.
+    if delta <= 0.0:
+        return target
+    var diff := target - prev
+    var dist := diff.length()
+    var max_step := max_speed * maxf(delta, 0.008)
+    if dist <= max_step or dist > TELEPORT_DISTANCE:
+        return target
+    return prev + diff * (max_step / dist)
+
 func _client_update_render(delta: float) -> void:
     if snap_buffer.is_empty():
         return
+    render_dt = delta
     var now_ms := Time.get_ticks_msec()
-    interp_delay = move_toward(interp_delay, _target_interp_delay(), delta * INTERP_ADAPT_RATE)
-    var render_t := (float(now_ms) - clock_offset_ms) / 1000.0 - interp_delay
+    var wanted_delay := _target_interp_delay()
+    if wanted_delay > interp_delay:
+        interp_delay = minf(wanted_delay, interp_delay + delta * INTERP_RAISE_RATE)
+    else:
+        interp_delay = maxf(wanted_delay, interp_delay - delta * INTERP_LOWER_RATE)
+    var target_t := (float(now_ms) - clock_offset_ms) / 1000.0 - interp_delay
     var newest: Dictionary = snap_buffer[snap_buffer.size() - 1]
+    # Rate-controlled render clock: it follows the wall-clock target, but speeds up (<=1.6x) when it has
+    # fallen behind after a stall and slows down when the buffer shrinks, so entities never teleport.
+    if not play_ready or absf(target_t - play_t) > PLAY_RESYNC:
+        play_t = target_t
+        play_ready = true
+    else:
+        var clock_err := target_t - play_t
+        var clock_rate := 1.0
+        if clock_err > 0.0:
+            clock_rate += minf(clock_err * PLAY_CATCHUP_GAIN, PLAY_CATCHUP_MAX)
+        else:
+            clock_rate += maxf(clock_err * PLAY_SLOWDOWN_GAIN, -PLAY_SLOWDOWN_MAX)
+        play_t += delta * clock_rate
+    play_t = minf(play_t, float(newest["t"]) + EXTRAPOLATE_MAX)
+    var render_t := play_t
     var from_snap: Dictionary = snap_buffer[0]
     var to_snap: Dictionary = snap_buffer[0]
     var alpha := 0.0
@@ -2103,7 +2236,9 @@ func _client_update_render(delta: float) -> void:
             if older_index > 0:
                 from_snap = snap_buffer[older_index - 1]
                 var span := maxf(0.001, float(to_snap["t"]) - float(from_snap["t"]))
-                alpha = 1.0 + minf(render_t - float(to_snap["t"]), EXTRAPOLATE_MAX) / span
+                # Damped dead-reckoning: full speed at first, easing to a stop at EXTRAPOLATE_MAX.
+                var ahead := clampf(render_t - float(to_snap["t"]), 0.0, EXTRAPOLATE_MAX)
+                alpha = 1.0 + ahead * (1.0 - 0.5 * ahead / EXTRAPOLATE_MAX) / span
             else:
                 from_snap = to_snap
         else:
@@ -2139,6 +2274,11 @@ func _client_update_render(delta: float) -> void:
             face_left = local_face < 0.0
             walking = local_walking and _local_alive()
             shoot_timer = maxf(local_shoot_timer, float(stats["shoot"]))
+        if id != local_player_id:
+            var prev_u := Vector2(float(shown.get("ux", pos.x)), float(shown.get("uy", pos.y)))
+            pos = _limit_visual_step(prev_u, pos, VIS_SPEED_LIMIT_PLAYER, delta)
+            shown["ux"] = pos.x
+            shown["uy"] = pos.y
         shown["x"] = pos.x * sx
         shown["y"] = pos.y * sy
         shown["hp"] = float(stats["hp"])
@@ -2257,6 +2397,11 @@ func _build_zombie(zid: int, rec: Dictionary, older: Dictionary, alpha: float, s
     var kind := clampi(int(rec["kind"]), 0, ZOMBIE_MAX_HP.size() - 1)
     var flags := int(rec["fl"])
     var shown: Dictionary = zombie_cache.get(zid, {})
+    if shown.has("ux"):
+        var prev_zombie := Vector2(float(shown["ux"]), float(shown["uy"]))
+        pos = _limit_visual_step(prev_zombie, pos, VIS_SPEED_LIMIT_BOSS if kind == ZOMBIE_KIND_BOSS else VIS_SPEED_LIMIT_ZOMBIE, render_dt)
+    shown["ux"] = pos.x
+    shown["uy"] = pos.y
     shown["id"] = zid
     shown["kind"] = kind
     shown["x"] = pos.x * sx
@@ -2284,10 +2429,8 @@ func _tick_client_effects(delta: float) -> void:
 func _client_network_tick(delta: float) -> void:
     _predict_local_player(delta)
     client_input_timer += delta
-    if client_input_timer >= INPUT_INTERVAL - delta * 0.5:
-        client_input_timer -= INPUT_INTERVAL
-        if client_input_timer > INPUT_INTERVAL or client_input_timer < -INPUT_INTERVAL:
-            client_input_timer = 0.0
+    if client_input_timer >= INPUT_SEND_MIN_GAP:
+        client_input_timer = 0.0
         if pred_ready:
             _send_input_commands()
     _client_update_render(delta)
@@ -4245,6 +4388,42 @@ func _draw() -> void:
         _draw_game_over_menu()
     else:
         _draw_game_world()
+    if prewarm_frames_left > 0:
+        prewarm_frames_left -= 1
+        _draw_prewarm(prewarm_frames_left)
+
+func _draw_prewarm(pass_index: int) -> void:
+    # Mobile GL drivers compile a shader variant and upload a font glyph the FIRST time a primitive/texture/
+    # glyph is drawn, which shows up as a 20-100 ms hitch in the middle of a fight (first shot, first
+    # explosion, first boss). Touching every primitive type, texture and glyph set once while the home screen
+    # is up (virtually invisible: 2 px, ~2 % alpha, top-left corner) moves that cost out of gameplay.
+    var a := 0.02
+    var tint := Color(1.0, 1.0, 1.0, a)
+    var box := Rect2(0.0, 0.0, 2.0, 2.0)
+    draw_rect(box, Color(1.0, 1.0, 1.0, a))
+    draw_rect(box, tint, false, 1.0)
+    draw_line(Vector2(0.0, 0.0), Vector2(2.0, 2.0), tint, 1.0, true)
+    draw_line(Vector2(0.0, 0.0), Vector2(2.0, 2.0), tint, 2.0)
+    draw_circle(Vector2(1.0, 1.0), 1.0, tint)
+    draw_arc(Vector2(1.0, 1.0), 1.0, 0.0, TAU, 12, tint, 1.0)
+    draw_colored_polygon(PackedVector2Array([Vector2(0, 0), Vector2(2, 0), Vector2(1, 2)]), tint)
+    draw_set_transform(Vector2(1.0, 1.0), 0.3, Vector2.ONE)
+    draw_rect(Rect2(-1.0, -1.0, 2.0, 2.0), tint)
+    draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+    var textures: Array = [sprite_atlas, background_texture, grenade_texture, grenade_explosion_texture, barricade_texture,
+        turret_base_texture, turret_head_texture, airdrop_crate_texture, parachute_texture, airdrop_landing_texture, boss_texture]
+    textures.append_array(boss_attack_textures)
+    textures.append_array(weapon_icon_textures.values())
+    for texture_variant in textures:
+        var texture: Texture2D = texture_variant as Texture2D
+        if texture == null:
+            continue
+        draw_texture_rect(texture, box, false, tint)
+        draw_texture_rect_region(texture, box, Rect2(Vector2.ZERO, Vector2(minf(2.0, texture.get_width()), minf(2.0, texture.get_height()))), tint, false, true)
+    if ui_font != null and pass_index == 0:
+        var glyphs := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,:;!?%/+-*()[]<>=#&'\"_·—–∞×°"
+        for glyph_size in [7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 21, 23, 31, 36, 51]:
+            draw_string(ui_font, Vector2(0.0, 12.0), glyphs, HORIZONTAL_ALIGNMENT_LEFT, -1, glyph_size, tint)
 
 func _draw_apocalypse_backdrop(darkened: bool = false) -> void:
     var w := screen_size.x
@@ -5176,8 +5355,8 @@ func _draw_game_hud() -> void:
 func _draw_net_stats() -> void:
     var rtt_text := "%d ms" % net_rtt_ms if net_rtt_ms >= 0 else "--"
     var hold_text := "  HOLD" if render_starved else ""
-    var stats_text := "NET  RTT %s  ·  LOSS %.1f%%  ·  %.0f snap/s  ·  %.1f KB/s  ·  BUF %d ms  ·  ERR %.1f px%s" % [rtt_text, net_loss_pct, net_snaps_per_s, net_kbps, int(interp_delay * 1000.0), pred_error_px, hold_text]
-    var box := Rect2(screen_size.x * 0.5 - 215.0, screen_size.y - 20.0, 430.0, 15.0)
+    var stats_text := "NET  RTT %s  ·  LOSS %.1f%%  ·  %.0f snap/s  ·  %.1f KB/s  ·  BUF %d ms  ·  JIT %d ms  ·  ERR %.1f px%s" % [rtt_text, net_loss_pct, net_snaps_per_s, net_kbps, int(interp_delay * 1000.0), int(jitter_p_ms), pred_error_px, hold_text]
+    var box := Rect2(screen_size.x * 0.5 - 250.0, screen_size.y - 20.0, 500.0, 15.0)
     draw_rect(box, Color(0.0, 0.0, 0.0, 0.38))
     draw_string(ui_font, Vector2(box.position.x + 6.0, box.position.y + 11.0), stats_text, HORIZONTAL_ALIGNMENT_CENTER, box.size.x - 12.0, 9, Color(0.72, 0.86, 0.74, 0.9))
 

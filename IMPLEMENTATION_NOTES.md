@@ -1,3 +1,14 @@
+## v0.4.37 smoothness notes
+- `_net_flush()` (end of `_process`) calls `peer.host.flush()`; without it ENet sends queued datagrams only at the next frame's poll.
+- Client: `jitter_ring` (150 arrivals) -> `jitter_p_ms` (p92); `_target_interp_delay()` = (peak snapshot spacing + p92) + 6 ms, clamped 34..160 ms, raised at 400 ms/s, lowered at 60 ms/s. `play_t` is a rate-controlled render clock (catch-up <= 1.6x, slow-down <= 0.85x, re-anchor above 0.75 s error, never beyond newest snapshot + 100 ms damped extrapolation).
+- Host view: same percentile logic per remote survivor (`track["jr"]`), rate-controlled playhead, coast budget 100 ms damped.
+- `_limit_visual_step()` caps the drawn speed of remote survivors (330 px/s), zombies (150) and bosses (260); teleports (>150 px) pass through.
+- Delayed packets (>60 ms late) no longer drag the best-path clock estimate upward (`OFFSET_TRACK_MAX_EXCESS`).
+- `COMMAND_MAX_PER_PACKET` 24, `COMMAND_BUDGET_MAX` 0.6, extra budget credit when a host frame exceeds 0.1 s.
+- `_draw_prewarm()` touches every primitive/texture/glyph size during the first 3 draws.
+- Test tooling: `netem_proxy.py` supports freeze/burst stalls (args 8-9), `run_loopback.sh` honours `PORT_BASE`, `analyze.py` reports freeze/snap/error metrics.
+- Verified headless with Godot 4.7.2 (codec test PASS, loopback profiles clean / wifi / bad / stall). Real-phone testing is still recommended; GPU/driver behaviour (the prewarm) cannot be measured headless.
+
 ## v0.4.36 Android Join keyboard fix
 - `_input()` yields pointer events to the native Join dialog while it is visible, preventing the custom game HUD from processing the same tap behind the dialog.
 - The IPv4 `LineEdit` enables native virtual keyboard behavior, uses URL keyboard layout, grabs focus and enters edit mode after the dialog opens. Enter/Done is registered as dialog submission.

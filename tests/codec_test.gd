@@ -553,6 +553,22 @@ func _initialize() -> void:
         junk.append(rng.randi_range(0, 255))
     check(game._decode_snapshot(junk).is_empty() or true, "junk survives")
     print("[codec checkpoint] PASS: malformed and truncated packets")
+    # v0.4.37 smoothness helpers
+    var normal_step: Vector2 = game._limit_visual_step(Vector2(100, 100), Vector2(102.5, 100), 330.0, 1.0 / 60.0)
+    check(normal_step.is_equal_approx(Vector2(102.5, 100)), "visual limiter adds no lag to normal-speed motion")
+    var big_jump: Vector2 = game._limit_visual_step(Vector2(100, 100), Vector2(140, 100), 330.0, 1.0 / 60.0)
+    check(big_jump.x > 100.0 and big_jump.x < 106.0, "visual limiter glides a 40 px correction instead of popping")
+    var teleport: Vector2 = game._limit_visual_step(Vector2(100, 100), Vector2(500, 100), 330.0, 1.0 / 60.0)
+    check(teleport.is_equal_approx(Vector2(500, 100)), "visual limiter lets real teleports through")
+    game.jitter_p_ms = 0.0
+    game.spacing_peak_ms = 17.0
+    check(is_equal_approx(game._target_interp_delay(), 0.034), "clean link uses the minimum interpolation buffer")
+    game.jitter_p_ms = 60.0
+    check(game._target_interp_delay() > 0.075 and game._target_interp_delay() <= 0.16, "jittery link widens the buffer within its cap")
+    game.jitter_p_ms = 900.0
+    check(is_equal_approx(game._target_interp_delay(), 0.16), "buffer is capped; long freezes use catch-up instead")
+    game.jitter_p_ms = 0.0
+    print("[codec checkpoint] PASS: v0.4.37 smoothness helpers")
     print("[codec checkpoint] BEFORE: 2000 snapshot encodes")
     var t0 := Time.get_ticks_usec()
     var last: PackedByteArray

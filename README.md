@@ -1,4 +1,14 @@
-# Pixel Zombie LAN v0.4.36
+# Pixel Zombie LAN v0.4.37
+
+## v0.4.37 — real-time smoothness pass (host and client)
+- **Packets leave immediately.** `peer.host.flush()` runs at the end of every frame, so snapshots, movement commands and fire/action requests no longer wait for the next frame's poll (saves up to one frame per hop).
+- **Adaptive jitter buffer.** The client buffer is now spacing + p92 of recent arrival lateness (34-160 ms), rising fast on a bad link and shrinking slowly; the host's view of remote survivors uses the same percentile logic.
+- **Catch-up render clock instead of teleporting.** After a Wi-Fi/hotspot freeze the burst of buffered snapshots/commands is played back at up to 1.6x until caught up; extrapolation is damped (max 100 ms).
+- **Visual slew limiter** on remote survivors and zombies: late or corrected data glides in at a believable speed instead of popping. Zero added lag in normal motion.
+- **One snapshot and one command packet per rendered frame** (up to ~105/s) so 90 Hz phones get even spacing; un-acked command redundancy raised 8 -> 24 (covers ~400 ms freezes without losing movement); host hitch no longer starves the remote movement budget.
+- **First-use hitch prewarm:** every draw primitive, texture and glyph set is touched once on the home screen so shader/glyph compilation does not happen mid-fight.
+- Measured (Godot 4.7.2 headless, real UDP loopback + impairment proxy, new Wi-Fi-freeze model): remote survivor/zombie lag on a clean link 75-80 -> 25-30 ms, on 15+-10 ms/2 % loss 80 -> 45-55 ms; host-view snap during freezes 1783 -> ~335 px/s, client-view 589 -> ~330 px/s. Snapshot layout unchanged, but all devices must run v0.4.37 together (command packet limit changed).
+- Android version code/name: 49 / 0.4.37.
 
 ## v0.4.36 — Android Join keyboard and modal input fix
 - The Join LAN IP field explicitly enables and requests the Android virtual keyboard after the dialog is visible; the URL keyboard layout keeps the dot key accessible, and the field accepts a maximum of 15 characters.

@@ -1,8 +1,11 @@
 """Tiny UDP network emulator (delay + jitter + loss) between an ENet client and host.
 
-usage: netem_proxy.py LISTEN_PORT HOST_PORT DELAY_MS JITTER_MS LOSS_PCT SECONDS [BURST]
+usage: netem_proxy.py LISTEN_PORT HOST_PORT DELAY_MS JITTER_MS LOSS_PCT SECONDS [BURST] [STALL_EVERY_S] [STALL_MAX_MS]
 Both directions get the same impairment. Packets are delayed individually, so jitter can reorder.
 BURST (default 0): probability that a loss event drops the following 2 packets as well.
+STALL_EVERY_S / STALL_MAX_MS (default 0 = off): models Wi-Fi power-save / hotspot hiccups. On average
+every STALL_EVERY_S seconds the link freezes for 40 ms .. STALL_MAX_MS; everything sent meanwhile is held
+and released together in order when the stall ends (a delivery burst), exactly what phone hotspots do.
 """
 import heapq
 import random
@@ -15,6 +18,10 @@ listen_port, host_port = int(sys.argv[1]), int(sys.argv[2])
 delay, jitter, loss = float(sys.argv[3]) / 1000.0, float(sys.argv[4]) / 1000.0, float(sys.argv[5]) / 100.0
 run_for = float(sys.argv[6])
 burst = float(sys.argv[7]) if len(sys.argv) > 7 else 0.0
+stall_every = float(sys.argv[8]) if len(sys.argv) > 8 else 0.0
+stall_max = float(sys.argv[9]) / 1000.0 if len(sys.argv) > 9 else 0.0
+stall_until = 0.0
+next_stall = time.time() + 2.0
 
 rng = random.Random(1234)
 front = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -34,7 +41,7 @@ stats = {"up_in": 0, "up_drop": 0, "down_in": 0, "down_drop": 0, "down_bytes": 0
 
 
 def enqueue(direction, data):
-    global seq
+    global seq, stall_until, next_stall
     stats[direction + "_in"] += 1
     if direction == "down":
         stats["down_bytes"] += len(data)
@@ -48,7 +55,13 @@ def enqueue(direction, data):
         if burst > 0 and rng.random() < burst:
             drop_next[direction] = 2
         return
-    when = time.time() + max(0.0, delay + rng.uniform(-jitter, jitter))
+    now = time.time()
+    if stall_every > 0.0 and stall_max > 0.0 and now >= next_stall:
+        stall_until = now + rng.uniform(0.04, stall_max)
+        next_stall = stall_until + rng.expovariate(1.0 / stall_every)
+    when = now + max(0.0, delay + rng.uniform(-jitter, jitter))
+    if now < stall_until:
+        when = max(when, stall_until + rng.uniform(0.0, 0.002))  # released as a burst, order roughly kept
     with lock:
         seq += 1
         heapq.heappush(queue, (when, seq, direction, data))

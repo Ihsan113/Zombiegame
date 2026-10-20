@@ -42,6 +42,23 @@ def best_lag(shown_t, shown_xy, truth_t, truth_xy, lags_ms=range(0, 420, 5)):
     return best
 
 
+def longest_freeze_ms(t, xy, truth_moving):
+    """Longest run (ms) where the drawn position is frozen (<5 px/s) while the truth is moving."""
+    if len(t) < 3:
+        return 0.0
+    dt = np.diff(t)
+    sp = np.hypot(np.diff(xy[:, 0]), np.diff(xy[:, 1])) / np.maximum(dt, 1e-4)
+    frozen = (sp < 5.0) & truth_moving
+    best = cur = 0.0
+    for f, d in zip(frozen, dt):
+        if f:
+            cur += d
+            best = max(best, cur)
+        else:
+            cur = 0.0
+    return best * 1000.0
+
+
 def analyse(folder):
     host = load(folder + "/host.csv")
     cli = load(folder + "/client.csv")
@@ -65,6 +82,12 @@ def analyse(folder):
     mask = st > st[0] + 2.0
     shown_at = np.interp(st[mask], it, ixy[:, 0])
     res["own_mean_abs_x_px"] = float(np.mean(np.abs(shown_at - sxy[mask, 0])))
+    ix = np.interp(st[mask], it, ixy[:, 0]); iy = np.interp(st[mask], it, ixy[:, 1])
+    err = np.hypot(sxy[mask, 0] - ix, sxy[mask, 1] - iy)
+    res["own_err_p99_px"] = float(np.percentile(err, 99))
+    res["own_err_max_px"] = float(np.max(err))
+    dso = np.hypot(np.diff(sxy[:, 0]), np.diff(sxy[:, 1]))
+    res["own_snap_max_px"] = float(np.max(dso[2:])) if len(dso) > 3 else 0.0
     # 2) host-controlled survivor as seen on the client
     rt, rxy = series(cli[("C", 1)])
     ht, hxy = series(host[("H", 1)])
@@ -79,7 +102,8 @@ def analyse(folder):
         res["hostview_lag_ms"], res["hostview_rmse_px"] = d_hv, e_hv
         dtv = np.diff(vt_)
         spv = np.hypot(np.diff(vxy[:, 0]), np.diff(vxy[:, 1])) / np.maximum(dtv, 1e-4)
-        idl = np.interp(vt_[1:], it, ixy[:, 0]) - np.interp(vt_[:-1] , it, ixy[:, 0])
+        lag_hv = (d_hv or 0) / 1000.0
+        idl = np.interp(vt_[1:] - lag_hv, it, ixy[:, 0]) - np.interp(vt_[:-1] - lag_hv, it, ixy[:, 0])
         mv = (np.abs(idl) > 0.05) & (vt_[1:] > vt_[0] + 2.0) & (vt_[1:] < it[-1]) & (dtv >= 0.008)
         if mv.sum() > 20:
             s2 = spv[mv]
@@ -89,11 +113,14 @@ def analyse(folder):
             res["hostview_jerk_p95"] = float(np.percentile(np.abs(np.diff(s2)), 95))
             res["hostview_speed_p99"] = float(np.percentile(s2, 99))
             res["hostview_speed_max"] = float(np.max(s2))
+            mv_h = np.zeros(len(vt_) - 1, dtype=bool); mv_h[:] = mv
+            res["hostview_freeze_max_ms"] = longest_freeze_ms(vt_, vxy, mv_h)
     # smoothness: per-frame speed variation while the remote is moving
     dt = np.diff(rt)
     sp = np.hypot(np.diff(rxy[:, 0]), np.diff(rxy[:, 1])) / np.maximum(dt, 1e-4)
-    htm = np.interp(rt[1:], ht, hxy[:, 0])
-    htm_prev = np.interp(rt[:-1], ht, hxy[:, 0])
+    lag_s = (d_rem or 0) / 1000.0  # compare against the truth as it was one display-lag ago
+    htm = np.interp(rt[1:] - lag_s, ht, hxy[:, 0])
+    htm_prev = np.interp(rt[:-1] - lag_s, ht, hxy[:, 0])
     moving = np.abs(htm - htm_prev) > 0.05
     moving &= rt[1:] > rt[0] + 2.0
     moving &= dt >= 0.008  # ignore back-to-back log lines after a stalled frame (harness artefact)
@@ -103,9 +130,13 @@ def analyse(folder):
         res["remote_stall_pct"] = float(100.0 * np.mean(s < 5.0))
         res["remote_speed_p99"] = float(np.percentile(s, 99))
         res["remote_speed_max"] = float(np.max(s))
+        mv_full = np.zeros(len(rt) - 1, dtype=bool); mv_full[:] = moving
+        res["remote_freeze_max_ms"] = longest_freeze_ms(rt, rxy, mv_full)
     # 3) zombies
     per_lag = []
     sq = []
+    z_cv = []
+    z_freeze = []
     n = 0
     for key in list(cli.keys()):
         if key[0] != "Y":
@@ -122,10 +153,22 @@ def analyse(folder):
             continue
         per_lag.append(d)
         sq.append(e)
+        dtz = np.diff(yt)
+        spz = np.hypot(np.diff(yxy[:, 0]), np.diff(yxy[:, 1])) / np.maximum(dtz, 1e-4)
+        zl = d / 1000.0
+        hz = np.interp(yt[1:] - zl, zt, zxy[:, 0]) - np.interp(yt[:-1] - zl, zt, zxy[:, 0])
+        hy = np.interp(yt[1:] - zl, zt, zxy[:, 1]) - np.interp(yt[:-1] - zl, zt, zxy[:, 1])
+        mvz = (np.hypot(hz, hy) > 0.05) & (dtz >= 0.008)
+        if mvz.sum() > 30:
+            z_cv.append(float(np.std(spz[mvz]) / max(np.mean(spz[mvz]), 1e-6)))
+            z_freeze.append(longest_freeze_ms(yt, yxy, mvz))
     if per_lag:
         res["zombie_lag_ms"] = float(np.median(per_lag))
         res["zombie_rmse_px"] = float(np.median(sq))
         res["zombies_tracked"] = len(per_lag)
+        if z_cv:
+            res["zombie_speed_cv"] = float(np.median(z_cv))
+            res["zombie_freeze_max_ms"] = float(np.max(z_freeze))
     # 4) traffic
     s = cli[("S", 0)]
     byts = [r[1] for r in s][2:]
