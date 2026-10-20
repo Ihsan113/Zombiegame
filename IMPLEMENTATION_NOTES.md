@@ -1,3 +1,8 @@
+## v0.4.36 Android Join keyboard fix
+- `_input()` yields pointer events to the native Join dialog while it is visible, preventing the custom game HUD from processing the same tap behind the dialog.
+- The IPv4 `LineEdit` enables native virtual keyboard behavior, uses URL keyboard layout, grabs focus and enters edit mode after the dialog opens. Enter/Done is registered as dialog submission.
+- Dialog accept/cancel clean up references and hide the virtual keyboard. No gameplay, ENet, snapshot or save-schema changes.
+
 ## v0.4.35 Cancelled-airdrop pickup suppression
 
 - `_host_cancel_weapon_replacement` marks the reserved drop as temporarily ignored for the cancelling player before releasing `reserved_by`.

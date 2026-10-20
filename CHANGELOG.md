@@ -1,4 +1,9 @@
-# Pixel Zombie LAN v0.4.35
+# Pixel Zombie LAN v0.4.36
+
+## v0.4.36 — Android Join keyboard and modal input fix
+- The Join LAN IP field explicitly enables and requests the Android virtual keyboard after the dialog is visible; the URL keyboard layout keeps the dot key accessible, and the field accepts a maximum of 15 characters.
+- While the native Join dialog is open, touches are not dispatched through the custom game HUD, so tapping the IP field cannot accidentally activate controls behind the dialog. Enter/Done submits the dialog, while Cancel safely closes it.
+- Android version code/name: 48 / 0.4.36. Runtime Godot 4.7.2 and real-phone keyboard behavior still need confirmation in CI/device testing.
 
 ## v0.4.35 — Cancel prevents immediate re-trigger for same nearby airdrop
 - After Cancel, the host ignores that exact crate for the cancelling player while they remain nearby; the crate remains on the ground and other players can still claim it.

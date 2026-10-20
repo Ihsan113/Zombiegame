@@ -1,6 +1,6 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.35
+# Pixel Zombie LAN — wave defense prototype v0.4.36
 # Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
 
 const PORT := 24567
@@ -290,6 +290,9 @@ var heal_cooldowns: Dictionary = {}
 var grenade_cooldowns: Dictionary = {}
 var build_cooldowns: Dictionary = {}
 var ui_status := "Offline — tap HOST or JOIN"
+# Track the native Join dialog so its taps are never routed to the custom game HUD.
+var active_join_dialog: ConfirmationDialog
+var active_join_ip_field: LineEdit
 var ui_font: Font
 var screen_size := Vector2(960, 540)
 var last_save_time := 0.0
@@ -5968,6 +5971,11 @@ func _handle_press(pos: Vector2, touch_id: int = -1) -> bool:
     return false
 
 func _input(event: InputEvent) -> void:
+    # A native modal dialog owns pointer gestures while visible. Do not route its taps
+    # through the hand-drawn HUD/gameplay hitboxes; the LineEdit must receive them so
+    # Android can focus the field and open its virtual keyboard normally.
+    if is_instance_valid(active_join_dialog) and active_join_dialog.visible:
+        return
     if event is InputEventScreenTouch:
         var local_pos := _input_canvas_position(event.position)
         if event.pressed:
@@ -6144,24 +6152,61 @@ func _touch_end(index: int) -> void:
         joystick_vector = Vector2.ZERO
 
 func _show_join_dialog() -> void:
+    # Reuse an existing open dialog instead of stacking another native Window.
+    if is_instance_valid(active_join_dialog):
+        if active_join_dialog.visible:
+            active_join_dialog.popup_centered()
+            if is_instance_valid(active_join_ip_field):
+                active_join_ip_field.call_deferred("grab_focus")
+                active_join_ip_field.call_deferred("edit")
+            return
+        active_join_dialog.queue_free()
+        active_join_dialog = null
+        active_join_ip_field = null
+
     var dialog := ConfirmationDialog.new()
+    active_join_dialog = dialog
     dialog.title = "Join LAN World"
     dialog.dialog_text = "Enter the host phone's Wi-Fi IPv4 address. Port: %d" % PORT
     dialog.min_size = Vector2i(440, 200)
+
     var line := LineEdit.new()
+    active_join_ip_field = line
     line.placeholder_text = "Host IP, e.g. 192.168.43.1"
     line.text = host_ip
+    line.max_length = 15 # Longest valid IPv4 address, e.g. 255.255.255.255.
     line.clear_button_enabled = true
+    line.editable = true
+    line.focus_mode = Control.FOCUS_ALL
+    line.mouse_filter = Control.MOUSE_FILTER_STOP
+    line.virtual_keyboard_enabled = true
+    line.virtual_keyboard_show_on_focus = true
+    # URL layout makes the dot key easy to reach for an IPv4 address.
+    line.virtual_keyboard_type = LineEdit.KEYBOARD_TYPE_URL
     line.position = Vector2(20, 82)
     line.size = Vector2(395, 38)
     dialog.add_child(line)
+    dialog.register_text_enter(line)
+
     dialog.confirmed.connect(func():
-        host_ip = line.text.strip_edges()
+        var entered_ip := line.text.strip_edges()
+        active_join_dialog = null
+        active_join_ip_field = null
+        DisplayServer.virtual_keyboard_hide()
+        dialog.queue_free()
+        host_ip = entered_ip
         _join_host(host_ip)
     )
     dialog.canceled.connect(func():
+        active_join_dialog = null
+        active_join_ip_field = null
+        DisplayServer.virtual_keyboard_hide()
         dialog.queue_free()
     )
     add_child(dialog)
     dialog.popup_centered()
+    # popup_centered() is needed before edit mode is entered. Deferred ordering ensures
+    # the control is inside the visible dialog before requesting Android's IME.
+    line.call_deferred("grab_focus")
+    line.call_deferred("edit")
 
