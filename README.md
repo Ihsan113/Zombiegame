@@ -218,3 +218,13 @@ The project now includes `assets/grenade_explosion_asset.png`, `assets/airdrop_p
 
 ### CI troubleshooting: codec test
 The snapshot codec CI step streams output live and stops after 90 seconds if no completion occurs. Look for the last `[codec checkpoint]` line in GitHub Actions to identify which test section stalled.
+
+---
+
+## Main Online Global (dedicated-server prototype)
+
+New home menu: **MAIN ONLINE GLOBAL** -> **SERVER API URL** (http/https base address) -> **CHECK API STATUS** -> **CREATE ROOM** or **JOIN ROOM** (six-character code) -> lobby -> room owner **START SURVIVAL**.
+
+Gameplay runs via ENet UDP to a **Godot headless server**, while Node.js only creates/discovers rooms and authenticates temporary tickets. This is *not* an HTTP gameplay transport. No phone is the host in online mode. The legacy LAN option stays intact as a fallback, and solo saved progress stays device-local.
+
+See **`server/README.md`** for VPS installation, required public UDP port mapping, HTTPS proxy, full API contract, deployment and testing. Without a deployed VPS + Godot server the new online button cannot connect.

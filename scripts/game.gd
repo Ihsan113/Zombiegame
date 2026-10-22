@@ -1,7 +1,7 @@
 extends Node2D
 
-# Pixel Zombie LAN — wave defense prototype v0.4.37
-# Host-authoritative 4-player survival over ENet/UDP on a local Wi-Fi network.
+# Pixel Zombie Online — LAN, solo and authenticated online dedicated servers.
+# Gameplay uses the existing ENet binary protocol, not HTTP polling.
 
 const PORT := 24567
 const MAX_PLAYERS := 4
@@ -177,7 +177,7 @@ const ENET_THROTTLE_DECEL := 0
 const SHOW_NET_STATS := true
 const SAVE_PATH := "user://world_save.json"
 
-var screen_mode := "home" # home, help, lobby, game, pause, game_over
+var screen_mode := "home" # home, help, lobby, online, online_room, game, pause, game_over
 var is_offline := false
 var button_rects: Dictionary = {}
 var sprite_atlas: Texture2D
@@ -323,6 +323,30 @@ var ui_status := "Offline — tap HOST or JOIN"
 # Track the native Join dialog so its taps are never routed to the custom game HUD.
 var active_join_dialog: ConfirmationDialog
 var active_join_ip_field: LineEdit
+# Online API coordinates rooms; authenticated UDP/ENet carries all gameplay.
+var dedicated_mode := false
+var online_mode := false
+var online_api_url := ""
+var online_code := ""
+var online_ticket := ""
+var online_is_owner := false
+var online_host := ""
+var online_port := 0
+var online_poll_timer := 0.0
+var online_pending_request := false
+var online_http: HTTPRequest
+var online_request_kind := ""
+var online_connected := false
+var online_status := "Set an API address to connect"
+var online_deadline_ms := 0
+var online_server_secret := ""
+var online_internal_url := ""
+var online_server_port := 0
+var online_snapshot_interval := 1.0 / 45.0
+var online_owner_peer_id := 0
+var online_pending_auth: Dictionary = {} # peer id -> deadline in Time.get_ticks_msec()
+var online_pending_validation: Dictionary = {}
+var active_online_dialog: ConfirmationDialog
 var ui_font: Font
 var screen_size := Vector2(960, 540)
 var last_save_time := 0.0
@@ -332,6 +356,10 @@ var sfx_last_played: Dictionary = {}
 var music_player: AudioStreamPlayer
 
 func _ready() -> void:
+    # Spawned only by the room API on the VPS. Do not load any visual/audio assets.
+    if not OS.get_environment("PZ_ROOM_CODE").is_empty():
+        _start_dedicated_room()
+        return
     randomize()
     # Landscape is configured in project.godot and export_presets.cfg before startup.
     # Do not force runtime rotation here: Android can otherwise start with a stale portrait viewport.
@@ -343,6 +371,7 @@ func _ready() -> void:
     var control_settings := ConfigFile.new()
     if control_settings.load("user://settings.cfg") == OK:
         aim_marker_enabled = bool(control_settings.get_value("controls", "aim_marker_enabled", true))
+        online_api_url = str(control_settings.get_value("online", "api_url", ""))
     if ui_font == null:
         push_warning("Pixel Zombie LAN: theme fallback font was not available at startup.")
     # Prefer detailed raster assets. Draw functions retain a visible fallback if a texture is missing.
@@ -397,6 +426,26 @@ func _ready() -> void:
     multiplayer.server_disconnected.connect(_on_server_disconnected)
 
 func _process(delta: float) -> void:
+    if dedicated_mode:
+        # Fixed-timestep simulation and network sends run in _physics_process on the VPS.
+        var now_ms := Time.get_ticks_msec()
+        for pending_id in online_pending_auth.keys():
+            if now_ms > int(online_pending_auth[pending_id]):
+                online_pending_auth.erase(pending_id)
+                online_pending_validation.erase(pending_id)
+                if peer != null:
+                    peer.disconnect_peer(int(pending_id))
+        return
+    if screen_mode == "online_room" and not online_code.is_empty() and online_deadline_ms > 0:
+        if Time.get_ticks_msec() >= online_deadline_ms:
+            _online_cancel()
+            screen_mode = "online"
+            online_status = "Timed out connecting to the game. Check firewall / UDP."
+        elif not online_pending_request and not online_connected:
+            online_poll_timer -= delta
+            if online_poll_timer <= 0.0 and peer == null:
+                online_poll_timer = 0.8
+                _online_request("connect", "/api/rooms/connect", {"code": online_code, "ticket": online_ticket})
     screen_size = get_viewport_rect().size
     animation_clock += delta
     _sync_music_state()
@@ -434,6 +483,16 @@ func _process(delta: float) -> void:
     # right now instead of waiting for the next frame's poll: saves up to one frame per hop.
     _net_flush()
     queue_redraw()
+
+func _physics_process(delta: float) -> void:
+    if not dedicated_mode or screen_mode != "game":
+        return
+    _host_simulate(minf(delta, 0.1))
+    snapshot_timer += delta
+    if snapshot_timer >= online_snapshot_interval:
+        snapshot_timer -= online_snapshot_interval
+        _broadcast_world()
+    _net_flush()
 
 func _net_flush() -> void:
     if peer != null and peer.host != null:
@@ -1255,22 +1314,45 @@ func _player_color(id: int) -> Color:
 
 func _on_connected_to_server() -> void:
     local_player_id = multiplayer.get_unique_id()
-    screen_mode = "lobby"
-    ui_status = "Connected — receiving world state..."
     _tune_enet_peer(1)
+    if online_mode:
+        screen_mode = "online_room"
+        online_status = "UDP connected — authenticating your room ticket..."
+        online_connected = true
+        rpc_id(1, "online_submit_ticket", online_ticket)
+        _net_flush()
+    else:
+        screen_mode = "lobby"
+        ui_status = "Connected — receiving world state..."
 
 func _on_connection_failed() -> void:
+    var was_online := online_mode
     _reset_network_state()
-    screen_mode = "lobby"
-    ui_status = "Connection failed — verify host IP and hotspot settings"
+    if was_online:
+        _online_clear_room()
+        screen_mode = "online"
+        online_status = "UDP connection failed. Check server port and firewall."
+    else:
+        screen_mode = "lobby"
+        ui_status = "Connection failed — verify host IP and hotspot settings"
 
 func _on_server_disconnected() -> void:
+    var was_online := online_mode
     _reset_network_state()
-    screen_mode = "lobby"
-    ui_status = "Host disconnected — session ended"
+    if was_online:
+        _online_clear_room()
+        screen_mode = "online"
+        online_status = "Online server disconnected — session ended."
+    else:
+        screen_mode = "lobby"
+        ui_status = "Host disconnected — session ended"
 
 func _on_peer_connected(id: int) -> void:
     if not is_host:
+        return
+    if dedicated_mode:
+        # Do not put unauthenticated UDP peers into the authoritative world.
+        online_pending_auth[id] = Time.get_ticks_msec() + 8000
         return
     if players.size() >= MAX_PLAYERS:
         ui_status = "World full (maximum 4 players)"
@@ -1292,6 +1374,18 @@ func _on_peer_connected(id: int) -> void:
     ui_status = "Player joined · %d/%d" % [players.size(), MAX_PLAYERS]
 
 func _on_peer_disconnected(id: int) -> void:
+    if dedicated_mode:
+        online_pending_auth.erase(id)
+        online_pending_validation.erase(id)
+        _server_internal_post("/internal/disconnected", {"peer_id": id})
+        if online_owner_peer_id == id:
+            online_owner_peer_id = 0
+            var candidates: Array = players.keys()
+            candidates.erase(id)
+            candidates.sort()
+            if not candidates.is_empty():
+                online_owner_peer_id = int(candidates[0])
+                rpc_id(online_owner_peer_id, "online_owner_changed", true)
     players.erase(id)
     airdrop_cancel_ignore_by_player.erase(id)
     input_vectors.erase(id)
@@ -2487,6 +2581,8 @@ func begin_game_over_remote() -> void:
     ui_status = "SQUAD ELIMINATED"
 
 func _begin_game() -> void:
+    if dedicated_mode:
+        _server_internal_post("/internal/started", {})
     if not is_host:
         ui_status = "Only the host can start the world."
         return
@@ -3955,7 +4051,7 @@ func request_restart() -> void:
     if not is_host or not game_over:
         return
     var sender_id := multiplayer.get_remote_sender_id()
-    if players.has(sender_id):
+    if players.has(sender_id) and (not dedicated_mode or sender_id == online_owner_peer_id):
         _restart_run()
 
 func _restart_run() -> void:
@@ -4361,11 +4457,19 @@ func _reset_network_state() -> void:
 
 func _leave_world() -> void:
     # Leaving is not an implicit save. New games start empty; Continue Saved Run is explicit.
+    var was_online := online_mode
     _reset_network_state()
-    screen_mode = "lobby"
-    ui_status = "Disconnected"
+    if was_online:
+        _online_clear_room()
+        screen_mode = "online"
+        online_status = "Disconnected from online room"
+    else:
+        screen_mode = "lobby"
+        ui_status = "Disconnected"
 
 func _draw() -> void:
+    if dedicated_mode:
+        return
     button_rects.clear()
     screen_size = get_viewport_rect().size
     # Opaque safety underlay; the home/world renderers draw over it below.
@@ -4374,6 +4478,12 @@ func _draw() -> void:
         ui_font = ThemeDB.fallback_font
     if screen_mode == "home":
         _draw_home()
+    elif screen_mode == "online":
+        _draw_online()
+    elif screen_mode == "online_room":
+        _draw_online_room()
+    elif screen_mode == "lobby" and online_mode:
+        _draw_online_lobby()
     elif screen_mode == "lobby":
         _draw_lobby()
     elif screen_mode == "help":
@@ -4471,7 +4581,7 @@ func _draw_home() -> void:
         _draw_survivor(center, _player_color(i + 1), float(party_scales[i]))
     draw_rect(Rect2(42, h - 37, left_w - 72, 22), Color(0.015, 0.025, 0.03, 0.75))
     draw_rect(Rect2(42, h - 37, 3, 22), Color("#a83d43"))
-    draw_string(ui_font, Vector2(54, h - 22), "LOCAL CO-OP  /  4 SURVIVORS  /  NO INTERNET", HORIZONTAL_ALIGNMENT_LEFT, left_w - 100, 10, Color("#c8d0c8"))
+    draw_string(ui_font, Vector2(54, h - 22), "ONLINE GLOBAL  /  LAN  /  SOLO  /  4 SURVIVORS", HORIZONTAL_ALIGNMENT_LEFT, left_w - 100, 10, Color("#c8d0c8"))
 
     # A compact, balanced safehouse panel with uniform interaction targets.
     var card_w := minf(392.0, w * 0.405)
@@ -4481,20 +4591,21 @@ func _draw_home() -> void:
     _draw_panel(Rect2(card_x, card_y, card_w, card_h), "SAFEHOUSE TERMINAL", "PROTOCOL 04  /  STAY ALIVE")
     var bx := card_x + 20.0
     var bw := card_w - 40.0
-    _draw_ui_button("home_lan", Rect2(bx, card_y + 78.0, bw, 54.0), "MULTIPLAYER LAN", "HOST OR JOIN UP TO FOUR SURVIVORS", Color("#d64e51"), true)
-    _draw_ui_button("home_solo", Rect2(bx, card_y + 140.0, bw, 52.0), "NEW SOLO RUN", "START WITH A CLEAN ARENA", Color("#c18a55"), false)
+    _draw_ui_button("home_online", Rect2(bx, card_y + 73.0, bw, 54.0), "MAIN ONLINE GLOBAL", "SERVER DEDICATED  /  PRIVATE ROOM CODE", Color("#53b4a0"), true)
+    _draw_ui_button("home_lan", Rect2(bx, card_y + 134.0, bw, 43.0), "MULTIPLAYER LAN", "LOCAL WI-FI / HOTSPOT", Color("#d64e51"), false)
+    _draw_ui_button("home_solo", Rect2(bx, card_y + 184.0, bw, 43.0), "NEW SOLO RUN", "START WITH A CLEAN ARENA", Color("#c18a55"), false)
     var save_available := FileAccess.file_exists(SAVE_PATH)
-    var continue_subtitle := "RESUME THE MANUALLY SAVED RUN" if save_available else "NO SAVED RUN — START SOLO FIRST"
-    _draw_ui_button("home_continue", Rect2(bx, card_y + 200.0, bw, 50.0), "CONTINUE SAVED", continue_subtitle, Color("#8ca17f"), false)
-    _draw_ui_button("home_controls", Rect2(bx, card_y + 252.0, bw, 40.0), "FIELD MANUAL", "MOVE  /  FIRE  /  HEAL  /  SAVE", Color("#9cae91"), false)
-    _draw_ui_button("home_settings", Rect2(bx, card_y + 298.0, bw, 40.0), "USER SETTINGS", "AIM ASSIST / CONTROL PREFERENCES", Color("#a3b48e"), false)
+    var continue_subtitle := "RESUME YOUR SAVED RUN" if save_available else "NO SAVED RUN YET"
+    _draw_ui_button("home_continue", Rect2(bx, card_y + 234.0, bw, 43.0), "CONTINUE SAVED", continue_subtitle, Color("#8ca17f"), false)
+    _draw_ui_button("home_controls", Rect2(bx, card_y + 284.0, bw, 38.0), "FIELD MANUAL", "MOVE / FIRE / HEAL", Color("#9cae91"), false)
+    _draw_ui_button("home_settings", Rect2(bx, card_y + 329.0, bw, 38.0), "USER SETTINGS", "CONTROL PREFERENCES", Color("#a3b48e"), false)
 
-    var signal_rect := Rect2(bx, card_y + 344.0, bw, 30.0)
+    var signal_rect := Rect2(bx, card_y + 380.0, bw, 27.0)
     draw_rect(signal_rect, Color(0.12, 0.045, 0.05, 0.88))
     draw_rect(Rect2(signal_rect.position, Vector2(3, signal_rect.size.y)), Color("#9e4146"))
     draw_circle(Vector2(signal_rect.position.x + 17, signal_rect.position.y + 21), 4.0, Color("#dc685b"))
-    draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "LOCAL SIGNAL ONLY  /  UDP %d" % PORT, HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
-    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD 0.4.33  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
+    draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "ONLINE ROOM SERVICE  /  ENET UDP REALTIME", HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
+    draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD ONLINE 1.0  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
 
 func _draw_help() -> void:
     _draw_apocalypse_backdrop(true)
@@ -5372,7 +5483,10 @@ func _draw_pause_menu() -> void:
     var x := panel.position.x + 24.0
     var bw := panel.size.x - 48.0
     _draw_ui_button("pause_resume", Rect2(x, panel.position.y + 88.0, bw, 55.0), "RESUME SURVIVAL", "BACK TO THE DEFENSE LANE", Color("#cc4b50"), true)
-    _draw_ui_button("pause_save", Rect2(x, panel.position.y + 156.0, bw, 49.0), "SAVE WORLD", "HOST ONLY", Color("#c18a55"), false)
+    if online_mode:
+        draw_string(ui_font, Vector2(x, panel.position.y + 185.0), "ONLINE ROOM %s / SERVER CONTROLS GAME STATE" % online_code, HORIZONTAL_ALIGNMENT_CENTER, bw, 11, Color("#9dc4b1"))
+    else:
+        _draw_ui_button("pause_save", Rect2(x, panel.position.y + 156.0, bw, 49.0), "SAVE WORLD", "HOST ONLY", Color("#c18a55"), false)
     _draw_ui_button("pause_home", Rect2(x, panel.position.y + 218.0, bw, 49.0), "ABANDON SESSION", "RETURN TO SAFEHOUSE", Color("#b94a50"), false)
     draw_string(ui_font, Vector2(x, panel.position.y + panel.size.y - 20.0), ui_status, HORIZONTAL_ALIGNMENT_LEFT, bw, 9, Color("#b9c0b8"))
 
@@ -5392,7 +5506,7 @@ func _draw_game_over_menu() -> void:
     _draw_ui_button("gameover_restart", Rect2(button_x, panel.position.y + 138.0, button_w, 48.0), "RESTART RUN", "RESET WAVE, HEALTH AND ZOMBIES", Color("#c84a4e"), true)
     _draw_ui_button("gameover_home", Rect2(button_x, panel.position.y + 197.0, button_w, 43.0), "RETURN TO SAFEHOUSE", "LEAVE THIS SESSION", Color("#9aa78d"), false)
     if not is_host:
-        draw_string(ui_font, Vector2(button_x, panel.position.y + panel.size.y - 8.0), "RESTART REQUEST GOES TO HOST", HORIZONTAL_ALIGNMENT_CENTER, button_w, 8, Color("#c3a08f"))
+        draw_string(ui_font, Vector2(button_x, panel.position.y + panel.size.y - 8.0), "ROOM OWNER CAN RESTART" if online_mode else "RESTART REQUEST GOES TO HOST", HORIZONTAL_ALIGNMENT_CENTER, button_w, 8, Color("#c3a08f"))
 
 func _draw_panel(rect: Rect2, heading: String, subtitle: String) -> void:
     draw_rect(Rect2(rect.position + Vector2(6, 7), rect.size), Color(0.0, 0.0, 0.0, 0.46))
@@ -6012,6 +6126,9 @@ func _handle_ui_button(id: String) -> void:
         _request_weapon_switch(selected_slot)
         return
     match id:
+        "home_online":
+            screen_mode = "online"
+            online_status = "Set your API URL, then create or join a room"
         "home_lan":
             screen_mode = "lobby"
             ui_status = "Create a world or join a friend on the same hotspot."
@@ -6045,6 +6162,31 @@ func _handle_ui_button(id: String) -> void:
             _show_join_dialog()
         "lobby_start":
             _begin_game()
+        "online_back":
+            _online_cancel()
+            screen_mode = "home"
+        "online_api":
+            _online_show_entry_dialog("api")
+        "online_ping":
+            _online_health()
+        "online_create":
+            _online_create()
+        "online_join":
+            _online_show_entry_dialog("code")
+        "online_cancel":
+            _online_cancel()
+            screen_mode = "online"
+        "online_copy":
+            DisplayServer.clipboard_set(online_code)
+            online_status = "ROOM CODE COPIED: %s" % online_code
+        "online_start":
+            if online_is_owner and _is_connected_client() and players.has(local_player_id):
+                rpc_id(1, "request_online_start")
+                ui_status = "Starting your dedicated-server match..."
+        "online_leave":
+            _leave_world()
+            screen_mode = "online"
+
         "lobby_copy":
             if not host_lan_ip.is_empty() and host_lan_ip != "unknown":
                 DisplayServer.clipboard_set(host_lan_ip)
@@ -6100,7 +6242,9 @@ func _handle_ui_button(id: String) -> void:
         "pause_resume":
             screen_mode = "game"
         "pause_save":
-            if is_host:
+            if online_mode:
+                ui_status = "Online matches are controlled by the dedicated server. No local save."
+            elif is_host:
                 _save_world()
             else:
                 ui_status = "Only the host can save the world."
@@ -6108,7 +6252,9 @@ func _handle_ui_button(id: String) -> void:
             _leave_world()
             screen_mode = "home"
         "gameover_restart":
-            if is_host:
+            if online_mode and not online_is_owner:
+                ui_status = "Only the room owner can restart a match."
+            elif is_host:
                 _restart_run()
             elif _is_connected_client():
                 rpc_id(1, "request_restart")
@@ -6154,6 +6300,8 @@ func _input(event: InputEvent) -> void:
     # through the hand-drawn HUD/gameplay hitboxes; the LineEdit must receive them so
     # Android can focus the field and open its virtual keyboard normally.
     if is_instance_valid(active_join_dialog) and active_join_dialog.visible:
+        return
+    if is_instance_valid(active_online_dialog) and active_online_dialog.visible:
         return
     if event is InputEventScreenTouch:
         var local_pos := _input_canvas_position(event.position)
@@ -6389,3 +6537,397 @@ func _show_join_dialog() -> void:
     line.call_deferred("grab_focus")
     line.call_deferred("edit")
 
+
+
+# ---------------------------------------------------------------------------
+# GLOBAL ONLINE MODE (HTTP/S room discovery + dedicated ENet/UDP game server)
+# ---------------------------------------------------------------------------
+
+func _online_clear_room() -> void:
+    online_mode = false
+    online_code = ""
+    online_ticket = ""
+    online_is_owner = false
+    online_host = ""
+    online_port = 0
+    online_poll_timer = 0.0
+    online_deadline_ms = 0
+    online_connected = false
+    online_pending_request = false
+    online_request_kind = ""
+    if is_instance_valid(online_http):
+        online_http.cancel_request()
+        online_http.queue_free()
+        online_http = null
+
+func _online_cancel() -> void:
+    _reset_network_state()
+    _online_clear_room()
+    online_status = "Not connected"
+
+func _online_save_api() -> void:
+    var cfg := ConfigFile.new()
+    cfg.load("user://settings.cfg")
+    cfg.set_value("online", "api_url", online_api_url)
+    cfg.save("user://settings.cfg")
+
+func _online_set_api(raw_url: String) -> bool:
+    var url := raw_url.strip_edges().trim_suffix("/")
+    if url.length() > 180 or (not url.begins_with("https://") and not url.begins_with("http://")) or url.contains(" ") or url.contains("@") or url.contains("?") or url.contains("#"):
+        online_status = "Invalid API URL. Use https://host or http://host:port"
+        return false
+    if url.trim_prefix("https://").trim_prefix("http://").is_empty():
+        online_status = "Enter a server hostname"
+        return false
+    online_api_url = url
+    _online_save_api()
+    online_status = "API saved. Test the connection before creating a room."
+    return true
+
+func _online_show_entry_dialog(kind: String) -> void:
+    if is_instance_valid(active_online_dialog):
+        active_online_dialog.queue_free()
+    var dialog := ConfirmationDialog.new()
+    active_online_dialog = dialog
+    dialog.title = "Server API Address" if kind == "api" else "Join Online Room"
+    dialog.dialog_text = "Enter http:// or https:// API base URL:" if kind == "api" else "Enter the 6-character invite code:"
+    dialog.min_size = Vector2i(470, 220)
+    var field := LineEdit.new()
+    field.placeholder_text = "https://api.example.com" if kind == "api" else "ABC234"
+    field.text = online_api_url if kind == "api" else ""
+    field.max_length = 180 if kind == "api" else 6
+    field.virtual_keyboard_type = LineEdit.KEYBOARD_TYPE_URL if kind == "api" else LineEdit.KEYBOARD_TYPE_DEFAULT
+    field.position = Vector2(20, 85)
+    field.size = Vector2(420, 38)
+    field.clear_button_enabled = true
+    dialog.add_child(field)
+    dialog.register_text_enter(field)
+    dialog.confirmed.connect(func():
+        var value := field.text.strip_edges()
+        active_online_dialog = null
+        DisplayServer.virtual_keyboard_hide()
+        dialog.queue_free()
+        if kind == "api":
+            _online_set_api(value)
+        else:
+            _online_join(value)
+    )
+    dialog.canceled.connect(func():
+        active_online_dialog = null
+        DisplayServer.virtual_keyboard_hide()
+        dialog.queue_free()
+    )
+    add_child(dialog)
+    dialog.popup_centered()
+    field.call_deferred("grab_focus")
+    field.call_deferred("edit")
+
+func _online_health() -> void:
+    if online_api_url.is_empty():
+        online_status = "Configure the server API address first"
+        return
+    _online_request("health", "/health", {})
+
+func _online_create() -> void:
+    if online_api_url.is_empty():
+        online_status = "Set the API URL first"
+        return
+    _online_request("create", "/api/rooms/create", {})
+
+func _online_join(code: String) -> void:
+    if online_api_url.is_empty():
+        online_status = "Set the API URL first"
+        return
+    var fixed_code := code.strip_edges().to_upper()
+    if fixed_code.length() != 6:
+        online_status = "Room code must be 6 characters"
+        return
+    for index in range(fixed_code.length()):
+        if not "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(fixed_code.substr(index, 1)):
+            online_status = "Invalid room code characters"
+            return
+    _online_request("join", "/api/rooms/join", {"code": fixed_code})
+
+func _online_request(kind: String, path: String, data: Dictionary) -> void:
+    if online_pending_request:
+        return
+    online_pending_request = true
+    online_request_kind = kind
+    online_http = HTTPRequest.new()
+    online_http.timeout = 8.0
+    add_child(online_http)
+    online_http.request_completed.connect(_online_request_complete)
+    var body := JSON.stringify(data)
+    var method := HTTPClient.METHOD_GET if kind == "health" else HTTPClient.METHOD_POST
+    var err := online_http.request(online_api_url + path, ["Content-Type: application/json"], method, "" if kind == "health" else body)
+    if err != OK:
+        online_pending_request = false
+        online_status = "Could not send API request: %s" % error_string(err)
+        online_http.queue_free()
+        online_http = null
+    elif kind != "connect":
+        online_status = "Contacting room API..."
+
+func _online_request_complete(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+    var kind := online_request_kind
+    online_pending_request = false
+    online_request_kind = ""
+    if is_instance_valid(online_http):
+        online_http.queue_free()
+        online_http = null
+    if result != HTTPRequest.RESULT_SUCCESS:
+        online_status = "API network error (%d). Check Internet / HTTPS settings." % result
+        online_deadline_ms = 0
+        return
+    var decoded: Variant = JSON.parse_string(body.get_string_from_utf8())
+    var data: Dictionary = decoded if decoded is Dictionary else {}
+    if code < 200 or code >= 300:
+        online_status = str(data.get("error", "Server returned HTTP %d" % code))
+        online_deadline_ms = 0
+        return
+    match kind:
+        "health":
+            online_status = "API ONLINE — %d active rooms" % int(data.get("rooms", 0))
+        "create", "join":
+            online_code = str(data.get("code", ""))
+            online_ticket = str(data.get("ticket", ""))
+            online_is_owner = bool(data.get("owner", false))
+            online_mode = true
+            online_connected = false
+            online_deadline_ms = Time.get_ticks_msec() + 30000
+            online_poll_timer = 0.0
+            screen_mode = "online_room"
+            online_status = "Provisioning dedicated room..."
+        "connect":
+            if bool(data.get("ready", false)):
+                var game_host := str(data.get("host", ""))
+                var game_port := int(data.get("port", 0))
+                if game_host.is_empty() or game_port < 1 or game_port > 65535:
+                    online_status = "Room service returned an invalid UDP endpoint"
+                    online_deadline_ms = 0
+                    return
+                online_status = "Connecting to game server..."
+                _online_connect_game(game_host, game_port)
+            else:
+                online_status = "Dedicated server is starting — room %s" % online_code
+
+func _online_connect_game(hostname: String, udp_port: int) -> void:
+    if peer != null:
+        return
+    online_host = hostname
+    online_port = udp_port
+    peer = ENetMultiplayerPeer.new()
+    var err := peer.create_client(hostname, udp_port)
+    if err != OK:
+        peer = null
+        online_status = "Game UDP connect failed: %s" % error_string(err)
+        online_deadline_ms = 0
+        return
+    peer.host.compress(ENetConnection.COMPRESS_FASTLZ)
+    multiplayer.multiplayer_peer = peer
+    is_host = false
+    is_offline = false
+    host_ip = hostname
+    _cancel_targeting_modes()
+    cmd_seq = 0
+    cmd_open_qx = 0
+    cmd_open_qy = 0
+    _reset_client_interpolation()
+    players.clear()
+    zombies.clear()
+    airdrops.clear()
+    barricades.clear()
+    turrets.clear()
+    combat_effects.clear()
+    input_vectors.clear()
+
+@rpc("authority", "call_remote", "reliable")
+func online_admitted(owner: bool) -> void:
+    if not online_mode:
+        return
+    online_is_owner = owner
+    online_deadline_ms = 0
+    screen_mode = "lobby"
+    online_status = "Authenticated — share code %s" % online_code
+    ui_status = "ONLINE • Room %s • Connected to dedicated server" % online_code
+
+@rpc("authority", "call_remote", "reliable")
+func online_owner_changed(owner: bool) -> void:
+    if online_mode:
+        online_is_owner = owner
+        ui_status = "You are now the room owner" if owner else "Room owner changed"
+
+@rpc("any_peer", "call_remote", "reliable")
+func online_submit_ticket(ticket: String) -> void:
+    if not dedicated_mode:
+        return
+    var id := multiplayer.get_remote_sender_id()
+    if not online_pending_auth.has(id) or online_pending_validation.has(id) or ticket.length() != 64:
+        if peer != null:
+            peer.disconnect_peer(id)
+        return
+    online_pending_validation[id] = true
+    _server_internal_post("/internal/validate", {"ticket": ticket, "peer_id": id}, func(http_status: int, data: Dictionary):
+        if not online_pending_auth.has(id) or peer == null:
+            return
+        online_pending_validation.erase(id)
+        if http_status != 200 or not bool(data.get("ok", false)) or players.size() >= MAX_PLAYERS:
+            online_pending_auth.erase(id)
+            peer.disconnect_peer(id)
+            return
+        online_pending_auth.erase(id)
+        players[id] = _make_player(id)
+        input_vectors[id] = Vector2.ZERO
+        cmd_last_seq[id] = 0
+        cmd_budget[id] = COMMAND_BUDGET_START
+        _tune_enet_peer(id)
+        var owner := bool(data.get("owner", false))
+        # Creator keeps ownership even if a friend authenticates first.
+        if owner and online_owner_peer_id == 0:
+            online_owner_peer_id = id
+        owner = online_owner_peer_id == id
+        rpc_id(id, "online_admitted", owner)
+        rpc_id(id, "receive_initial_world", _encode_snapshot())
+        if screen_mode == "game":
+            rpc_id(id, "begin_game_remote")
+        elif screen_mode == "game_over":
+            rpc_id(id, "begin_game_over_remote")
+        _broadcast_world()
+    )
+
+@rpc("any_peer", "call_remote", "reliable")
+func request_online_start() -> void:
+    if not dedicated_mode or screen_mode != "lobby":
+        return
+    var id := multiplayer.get_remote_sender_id()
+    if id != online_owner_peer_id or not players.has(id):
+        return
+    _begin_game()
+
+func _server_internal_post(path: String, payload: Dictionary, callback: Callable = Callable()) -> void:
+    if not dedicated_mode:
+        return
+    var req := HTTPRequest.new()
+    req.timeout = 5.0
+    add_child(req)
+    req.request_completed.connect(func(result: int, status: int, _headers: PackedStringArray, bytes: PackedByteArray):
+        var data: Dictionary = {}
+        if result == HTTPRequest.RESULT_SUCCESS:
+            var parsed: Variant = JSON.parse_string(bytes.get_string_from_utf8())
+            if parsed is Dictionary:
+                data = parsed
+        req.queue_free()
+        if callback.is_valid():
+            callback.call(status if result == HTTPRequest.RESULT_SUCCESS else 0, data)
+    )
+    var body := payload.duplicate()
+    body["code"] = online_code
+    var err := req.request(online_internal_url + path, ["Content-Type: application/json", "X-Server-Secret: " + online_server_secret], HTTPClient.METHOD_POST, JSON.stringify(body))
+    if err != OK:
+        req.queue_free()
+        if callback.is_valid():
+            callback.call(0, {})
+
+func _start_dedicated_room() -> void:
+    dedicated_mode = true
+    online_mode = true
+    online_code = OS.get_environment("PZ_ROOM_CODE")
+    online_server_secret = OS.get_environment("PZ_INTERNAL_SECRET")
+    online_internal_url = OS.get_environment("PZ_INTERNAL_URL")
+    online_server_port = int(OS.get_environment("PZ_ROOM_PORT"))
+    var configured_hz := int(OS.get_environment("PZ_SNAPSHOT_HZ"))
+    online_snapshot_interval = 1.0 / float(clampi(configured_hz, 20, 60))
+    if online_code.length() != 6 or online_server_secret.length() < 32 or online_server_port < 1024 or online_internal_url.is_empty():
+        push_error("Invalid dedicated room environment")
+        get_tree().quit(1)
+        return
+    screen_size = Vector2(960, 540) # Fixed simulation coordinates, independent of connected phone resolutions.
+    screen_mode = "lobby"
+    is_host = true
+    is_offline = false
+    local_player_id = 1 # Dedicated server doesn't spawn a player with peer id 1.
+    multiplayer.peer_connected.connect(_on_peer_connected)
+    multiplayer.peer_disconnected.connect(_on_peer_disconnected)
+    peer = ENetMultiplayerPeer.new()
+    var err := peer.create_server(online_server_port, MAX_PLAYERS)
+    if err != OK:
+        push_error("Dedicated UDP bind failed: %s" % error_string(err))
+        get_tree().quit(1)
+        return
+    peer.host.compress(ENetConnection.COMPRESS_FASTLZ)
+    multiplayer.multiplayer_peer = peer
+    Engine.max_fps = 60
+    _server_internal_post("/internal/ready", {})
+    print("Pixel Zombie room %s ready, UDP %d" % [online_code, online_server_port])
+
+func _draw_online() -> void:
+    _draw_apocalypse_backdrop(true)
+    var w := screen_size.x
+    var h := screen_size.y
+    _draw_ui_button("online_back", Rect2(28, 22, 118, 39), "‹  HOME", "", Color("#859b90"), false)
+    _draw_title_text(Vector2(38, 108), "ONLINE GLOBAL", 33, Color("#f0ead8"))
+    draw_string(ui_font, Vector2(40, 135), "PRIVATE 4-PLAYER ROOMS  /  DEDICATED AUTHORITATIVE SERVER", HORIZONTAL_ALIGNMENT_LEFT, w - 80, 12, Color("#a9d9c2"))
+    var panel_x := w * 0.44
+    var panel_y := 30.0
+    var panel_w := w * 0.52 - 25.0
+    _draw_panel(Rect2(panel_x, panel_y, panel_w, h - 60.0), "GLOBAL ROOM TERMINAL", "HTTPS API FOR LOBBY / UDP FOR GAME")
+    var x := panel_x + 20.0
+    var bw := panel_w - 40.0
+    _draw_ui_button("online_api", Rect2(x, 109, bw, 56), "SERVER API URL", "TAP TO ENTER HTTP/HTTPS ADDRESS", Color("#59bba5"), true)
+    var shown_url := online_api_url if not online_api_url.is_empty() else "NOT CONFIGURED"
+    draw_string(ui_font, Vector2(x + 5, 184), shown_url, HORIZONTAL_ALIGNMENT_LEFT, bw - 10, 12, Color("#d8eee4"))
+    _draw_ui_button("online_ping", Rect2(x, 200, bw, 43), "CHECK API STATUS", "TEST CONNECTION", Color("#9bb7a7"), false)
+    _draw_ui_button("online_create", Rect2(x, 259, bw, 59), "CREATE ROOM", "GET A UNIQUE 6-CHARACTER CODE", Color("#d4535b"), true)
+    _draw_ui_button("online_join", Rect2(x, 330, bw, 59), "JOIN ROOM", "ENTER A FRIEND'S ROOM CODE", Color("#c28a5f"), false)
+    draw_string(ui_font, Vector2(40, h * 0.47), "HOW IT WORKS", HORIZONTAL_ALIGNMENT_LEFT, w * 0.40, 16, Color("#f0ead8"))
+    var instructions := ["01  Configure your API address.", "02  Create or join a room.", "03  Share the invite code.", "04  Owner starts the match."]
+    for i in range(instructions.size()):
+        draw_string(ui_font, Vector2(40, h * 0.54 + float(i) * 25.0), str(instructions[i]), HORIZONTAL_ALIGNMENT_LEFT, w * 0.37, 13, Color("#c9d8cd"))
+    draw_string(ui_font, Vector2(40, h - 24), online_status, HORIZONTAL_ALIGNMENT_LEFT, w - 80, 11, Color("#e0d1a8"))
+
+func _draw_online_room() -> void:
+    _draw_apocalypse_backdrop(true)
+    var w := screen_size.x
+    var h := screen_size.y
+    var panel := Rect2(w * 0.20, h * 0.15, w * 0.60, h * 0.70)
+    _draw_panel(panel, "CONNECTING TO GLOBAL ROOM", "ROOM DISCOVERY / UDP CONNECT / TICKET AUTH")
+    _draw_title_text(Vector2(panel.position.x + 32, panel.position.y + 144), online_code, 43, Color("#e9d19c"))
+    draw_string(ui_font, Vector2(panel.position.x + 32, panel.position.y + 185), online_status, HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 64, 13, Color("#d1ddd3"))
+    _draw_ui_button("online_cancel", Rect2(panel.position.x + 32, panel.position.y + panel.size.y - 75, panel.size.x - 64, 45), "CANCEL / BACK", "", Color("#b65257"), false)
+
+func _draw_online_lobby() -> void:
+    _draw_apocalypse_backdrop(true)
+    var w := screen_size.x
+    var h := screen_size.y
+    _draw_ui_button("online_leave", Rect2(28, 21, 123, 39), "‹ LEAVE", "", Color("#a56f6f"), false)
+    _draw_title_text(Vector2(35, 92), "GLOBAL SAFEHOUSE", 30, Color("#efeadf"))
+    draw_string(ui_font, Vector2(38, 114), "REAL-TIME UDP  /  4 PLAYER CO-OP  /  SERVER AUTHORITATIVE", HORIZONTAL_ALIGNMENT_LEFT, w - 70, 11, Color("#9fcbb9"))
+    var left := Rect2(30, 138, w * 0.55, h - 169)
+    var right := Rect2(left.end.x + 14, 138, w - left.end.x - 44, h - 169)
+    _draw_panel(left, "SURVIVOR SQUAD", "%d / %d CONNECTED" % [players.size(), MAX_PLAYERS])
+    var ids: Array = players.keys()
+    ids.sort()
+    var slot_width := (left.size.x - 54.0) * 0.5
+    for i in range(4):
+        var slot := Rect2(left.position.x + 20 + (i % 2) * (slot_width + 12.0), left.position.y + 79 + int(i / 2) * 90, slot_width, 76)
+        if i < ids.size():
+            var id := int(ids[i])
+            draw_rect(slot, Color("#192927"))
+            draw_rect(Rect2(slot.position, Vector2(4, 76)), _player_color(id))
+            _draw_survivor(slot.position + Vector2(32, 38), _player_color(id), 0.52)
+            draw_string(ui_font, slot.position + Vector2(60, 30), "YOU" if id == local_player_id else "SURVIVOR %d" % (i + 1), HORIZONTAL_ALIGNMENT_LEFT, slot.size.x - 70, 13, Color("#f0eadf"))
+            draw_string(ui_font, slot.position + Vector2(60, 52), "CONNECTED", HORIZONTAL_ALIGNMENT_LEFT, slot.size.x - 70, 10, Color("#9acdb8"))
+        else:
+            draw_rect(slot, Color("#40514d"), false, 1.0)
+            draw_string(ui_font, slot.position + Vector2(21, 41), "+  WAITING FOR FRIEND", HORIZONTAL_ALIGNMENT_LEFT, slot.size.x - 30, 11, Color("#a9b5ad"))
+    draw_string(ui_font, Vector2(left.position.x + 20, left.end.y - 10), "ALL PHONES CONNECT DIRECTLY TO THE DEDICATED GAME SERVER", HORIZONTAL_ALIGNMENT_LEFT, left.size.x - 40, 9, Color("#9fbca9"))
+    _draw_panel(right, "PRIVATE ROOM", "SHARE YOUR INVITE CODE")
+    var x := right.position.x + 20.0
+    var bw := right.size.x - 40.0
+    _draw_title_text(Vector2(x + 2, right.position.y + 124), online_code, 38, Color("#efd58c"))
+    _draw_ui_button("online_copy", Rect2(x, right.position.y + 142, bw, 40), "COPY ROOM CODE", "", Color("#bda36d"), false)
+    if online_is_owner:
+        _draw_ui_button("online_start", Rect2(x, right.position.y + 202, bw, 57), "START SURVIVAL", "OWNER ONLY / START FOR EVERYONE", Color("#cf5359"), true)
+    else:
+        draw_string(ui_font, Vector2(x, right.position.y + 218), "WAITING FOR ROOM OWNER...", HORIZONTAL_ALIGNMENT_LEFT, bw, 12, Color("#a7cbb9"))
+    draw_string(ui_font, Vector2(35, h - 12), ui_status, HORIZONTAL_ALIGNMENT_LEFT, w - 70, 10, Color("#d6d6b5"))

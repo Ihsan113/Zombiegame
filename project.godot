@@ -1,11 +1,11 @@
 config_version=5
 
 [application]
-config/name="Pixel Zombie LAN"
+config/name="Pixel Zombie Online"
 config/icon="res://assets/game_icon.png"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
-config/description="Four-player hotspot zombie survival with destructible deployable auto-turrets"
+config/description="Four-player zombie survival: global online dedicated rooms, LAN co-op and solo mode"
 
 [display]
 window/size/viewport_width=960

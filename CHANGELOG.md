@@ -1,3 +1,17 @@
+# Pixel Zombie Online v0.5.0-online
+
+## Online Global (source-only integration)
+- Dedicated Godot ENet/UDP per-room server launched in headless mode by Node.js HTTP/HTTPS room API.
+- Home menu MAIN ONLINE GLOBAL: set and save API URL, check status, create room, join room using six-character code, copy invite code, start game as owner, and leave safely.
+- Single-use short-lived tickets; the game server validates each participant with the internal room service before adding them to the authoritative world; four Android players without a phone host.
+- Fixed 60-tick server simulation, default 45 authoritative world snapshots/sec; existing command redundancy, prediction, interpolation and jitter buffering stay in place.
+- Lobby ownership, transfer on disconnect, start/restart restricted to room owner, stale room cleanup, and private credentials.
+- Existing LAN and solo modes remain available during the migration.
+- Tests: Node.js room API integration tests. Real Godot 4.7.2 + public VPS + Android device/network tests still required before shipping.
+- Android version code/name: 50 / 0.5.0-online.
+
+---
+
 # Pixel Zombie LAN v0.4.37
 
 ## v0.4.37 — real-time smoothness pass (host and client)
