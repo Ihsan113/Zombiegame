@@ -1,8 +1,13 @@
 {
   "name": "pixel-zombie-online-websocket",
-  "version": "0.6.0",
+  "version": "0.6.4",
   "private": true,
   "description": "Dependency-free Node.js authoritative gameplay and room API over one TCP/WebSocket port",
-  "scripts": {"start":"node index.js", "test":"node --test"},
-  "engines":{"node":">=22"}
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
 }

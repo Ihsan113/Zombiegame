@@ -343,6 +343,8 @@ var online_ws_ping_timer := 0.0
 var online_ws_ping_sent := -1
 var online_ws_last_pong_ms := 0
 var online_ws_rtt_ms := -1
+# Client-only short muzzle flashes, reconstructed from authoritative turret shot events.
+var online_turret_flash_until: Dictionary = {}
 var online_request_kind := ""
 var online_connected := false
 var online_status := "Set an API address to connect"
@@ -2131,8 +2133,8 @@ func _ingest_snapshot(buf: PackedByteArray, mode: int) -> void:
             continue
         seen_effects[eid] = now_ms
         var kind := int(effect["kind"])
-        if (kind == 0 or kind == 1) and int(effect["src"]) == local_player_id:
-            continue # predicted locally the instant the player pressed FIRE
+        if kind in [0, 1, 10, 11, 12, 13, 14] and int(effect["src"]) == local_player_id:
+            continue # All direct weapon visuals are predicted locally. Server damage/explosions remain authoritative.
         var scheduled: Dictionary = effect.duplicate()
         scheduled["start"] = host_t - float(effect["age"])
         pending_effects.append(scheduled)
@@ -2481,7 +2483,9 @@ func _client_update_render(delta: float) -> void:
         var target_angle: float = clampf(float(turret_record.get("angle", 0.0)), -TURRET_ARC_HALF_ANGLE, TURRET_ARC_HALF_ANGLE)
         var interpolated_angle := lerpf(prior_angle, target_angle, alpha)
         var turret_face_x := -1.0 if float(turret_record.get("face_x", prior_turret.get("face_x", 1.0))) < 0.0 else 1.0
-        turrets.append({"id": int(turret_record["id"]), "x": turret_pos.x, "y": turret_pos.y, "hp": float(turret_record["hp"]), "max_hp": float(turret_record.get("max_hp", TURRET_MAX_HP)), "angle": interpolated_angle, "face_x": turret_face_x, "flash_timer": 0.0})
+        var turret_id := int(turret_record["id"])
+        var flash_remaining := maxf(0.0, float(int(online_turret_flash_until.get(turret_id, 0)) - Time.get_ticks_msec()) * 0.001)
+        turrets.append({"id": turret_id, "x": turret_pos.x, "y": turret_pos.y, "hp": float(turret_record["hp"]), "max_hp": float(turret_record.get("max_hp", TURRET_MAX_HP)), "angle": interpolated_angle, "face_x": turret_face_x, "flash_timer": flash_remaining})
     airdrops.clear()
     var from_drops: Array = from_snap["drops"]
     for drop in to_snap["drops"]:
@@ -2515,7 +2519,22 @@ func _client_update_render(delta: float) -> void:
             var life := maxf(0.01, float(scheduled["life"]))
             var remaining := life - (render_t - start_t)
             if remaining > 0.0:
-                combat_effects.append({"eid": int(scheduled.get("eid", 0)), "kind": int(scheduled["kind"]), "x": float(scheduled["x"]) * sx, "y": float(scheduled["y"]) * sy, "x2": float(scheduled["x2"]) * sx, "y2": float(scheduled["y2"]) * sy, "ttl": remaining, "life": life})
+                var render_effect := {"eid": int(scheduled.get("eid", 0)), "kind": int(scheduled["kind"]), "x": float(scheduled["x"]) * sx, "y": float(scheduled["y"]) * sy, "x2": float(scheduled["x2"]) * sx, "y2": float(scheduled["y2"]) * sy, "ttl": remaining, "life": life}
+                combat_effects.append(render_effect)
+                # Only the server turret event has kind 13 and no player source.
+                # Rifle shots are excluded so their effects never flash a nearby turret.
+                if online_mode and int(scheduled.get("kind", -1)) == 13 and int(scheduled.get("src", 0)) == 0:
+                    var muzzle_pos := Vector2(float(render_effect["x"]), float(render_effect["y"]))
+                    for turret_index in range(turrets.size()):
+                        var turret: Dictionary = turrets[turret_index]
+                        var turret_pos := Vector2(float(turret["x"]), float(turret["y"]))
+                        var barrel_pos := _turret_muzzle_position(turret_pos, float(turret["face_x"]), float(turret["angle"]))
+                        if muzzle_pos.distance_to(barrel_pos) < 28.0:
+                            var flash_turret_id := int(turret["id"])
+                            online_turret_flash_until[flash_turret_id] = Time.get_ticks_msec() + 75
+                            turret["flash_timer"] = 0.075
+                            turrets[turret_index] = turret
+                            break
     if combat_effects.size() > 48:
         combat_effects = combat_effects.slice(combat_effects.size() - 48)
     for index in range(pending_sfx.size() - 1, -1, -1):
@@ -6613,6 +6632,7 @@ func _show_join_dialog() -> void:
 # ---------------------------------------------------------------------------
 
 func _online_clear_room() -> void:
+    online_turret_flash_until.clear()
     if online_ws != null:
         online_ws.close()
         online_ws = null
@@ -6907,6 +6927,16 @@ func _online_ws_message(message: Dictionary) -> void:
             game_over = false
             screen_mode = "game"
             ui_status = "Survive together — Node.js authoritative match"
+        "sfx":
+            # Audio remains client-side; the server only broadcasts the cue name.
+            var cue := str(message.get("clip", ""))
+            if cue in ["shot", "hit", "attack", "death", "heal", "grenade_throw", "explosion", "wall_build", "wall_break", "pickup", "airdrop", "airdrop_incoming", "boss_attack", "boss_roar", "turret_fire"]:
+                _play_sfx(cue)
+        "action_feedback":
+            ui_status = str(message.get("message", "ACTION REJECTED")).left(120)
+            if ui_status.begins_with("INVALID TURRET SPOT"):
+                turret_place_active = true
+                turret_place_touch_id = -1
         "game_over":
             game_over = true
             screen_mode = "game_over"

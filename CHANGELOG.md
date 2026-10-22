@@ -1,3 +1,38 @@
+# Pixel Zombie Online v0.6.4 — Online/LAN gameplay parity correction
+
+- Compared current Node.js WebSocket authoritative gameplay directly with stable `PixelZombieLAN` GDScript. **Only online multiplayer was changed**; legacy LAN and solo functions/assets remain available.
+- Matched turret yaw, 180° locked facing, 3.8rad/s turning, 180HP, 1.35 damage, fire cooldown and exact rotated barrel muzzle. Online projectiles now start at the barrel, not the turret's world position. Client turret muzzle flash follows authoritative shots.
+- Grenade aim now mirrors LAN 62.4–288px clamp, hand launch offset, ballistic travel/arc and 0.42s landing fuse. No more rejected throws at valid preview max range.
+- Barricades/turrets now share LAN min/max placement ranges, sprite overlap, orientation and spacing checks. Invalid requests return a visible reason, with retry for turret placement.
+- Fixed authoritative effect timestamp accounting (`Date.now()` vs 32-bit wire clock); stale effects no longer repeat in snapshots. Shotgun, SMG, rifle, sniper, rocket and sidearm use their matching LAN projectile/effect types and appropriate offsets.
+- Boss telegraphs preserve the proper attack time/frames before damage. Zombie attack flags persist throughout attack animation; movement speeds and damage profiles more closely follow LAN.
+- Improved airdrop dust/landing audio, reserved weapon-replacement choices, ammo matching and magazine top-up, medkit/wall/turret carry limits, and client/server audio cues. Local predicted shots no longer double-play with server shots.
+- Added Node regression tests for turret muzzle (left/right), grenade min/max, build placements, weapon effects, timestamp lifetime, boss wind-up, ammo/crate ownership and airdrop landing.
+- Maintains 60Hz authoritative server / 30Hz binary snapshots, `.env`, one-port HTTP + WebSocket, public URL detection, and Pterodactyl support. **This is not a guarantee of zero lag**. Full Godot 4.7.2 import/Android export and two-device playtesting still need to run in a Godot-equipped environment.
+- Android version code/name: 53 / 0.6.4-online. Node backend version: 0.6.4. Both should be updated together.
+
+---
+
+# Server v0.6.2 — .env config (game remains v0.6.1-online)
+
+- Added editable `server/.env` and `server/.env.example` for `API_PORT`, `API_BIND`, `MAX_ROOMS`, and optional advertised public URL.
+- Removed hardcoded fallback port from server entrypoint; uses `SERVER_PORT` (hosting allocation) > `API_PORT` (.env) > `PORT`, with validation.
+- Local .env values never override explicitly configured process environment variables. No npm dependency needed.
+- Added regression tests covering .env parsing, precedence, and server boot from another directory.
+- Gameplay / APK unchanged from v0.6.1.
+
+---
+
+# v0.6.1-online — Show server IP/URL (Termux and Pterodactyl)
+
+- Show localhost, detected LAN IPv4 interfaces, TCP port, and configured/allocated public URL in the Node.js startup console.
+- Use Pterodactyl `SERVER_PORT` for actual listening port; support `PUBLIC_URL` / `PUBLIC_HOST` / `SERVER_IP` for advertised external address.
+- GET `/` now displays a copyable `server_url` based on the browser request and links to `/health`.
+- No gameplay/network protocol change. Server is still Node.js-only HTTP + WebSocket in one TCP port.
+- Added regression tests for URL selection, public versus private addresses, and no misleading `0.0.0.0` URLs.
+
+---
+
 # v0.6.0-online — Node.js WebSocket migration
 
 - Node.js-only authoritative game room simulation, no Godot binary or UDP on hosting.
@@ -318,3 +353,10 @@ Other changes:
 - Added a 90-second safety timeout with explicit failure reporting if the codec test stalls.
 - Added named checkpoints around snapshot round-trips, weapon/ammo handling, boss frames, turret deployment/destruction, and the encode/decode stress loops, so the last printed checkpoint identifies the area to inspect.
 - This is a CI/test-diagnostics hotfix only; gameplay code, assets, LAN packet structure, and Android version code remain unchanged.
+
+
+## Node server v0.6.3 (game v0.6.1)
+- Lookup IP publik keluar saat startup via HTTPS ipify, dengan fallback icanhazip dan timeout.
+- Tampilkan IP dan perkiraan URL port, ditandai belum terverifikasi jika tidak dialokasikan secara eksplisit.
+- `.env` mendukung `PUBLIC_IP_LOOKUP=0/1`; URL panel dan `SERVER_PORT` tetap diutamakan.
+- Tambahan tes untuk IPv4, provider fallback, dan format log pada Pterodactyl/Termux.

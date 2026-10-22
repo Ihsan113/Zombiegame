@@ -210,3 +210,8 @@ The `Snapshot codec test` workflow step now uses `tee` for live console output a
 - The SceneTree codec test waits for one process frame after adding `Main.tscn`, ensuring `_ready()` runs before it tests the runtime-loaded turret textures.
 - Asset validation checks direct resource loading separately from the fields populated by `_ready()` so the next CI log can precisely locate any remaining discrepancy.
 - No game protocol fields or gameplay balance changed.
+
+
+## 0.6.4 — detailed gameplay parity against the stable offline/LAN source
+
+Node `server/geometry.js` implements the same world geometry, `grenadeAim`, barricade/turret spacing and rotated turret barrel position as stable `scripts/game.gd` (960×540 canonical world). Node game simulation now keeps turret animation while rotating and fires from the barrel tip; limits 180HP turret and uses LAN damage/cooldowns. Server grenade throws use the minimum/maximum range visible in the client preview. Client `scripts/game.gd` maps authoritative turret projectile (effect 13, source 0) to muzzle flashes, while local weapon traces and gunshot audio are predicted once, not doubled by the server. Server effects are aged against full Unix milliseconds before 32-bit packet timestamps are encoded. Airdrop ownership and inventory caps more closely match offline mode. Separate regression tests verify these rules. Godot/Android parsing and actual on-device frame-time measurements were not available in this environment.

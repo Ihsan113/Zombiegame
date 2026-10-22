@@ -1,6 +1,10 @@
 'use strict';
 /** Pixel Zombie Online: single TCP port, Node.js-only authoritative rooms. */
 const http=require('node:http');
+const {loadEnvFile,resolveServerConfig}=require('./config');
+// Resolve .env relative to this script, not the terminal working directory.
+const envFileStatus=loadEnvFile();
+const {getAccessInfo,formatStartupUrls,detectPublicIpv4,formatDetectedPublicIp}=require('./network_info');
 const {randomBytes,createHash}=require('node:crypto');
 const {upgrade}=require('./websocket');
 const {GameRoom}=require('./game');
@@ -32,6 +36,24 @@ function createApp(config={}){
   const handler=async(req,res)=>{try{
     if(limit(req))return send(res,429,{error:'Rate limited'});
     if(req.url==='/health'&&req.method==='GET')return send(res,200,{ok:true,mode:'node-websocket',rooms:rooms.size,players:[...rooms.values()].reduce((a,r)=>a+r.game.players.size,0),transport:'websocket',tick_hz:60,snapshot_hz:30});
+    // Friendly root endpoint: the Host seen by this request is the address the user opened.
+    // Do not infer a public IP from the container's private interface.
+    if(req.url==='/'&&req.method==='GET'){
+      const rawHost=String(req.headers.host||'');
+      let origin='';
+      try{
+        const parsed=new URL(`http://${rawHost}`);
+        if(parsed.hostname && !parsed.username && !parsed.password &&
+           !/[\s\\]/.test(rawHost))origin=parsed.origin;
+      }catch{/* missing or malformed Host */}
+      const protocol=String(req.headers['x-forwarded-proto']||'').toLowerCase()==='https'?'https:':'http:';
+      if(origin && protocol==='https:')origin='https:'+origin.slice('http:'.length);
+      return send(res,200,{ok:true,service:'Pixel Zombie Online — Node.js + WebSocket',
+        server_url:origin || null,
+        health_url:origin?`${origin}/health`:null,
+        message:'Salin server_url ke kolom Server API URL di game. Jangan tambahkan /health atau /ws.',
+        note:'Alamat berasal dari request browser; koneksi pemain lain tergantung jaringan/hosting.'});
+    }
     if(req.method!=='POST'||!['/api/rooms/create','/api/rooms/join','/api/rooms/connect'].includes(req.url))return send(res,404,{error:'Unknown endpoint'});
     if(!req.headers['content-type']?.startsWith('application/json'))return send(res,415,{error:'Use application/json'});
     const body=await read(req);
@@ -97,7 +119,29 @@ function createApp(config={}){
   return {server,rooms,close:()=>{clearInterval(housekeeping);for(const p of [...unauth])p.close(1001);
     for(const room of [...rooms.values()])closeRoom(room,'shutdown');return new Promise(resolve=>server.close(resolve));}};
 }
-if(require.main===module){const app=createApp();const port=Number(process.env.API_PORT||8080),bind=process.env.API_BIND||'0.0.0.0';
-  app.server.listen(port,bind,()=>console.log(`Pixel Zombie Online Node.js HTTP + WebSocket listening at ${bind}:${port} (TCP only)`));
+if(module.parent == null){
+  let config;
+  try{config=resolveServerConfig();}
+  catch(err){console.error(`Server configuration error: ${err.message}`);process.exit(1);}
+  const {port,bind,portSource}=config;
+  const app=createApp();
+  app.server.listen(port,bind,()=>{
+    console.log(`Pixel Zombie Online Node.js HTTP + WebSocket listening at ${bind}:${port} (TCP only)`);
+    console.log(`Port source: ${portSource}${envFileStatus.found?' (.env loaded where not overridden)':''}`);
+    const accessInfo=getAccessInfo({port,bind});
+    console.log(formatStartupUrls(accessInfo));
+    // Non-blocking outward IP lookup, like the reference's api.ipify.org request.
+    // The server accepts requests immediately, regardless of lookup success.
+    const lookup=String(process.env.PUBLIC_IP_LOOKUP||'1').trim().toLowerCase();
+    if(lookup!=='0'&&lookup!=='false'&&lookup!=='off'){
+      console.log(' Mendeteksi IP publik keluar melalui api.ipify.org ...');
+      void detectPublicIpv4().then(result=>{
+        console.log(formatDetectedPublicIp(result,{port,publicUrl:accessInfo.publicUrl}));
+      }).catch(()=>{
+        console.log(' IP publik keluar       : tidak berhasil dideteksi');
+      });
+    }
+  });
+  app.server.on('error',err=>{console.error(`Server failed to listen: ${err.message}`);process.exitCode=1;});
   const stop=()=>app.close().then(()=>process.exit(0));process.on('SIGINT',stop);process.on('SIGTERM',stop);}
 module.exports={createApp};

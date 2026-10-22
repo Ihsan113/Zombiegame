@@ -12,6 +12,7 @@ function encode(room, clock) {
   const pt = (x, y) => { u16(pos(x)); u16(pos(y)); };
   const players = [...room.players.values()].sort((a, z) => a.id - z.id).slice(0, 4);
   const zombies = room.zombies.slice(0, 40);
+  const absoluteClock = Date.now(); // full epoch ms; wire clock remains uint32
   u8(0xB7); u8((room.gameOver ? 1 : 0) | (room.timedOut ? 2 : 0));
   u32(++room.snapSeq); u32(clock); u16(960); u16(540); flt(room.worldTime);
   u16(room.wave); u8(room.spawned); u8(room.kills); u8(room.total); flt(room.breakTimer); flt(room.waveLeft);
@@ -50,13 +51,13 @@ function encode(room, clock) {
     u32(g.id); pt(g.sx, g.sy); pt(g.tx, g.ty); flt(g.elapsed); flt(g.travel); u8(g.height);
   }
   // Effects newer than 220ms sent redundantly; bounded to 1180 bytes.
-  const effects = room.effects.filter(f => clock - f.born <= 220).slice(-24).reverse().slice(0, Math.min(24, Math.floor((1180 - n - 1) / 16)));
+  const effects = room.effects.filter(f => absoluteClock - f.born >= 0 && absoluteClock - f.born <= 220).slice(-24).reverse().slice(0, Math.min(24, Math.floor((1180 - n - 1) / 16)));
   u8(effects.length);
   for (const f of effects) {
     u16(f.id & 65535); u8(f.kind); pt(f.x, f.y); pt(f.x2, f.y2);
     u8(f.ttl * 100); u8(f.life * 100);
     let src = players.findIndex(p => p.id === f.src); u8(src < 0 ? 255 : src);
-    u16(clock - f.born);
+    u16(absoluteClock - f.born);
   }
   if (n > 1180) throw new Error(`snapshot too large: ${n}`);
   return b.subarray(0, n);

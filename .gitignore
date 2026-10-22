@@ -3,3 +3,5 @@
 build/
 *.apk
 *.aab
+# Local server settings may include private domains or secrets.
+server/.env
