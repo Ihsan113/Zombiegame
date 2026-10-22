@@ -323,7 +323,7 @@ var ui_status := "Offline — tap HOST or JOIN"
 # Track the native Join dialog so its taps are never routed to the custom game HUD.
 var active_join_dialog: ConfirmationDialog
 var active_join_ip_field: LineEdit
-# Online API coordinates rooms; authenticated UDP/ENet carries all gameplay.
+# Online API coordinates rooms; Node.js WebSocket is authoritative for gameplay. LAN ENet remains optional.
 var dedicated_mode := false
 var online_mode := false
 var online_api_url := ""
@@ -335,6 +335,14 @@ var online_port := 0
 var online_poll_timer := 0.0
 var online_pending_request := false
 var online_http: HTTPRequest
+var online_ws: WebSocketPeer
+var online_ws_opened := false
+var online_ws_initial := true
+var online_ws_endpoint := ""
+var online_ws_ping_timer := 0.0
+var online_ws_ping_sent := -1
+var online_ws_last_pong_ms := 0
+var online_ws_rtt_ms := -1
 var online_request_kind := ""
 var online_connected := false
 var online_status := "Set an API address to connect"
@@ -436,14 +444,28 @@ func _process(delta: float) -> void:
                 if peer != null:
                     peer.disconnect_peer(int(pending_id))
         return
+    # Poll the WebSocket once per render frame, even in the lobby or pause menus.
+    if online_ws != null:
+        _online_ws_poll()
+    if _is_connected_client() and online_mode:
+        if online_ws_last_pong_ms > 0 and Time.get_ticks_msec() - online_ws_last_pong_ms > 15000:
+            _online_cancel()
+            screen_mode = "online"
+            online_status = "Connection stale — WebSocket heartbeat timed out"
+            return
+        online_ws_ping_timer -= delta
+        if online_ws_ping_timer <= 0.0:
+            online_ws_ping_timer = 2.0
+            online_ws_ping_sent = Time.get_ticks_msec()
+            online_ws.send_text(JSON.stringify({"type": "ping", "seq": online_ws_ping_sent}))
     if screen_mode == "online_room" and not online_code.is_empty() and online_deadline_ms > 0:
         if Time.get_ticks_msec() >= online_deadline_ms:
             _online_cancel()
             screen_mode = "online"
-            online_status = "Timed out connecting to the game. Check firewall / UDP."
+            online_status = "WebSocket connection timed out. Check server / TCP access."
         elif not online_pending_request and not online_connected:
             online_poll_timer -= delta
-            if online_poll_timer <= 0.0 and peer == null:
+            if online_poll_timer <= 0.0 and online_ws == null:
                 online_poll_timer = 0.8
                 _online_request("connect", "/api/rooms/connect", {"code": online_code, "ticket": online_ticket})
     screen_size = get_viewport_rect().size
@@ -658,6 +680,8 @@ func receive_sfx_event(clip: String, host_ms: int) -> void:
 func _is_connected_client() -> bool:
     if not is_inside_tree():
         return false
+    if online_mode:
+        return online_connected and online_ws != null and online_ws.get_ready_state() == WebSocketPeer.STATE_OPEN
     var peer_api: MultiplayerAPI = get_multiplayer()
     return peer_api != null and peer_api.multiplayer_peer != null and not is_host and peer_api.multiplayer_peer.get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED
 
@@ -678,7 +702,10 @@ func _request_fire_once() -> void:
         _host_fire(local_player_id)
     elif _is_connected_client():
         if _predict_local_fire():
-            rpc_id(1, "request_fire")
+            if online_mode:
+                _online_ws_action("fire")
+            else:
+                rpc_id(1, "request_fire")
     else:
         ui_status = "Tap HOST to start a survival world"
 
@@ -705,7 +732,10 @@ func _process_action_requests(delta: float) -> void:
         if is_host:
             _host_heal(local_player_id)
         elif _is_connected_client():
-            rpc_id(1, "request_heal")
+            if online_mode:
+                _online_ws_action("heal")
+            else:
+                rpc_id(1, "request_heal")
         else:
             ui_status = "Healing is available during a world session"
 
@@ -718,7 +748,10 @@ func _process_action_requests(delta: float) -> void:
         if is_host:
             _host_throw_grenade(local_player_id, safe_target_x_ratio, safe_target_y_ratio)
         elif _is_connected_client():
-            rpc_id(1, "request_grenade", safe_target_x_ratio, safe_target_y_ratio)
+            if online_mode:
+                _online_ws_action("grenade", {"x": safe_target_x_ratio, "y": safe_target_y_ratio})
+            else:
+                rpc_id(1, "request_grenade", safe_target_x_ratio, safe_target_y_ratio)
         else:
             ui_status = "Grenades are available during a world session"
 
@@ -731,7 +764,10 @@ func _process_action_requests(delta: float) -> void:
         if is_host:
             _host_build_wall(local_player_id, x_ratio, y_ratio)
         elif _is_connected_client():
-            rpc_id(1, "request_build_wall", x_ratio, y_ratio)
+            if online_mode:
+                _online_ws_action("wall", {"x": x_ratio, "y": y_ratio})
+            else:
+                rpc_id(1, "request_build_wall", x_ratio, y_ratio)
         else:
             ui_status = "Barricades are available during a world session"
 
@@ -760,7 +796,10 @@ func _process_action_requests(delta: float) -> void:
             # sending one request so a slow snapshot cannot cause duplicate deploys.
             turret_place_active = false
             turret_place_touch_id = -1
-            rpc_id(1, "request_build_turret", turret_x_ratio, turret_y_ratio, requested_face_x)
+            if online_mode:
+                _online_ws_action("turret", {"x": turret_x_ratio, "y": turret_y_ratio, "face": requested_face_x})
+            else:
+                rpc_id(1, "request_build_turret", turret_x_ratio, turret_y_ratio, requested_face_x)
         else:
             ui_status = "Auto turrets are available during a world session"
 
@@ -2167,7 +2206,11 @@ func _send_input_commands() -> void:
         sp.put_8(int(command["qx"]))
         sp.put_8(int(command["qy"]))
         sp.put_u16(int(command["dtq"]))
-    rpc_id(1, "submit_input", sp.data_array)
+    if online_mode:
+        if _is_connected_client():
+            online_ws.put_packet(sp.data_array)
+    else:
+        rpc_id(1, "submit_input", sp.data_array)
 
 func _reconcile_local(rec: Dictionary) -> void:
     var host_pos := Vector2(float(rec["x"]), float(rec["y"]))
@@ -2542,7 +2585,7 @@ func _update_net_stats(delta: float) -> void:
     stat_lost = 0
     stat_bytes = 0
     stat_timer = 0.0
-    net_rtt_ms = -1
+    net_rtt_ms = online_ws_rtt_ms if online_mode else -1
     if peer != null and not is_host:
         var remote: ENetPacketPeer = peer.get_peer(1)
         if remote != null:
@@ -2762,7 +2805,10 @@ func _request_weapon_switch(slot: int) -> void:
     if is_host:
         _host_switch_weapon(local_player_id, slot)
     elif _is_connected_client():
-        rpc_id(1, "request_switch_weapon", clampi(slot, 0, 2))
+        if online_mode:
+            _online_ws_action("weapon", {"slot": clampi(slot, 0, 2)})
+        else:
+            rpc_id(1, "request_switch_weapon", clampi(slot, 0, 2))
     else:
         ui_status = "Pick up a weapon during a world session"
 
@@ -4591,7 +4637,7 @@ func _draw_home() -> void:
     _draw_panel(Rect2(card_x, card_y, card_w, card_h), "SAFEHOUSE TERMINAL", "PROTOCOL 04  /  STAY ALIVE")
     var bx := card_x + 20.0
     var bw := card_w - 40.0
-    _draw_ui_button("home_online", Rect2(bx, card_y + 73.0, bw, 54.0), "MAIN ONLINE GLOBAL", "SERVER DEDICATED  /  PRIVATE ROOM CODE", Color("#53b4a0"), true)
+    _draw_ui_button("home_online", Rect2(bx, card_y + 73.0, bw, 54.0), "MAIN ONLINE GLOBAL", "NODE.JS WEBSOCKET  /  PRIVATE ROOM CODE", Color("#53b4a0"), true)
     _draw_ui_button("home_lan", Rect2(bx, card_y + 134.0, bw, 43.0), "MULTIPLAYER LAN", "LOCAL WI-FI / HOTSPOT", Color("#d64e51"), false)
     _draw_ui_button("home_solo", Rect2(bx, card_y + 184.0, bw, 43.0), "NEW SOLO RUN", "START WITH A CLEAN ARENA", Color("#c18a55"), false)
     var save_available := FileAccess.file_exists(SAVE_PATH)
@@ -4604,7 +4650,7 @@ func _draw_home() -> void:
     draw_rect(signal_rect, Color(0.12, 0.045, 0.05, 0.88))
     draw_rect(Rect2(signal_rect.position, Vector2(3, signal_rect.size.y)), Color("#9e4146"))
     draw_circle(Vector2(signal_rect.position.x + 17, signal_rect.position.y + 21), 4.0, Color("#dc685b"))
-    draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "ONLINE ROOM SERVICE  /  ENET UDP REALTIME", HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
+    draw_string(ui_font, Vector2(signal_rect.position.x + 29, signal_rect.position.y + 25), "ONLINE ROOM SERVICE  /  WEBSOCKET REALTIME", HORIZONTAL_ALIGNMENT_LEFT, bw - 40, 10, Color("#d4c5bb"))
     draw_string(ui_font, Vector2(bx, card_y + card_h - 17.0), "BUILD ONLINE 1.0  /  EARLY ACCESS", HORIZONTAL_ALIGNMENT_LEFT, bw, 10, Color("#9caaa0"))
 
 func _draw_help() -> void:
@@ -5651,7 +5697,10 @@ func _cancel_weapon_replacement_from_ui() -> void:
     if _is_connected_client():
         weapon_replace_cancel_pending = true
         weapon_replace_cancel_started_msec = Time.get_ticks_msec()
-        rpc_id(1, "request_cancel_airdrop_weapon")
+        if online_mode:
+            _online_ws_action("cancel_replace")
+        else:
+            rpc_id(1, "request_cancel_airdrop_weapon")
         ui_status = "WEAPON PICKUP CANCELLED — DROP LEFT ON GROUND"
     elif is_host:
         weapon_replace_cancel_pending = false
@@ -6181,8 +6230,8 @@ func _handle_ui_button(id: String) -> void:
             online_status = "ROOM CODE COPIED: %s" % online_code
         "online_start":
             if online_is_owner and _is_connected_client() and players.has(local_player_id):
-                rpc_id(1, "request_online_start")
-                ui_status = "Starting your dedicated-server match..."
+                _online_ws_action("start")
+                ui_status = "Starting your Node.js server match..."
         "online_leave":
             _leave_world()
             screen_mode = "online"
@@ -6257,8 +6306,11 @@ func _handle_ui_button(id: String) -> void:
             elif is_host:
                 _restart_run()
             elif _is_connected_client():
-                rpc_id(1, "request_restart")
-                ui_status = "Restart requested — waiting for the host"
+                if online_mode:
+                    _online_ws_action("restart")
+                else:
+                    rpc_id(1, "request_restart")
+                ui_status = "Restart requested — waiting for the server"
             else:
                 ui_status = "Start a new run from the safehouse"
         "gameover_home":
@@ -6268,12 +6320,18 @@ func _handle_ui_button(id: String) -> void:
             if is_host:
                 _host_resolve_weapon_replacement(local_player_id, 1)
             elif _is_connected_client():
-                rpc_id(1, "request_replace_airdrop_weapon", 1)
+                if online_mode:
+                    _online_ws_action("replace", {"slot": 1})
+                else:
+                    rpc_id(1, "request_replace_airdrop_weapon", 1)
         "weapon_replace_2":
             if is_host:
                 _host_resolve_weapon_replacement(local_player_id, 2)
             elif _is_connected_client():
-                rpc_id(1, "request_replace_airdrop_weapon", 2)
+                if online_mode:
+                    _online_ws_action("replace", {"slot": 2})
+                else:
+                    rpc_id(1, "request_replace_airdrop_weapon", 2)
         "weapon_replace_cancel":
             _cancel_weapon_replacement_from_ui()
 
@@ -6511,8 +6569,19 @@ func _show_join_dialog() -> void:
     # URL layout makes the dot key easy to reach for an IPv4 address.
     line.virtual_keyboard_type = LineEdit.KEYBOARD_TYPE_URL
     line.position = Vector2(20, 82)
-    line.size = Vector2(395, 38)
+    line.size = Vector2(291, 42)
     dialog.add_child(line)
+    var paste_lan := Button.new()
+    paste_lan.text = "TEMPEL"
+    paste_lan.position = Vector2(321, 82)
+    paste_lan.size = Vector2(93, 42)
+    paste_lan.focus_mode = Control.FOCUS_NONE
+    dialog.add_child(paste_lan)
+    paste_lan.pressed.connect(func():
+        line.text = DisplayServer.clipboard_get().strip_edges().substr(0, 15)
+        line.grab_focus()
+        line.set_caret_column(line.text.length())
+    )
     dialog.register_text_enter(line)
 
     dialog.confirmed.connect(func():
@@ -6544,6 +6613,16 @@ func _show_join_dialog() -> void:
 # ---------------------------------------------------------------------------
 
 func _online_clear_room() -> void:
+    if online_ws != null:
+        online_ws.close()
+        online_ws = null
+    online_ws_opened = false
+    online_ws_initial = true
+    online_ws_endpoint = ""
+    online_ws_ping_timer = 0.0
+    online_ws_ping_sent = -1
+    online_ws_last_pong_ms = 0
+    online_ws_rtt_ms = -1
     online_mode = false
     online_code = ""
     online_ticket = ""
@@ -6598,9 +6677,28 @@ func _online_show_entry_dialog(kind: String) -> void:
     field.max_length = 180 if kind == "api" else 6
     field.virtual_keyboard_type = LineEdit.KEYBOARD_TYPE_URL if kind == "api" else LineEdit.KEYBOARD_TYPE_DEFAULT
     field.position = Vector2(20, 85)
-    field.size = Vector2(420, 38)
+    field.size = Vector2(318, 42)
     field.clear_button_enabled = true
+    field.context_menu_enabled = true
+    field.virtual_keyboard_enabled = true
+    field.virtual_keyboard_show_on_focus = true
     dialog.add_child(field)
+    # Android long-press paste can be inconsistent in a native Window popup.
+    # This explicit large touch button uses the operating system clipboard.
+    var paste_button := Button.new()
+    paste_button.text = "TEMPEL"
+    paste_button.position = Vector2(349, 85)
+    paste_button.size = Vector2(98, 42)
+    paste_button.focus_mode = Control.FOCUS_NONE
+    dialog.add_child(paste_button)
+    paste_button.pressed.connect(func():
+        var clipboard_text := DisplayServer.clipboard_get().strip_edges()
+        if kind == "code":
+            clipboard_text = clipboard_text.to_upper()
+        field.text = clipboard_text.substr(0, field.max_length)
+        field.grab_focus()
+        field.set_caret_column(field.text.length())
+    )
     dialog.register_text_enter(field)
     dialog.confirmed.connect(func():
         var value := field.text.strip_edges()
@@ -6697,37 +6795,34 @@ func _online_request_complete(result: int, code: int, _headers: PackedStringArra
             online_deadline_ms = Time.get_ticks_msec() + 30000
             online_poll_timer = 0.0
             screen_mode = "online_room"
-            online_status = "Provisioning dedicated room..."
+            online_status = "Preparing WebSocket room..."
         "connect":
             if bool(data.get("ready", false)):
-                var game_host := str(data.get("host", ""))
-                var game_port := int(data.get("port", 0))
-                if game_host.is_empty() or game_port < 1 or game_port > 65535:
-                    online_status = "Room service returned an invalid UDP endpoint"
+                if str(data.get("transport", "")) != "websocket":
+                    online_status = "Server is outdated: expected Node.js WebSocket transport"
                     online_deadline_ms = 0
                     return
-                online_status = "Connecting to game server..."
-                _online_connect_game(game_host, game_port)
+                online_status = "Connecting to WebSocket on the same API port..."
+                _online_connect_game()
             else:
-                online_status = "Dedicated server is starting — room %s" % online_code
+                online_status = "Room is preparing — %s" % online_code
 
-func _online_connect_game(hostname: String, udp_port: int) -> void:
-    if peer != null:
+func _online_connect_game() -> void:
+    if online_ws != null:
         return
-    online_host = hostname
-    online_port = udp_port
-    peer = ENetMultiplayerPeer.new()
-    var err := peer.create_client(hostname, udp_port)
+    online_ws = WebSocketPeer.new()
+    online_ws.max_queued_packets = 128
+    online_ws_endpoint = online_api_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
+    var err := online_ws.connect_to_url(online_ws_endpoint)
     if err != OK:
-        peer = null
-        online_status = "Game UDP connect failed: %s" % error_string(err)
+        online_ws = null
+        online_status = "WebSocket connect failed: %s" % error_string(err)
         online_deadline_ms = 0
         return
-    peer.host.compress(ENetConnection.COMPRESS_FASTLZ)
-    multiplayer.multiplayer_peer = peer
+    online_ws_opened = false
+    online_ws_initial = true
     is_host = false
     is_offline = false
-    host_ip = hostname
     _cancel_targeting_modes()
     cmd_seq = 0
     cmd_open_qx = 0
@@ -6740,6 +6835,83 @@ func _online_connect_game(hostname: String, udp_port: int) -> void:
     turrets.clear()
     combat_effects.clear()
     input_vectors.clear()
+
+func _online_ws_action(kind: String, payload: Dictionary = {}) -> void:
+    if not _is_connected_client():
+        return
+    var message := payload.duplicate()
+    message["type"] = kind
+    online_ws.send_text(JSON.stringify(message))
+
+func _online_ws_poll() -> void:
+    if online_ws == null:
+        return
+    online_ws.poll()
+    var state := online_ws.get_ready_state()
+    if state == WebSocketPeer.STATE_OPEN:
+        if not online_ws_opened:
+            online_ws_opened = true
+            online_status = "WebSocket connected — validating room ticket..."
+            online_ws.send_text(JSON.stringify({"type": "auth", "code": online_code, "ticket": online_ticket}))
+        var count := 0
+        while online_ws.get_available_packet_count() > 0 and count < 64:
+            count += 1
+            var packet := online_ws.get_packet()
+            if online_ws.was_string_packet():
+                var parsed: Variant = JSON.parse_string(packet.get_string_from_utf8())
+                if parsed is Dictionary:
+                    _online_ws_message(parsed)
+            elif online_connected:
+                _ingest_snapshot(packet, 1 if online_ws_initial else 0)
+                online_ws_initial = false
+    elif state == WebSocketPeer.STATE_CLOSED:
+        if not online_code.is_empty():
+            _online_cancel()
+            screen_mode = "online"
+            online_status = "WebSocket disconnected — check server or room ticket."
+
+func _online_ws_message(message: Dictionary) -> void:
+    var kind := str(message.get("type", ""))
+    match kind:
+        "welcome":
+            local_player_id = int(message.get("id", 0))
+            if local_player_id < 2:
+                _online_cancel()
+                return
+            online_is_owner = bool(message.get("owner", false))
+            online_connected = true
+            online_ws_last_pong_ms = Time.get_ticks_msec()
+            online_deadline_ms = 0
+            screen_mode = "lobby"
+            online_status = "Connected to Node.js WebSocket room %s" % online_code
+            ui_status = "ONLINE • Room %s • WebSocket realtime" % online_code
+        "pong":
+            if online_ws_ping_sent >= 0 and int(message.get("seq", -1)) == online_ws_ping_sent:
+                online_ws_rtt_ms = Time.get_ticks_msec() - online_ws_ping_sent
+                online_ws_ping_sent = -1
+                online_ws_last_pong_ms = Time.get_ticks_msec()
+        "owner":
+            online_is_owner = bool(message.get("owner", false))
+        "members":
+            online_is_owner = bool(message.get("owner", false))
+            if bool(message.get("started", false)) and screen_mode == "lobby":
+                screen_mode = "game"
+        "started":
+            # A restarted match resets sequence acknowledgements on the Node server.
+            # Clear client command history as well to prevent a permanent ack mismatch.
+            cmd_seq = 0
+            cmd_open_qx = 0
+            cmd_open_qy = 0
+            _reset_client_interpolation()
+            online_ws_initial = true
+            game_over = false
+            screen_mode = "game"
+            ui_status = "Survive together — Node.js authoritative match"
+        "game_over":
+            game_over = true
+            screen_mode = "game_over"
+            fire_held = false
+            joystick_vector = Vector2.ZERO
 
 @rpc("authority", "call_remote", "reliable")
 func online_admitted(owner: bool) -> void:
@@ -6866,11 +7038,11 @@ func _draw_online() -> void:
     var h := screen_size.y
     _draw_ui_button("online_back", Rect2(28, 22, 118, 39), "‹  HOME", "", Color("#859b90"), false)
     _draw_title_text(Vector2(38, 108), "ONLINE GLOBAL", 33, Color("#f0ead8"))
-    draw_string(ui_font, Vector2(40, 135), "PRIVATE 4-PLAYER ROOMS  /  DEDICATED AUTHORITATIVE SERVER", HORIZONTAL_ALIGNMENT_LEFT, w - 80, 12, Color("#a9d9c2"))
+    draw_string(ui_font, Vector2(40, 135), "PRIVATE 4-PLAYER ROOMS  /  NODE.JS AUTHORITATIVE SERVER", HORIZONTAL_ALIGNMENT_LEFT, w - 80, 12, Color("#a9d9c2"))
     var panel_x := w * 0.44
     var panel_y := 30.0
     var panel_w := w * 0.52 - 25.0
-    _draw_panel(Rect2(panel_x, panel_y, panel_w, h - 60.0), "GLOBAL ROOM TERMINAL", "HTTPS API FOR LOBBY / UDP FOR GAME")
+    _draw_panel(Rect2(panel_x, panel_y, panel_w, h - 60.0), "GLOBAL ROOM TERMINAL", "HTTP + WEBSOCKET / ONE TCP PORT")
     var x := panel_x + 20.0
     var bw := panel_w - 40.0
     _draw_ui_button("online_api", Rect2(x, 109, bw, 56), "SERVER API URL", "TAP TO ENTER HTTP/HTTPS ADDRESS", Color("#59bba5"), true)
@@ -6890,7 +7062,7 @@ func _draw_online_room() -> void:
     var w := screen_size.x
     var h := screen_size.y
     var panel := Rect2(w * 0.20, h * 0.15, w * 0.60, h * 0.70)
-    _draw_panel(panel, "CONNECTING TO GLOBAL ROOM", "ROOM DISCOVERY / UDP CONNECT / TICKET AUTH")
+    _draw_panel(panel, "CONNECTING TO GLOBAL ROOM", "HTTP ROOM / WEBSOCKET / TICKET AUTH")
     _draw_title_text(Vector2(panel.position.x + 32, panel.position.y + 144), online_code, 43, Color("#e9d19c"))
     draw_string(ui_font, Vector2(panel.position.x + 32, panel.position.y + 185), online_status, HORIZONTAL_ALIGNMENT_LEFT, panel.size.x - 64, 13, Color("#d1ddd3"))
     _draw_ui_button("online_cancel", Rect2(panel.position.x + 32, panel.position.y + panel.size.y - 75, panel.size.x - 64, 45), "CANCEL / BACK", "", Color("#b65257"), false)
@@ -6901,7 +7073,7 @@ func _draw_online_lobby() -> void:
     var h := screen_size.y
     _draw_ui_button("online_leave", Rect2(28, 21, 123, 39), "‹ LEAVE", "", Color("#a56f6f"), false)
     _draw_title_text(Vector2(35, 92), "GLOBAL SAFEHOUSE", 30, Color("#efeadf"))
-    draw_string(ui_font, Vector2(38, 114), "REAL-TIME UDP  /  4 PLAYER CO-OP  /  SERVER AUTHORITATIVE", HORIZONTAL_ALIGNMENT_LEFT, w - 70, 11, Color("#9fcbb9"))
+    draw_string(ui_font, Vector2(38, 114), "REAL-TIME WEBSOCKET  /  4 PLAYERS  /  NODE.JS AUTHORITY", HORIZONTAL_ALIGNMENT_LEFT, w - 70, 11, Color("#9fcbb9"))
     var left := Rect2(30, 138, w * 0.55, h - 169)
     var right := Rect2(left.end.x + 14, 138, w - left.end.x - 44, h - 169)
     _draw_panel(left, "SURVIVOR SQUAD", "%d / %d CONNECTED" % [players.size(), MAX_PLAYERS])
@@ -6920,7 +7092,7 @@ func _draw_online_lobby() -> void:
         else:
             draw_rect(slot, Color("#40514d"), false, 1.0)
             draw_string(ui_font, slot.position + Vector2(21, 41), "+  WAITING FOR FRIEND", HORIZONTAL_ALIGNMENT_LEFT, slot.size.x - 30, 11, Color("#a9b5ad"))
-    draw_string(ui_font, Vector2(left.position.x + 20, left.end.y - 10), "ALL PHONES CONNECT DIRECTLY TO THE DEDICATED GAME SERVER", HORIZONTAL_ALIGNMENT_LEFT, left.size.x - 40, 9, Color("#9fbca9"))
+    draw_string(ui_font, Vector2(left.position.x + 20, left.end.y - 10), "ALL PHONES CONNECT TO THE NODE.JS GAME SERVER", HORIZONTAL_ALIGNMENT_LEFT, left.size.x - 40, 9, Color("#9fbca9"))
     _draw_panel(right, "PRIVATE ROOM", "SHARE YOUR INVITE CODE")
     var x := right.position.x + 20.0
     var bw := right.size.x - 40.0

@@ -1,3 +1,13 @@
+# v0.6.0-online — current implementation
+
+- `server/` now holds a Node-only HTTP/WebSocket game service, replacing the prior Godot spawned-room architecture.
+- `scripts/game.gd` uses `WebSocketPeer` for online games and sends/receives the original compact binary movement/snapshot data, preserving client prediction/interpolation and LAN mode separately.
+- Paste controls access `DisplayServer.clipboard_get()` directly, avoiding reliance on Android long-press menus.
+- End-to-end Node tests pass; full APK runtime validation is pending on a Godot-equipped system.
+- The archived notes below describe v0.5.0 and may refer to its historical UDP architecture.
+
+---
+
 ## v0.4.37 smoothness notes
 - `_net_flush()` (end of `_process`) calls `peer.host.flush()`; without it ENet sends queued datagrams only at the next frame's poll.
 - Client: `jitter_ring` (150 arrivals) -> `jitter_p_ms` (p92); `_target_interp_delay()` = (peak snapshot spacing + p92) + 6 ms, clamped 34..160 ms, raised at 400 ms/s, lowered at 60 ms/s. `play_t` is a rate-controlled render clock (catch-up <= 1.6x, slow-down <= 0.85x, re-anchor above 0.75 s error, never beyond newest snapshot + 100 ms damped extrapolation).

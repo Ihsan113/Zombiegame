@@ -1,3 +1,14 @@
+# v0.6.0-online — Node.js WebSocket migration
+
+- Node.js-only authoritative game room simulation, no Godot binary or UDP on hosting.
+- Same HTTP URL and TCP port used for room API and realtime WS/WSS `/ws`.
+- Authenticated player IDs, bounded binary state updates, local prediction/interpolation retained.
+- Implemented explicit Android `TEMPEL` buttons for API/room code/LAN fields.
+- New backend end-to-end tests and documentation; full Godot/Android device validation remains pending.
+- Gameplay simulations are a core migration and require detailed feature-parity playtests against original GDScript host logic.
+
+---
+
 # Pixel Zombie Online v0.5.0-online
 
 ## Online Global (source-only integration)
