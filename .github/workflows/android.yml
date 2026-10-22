@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
+  pull_request:
+    branches: [main, master]
 
 permissions:
   contents: read
@@ -95,8 +97,11 @@ jobs:
           preset = (root / 'export_presets.cfg').read_text()
           if 'window/handheld/orientation=0' not in project or 'screen/orientation=0' not in preset:
               raise SystemExit('Landscape orientation must be set in both Godot and Android export preset')
-          if 'version/code=49' not in preset or 'version/name="0.4.37"' not in preset:
-              raise SystemExit('Android export preset must report version code 49 / version 0.4.37')
+          version = (root / 'VERSION').read_text().strip()
+          version_code = re.search(r'^version/code=(\d+)$', preset, re.MULTILINE)
+          version_name = re.search(r'^version/name="([^"]+)"$', preset, re.MULTILINE)
+          if not version or not version_code or int(version_code.group(1)) <= 0 or not version_name or version_name.group(1) != version:
+              raise SystemExit('Android export version must match VERSION, with a positive version/code')
           sources = [root / 'project.godot', root / 'Main.tscn', root / 'scripts/game.gd']
           refs = set()
           for source in sources:
@@ -299,8 +304,8 @@ jobs:
               raise SystemExit('The v0.4.26 snapshot layout must retain its 30-byte player record, 8-byte turret record and 27-byte drop record.')
           if 'rpc("receive_world", _encode_snapshot()' not in script:
               raise SystemExit('Host snapshot broadcast is missing.')
-          if script.count('peer.host.compress(ENetConnection.COMPRESS_FASTLZ)') != 2:
-              raise SystemExit('Both LAN host and client must configure identical ENetConnection compression.')
+          if script.count('peer.host.compress(ENetConnection.COMPRESS_FASTLZ)') != 4:
+              raise SystemExit('LAN host/client and online dedicated host/client must configure identical ENetConnection compression.')
           if 'existing_pos.distance_to(wall_pos) < 132.0' in script:
               raise SystemExit('Barricade placement still uses the old 132 px spacing radius.')
           if 'var separation_x: float = absf(existing_pos.x - wall_pos.x)' not in script or 'var separation_y: float = absf(existing_pos.y - wall_pos.y)' not in script:
@@ -376,9 +381,27 @@ jobs:
           script = (root / 'scripts/game.gd').read_text()
           for marker in ['func _setup_music() -> void:', 'AudioStreamWAV.LOOP_FORWARD', 'AudioStreamMP3', 'mp3_stream.loop = true', 'func _sync_music_state() -> void:', 'AIRDROP_INTERVAL_MIN := 24.0', 'AIRDROP_INTERVAL_MAX := 34.0', '_emit_sfx("boss_roar")', '_emit_sfx("boss_attack")', 'func _input_canvas_position(viewport_position: Vector2) -> Vector2:', 'func _active_ui_hit_id(pos: Vector2) -> String:', 'func _turret_facing_button_rects() -> Dictionary:', 'func _settings_aim_toggle_rect() -> Rect2:', 'func _weapon_replace_hitboxes() -> Dictionary:', 'func _cancel_weapon_replacement_from_ui() -> void:', 'var airdrop_cancel_ignore_by_player: Dictionary = {}', 'func _update_airdrop_cancel_ignores() -> void:', 'const AIRDROP_CANCEL_RELEASE_RADIUS := 62.0', 'func _resolve_weapon_replace_snapshot_state(snapshot_pending: bool, now_msec: int) -> bool:', 'return # Modal consumes all other touches until a slot is chosen or Cancel is pressed.', 'func _turret_placement_control_rects() -> Dictionary:', 'func _turret_cancel_button_rect() -> Rect2:', 'func _game_turret_button_rect() -> Rect2:', 'func _toggle_aim_marker_setting() -> void:', 'func _turret_muzzle_position(turret_pos: Vector2, face_x: float, angle_offset: float) -> Vector2:', '_add_combat_effect(13, muzzle, target_pos, 0.17)', 'var pivot := pos + Vector2(0.0, -1.2)', 'Rect2(Vector2(-head_size.x * 0.39 - kick, -head_size.y * 0.84), head_size)', 'func request_build_turret(x_ratio: float, y_ratio: float, face_x: float = 1.0) -> void:', 'turret_face_left', 'turret_face_right', 'The rotating head ring overlaps the foot assembly instead of floating 20+ px above it.']:
               if marker not in script:
-                  raise SystemExit('Missing v0.4.37 gameplay/airdrop/turret/input/animation/audio feature marker: ' + marker)
+                  raise SystemExit('Missing gameplay/airdrop/turret/input/animation/audio feature marker: ' + marker)
           print(f'Validated {len(refs)} resource references, landscape/version settings, clean RGBA survivor atlas, five RGBA firearm sprites, destructible deployable auto-turrets with PNG layers/SFX, settings-based aim marker toggle, explicit airdrop slot replacement, finite firearm ammo with infinite sidearm fallback, compatible ammo pickup, hold-drag controls, death/bone visuals, grenade blast, more frequent airdrops, gameplay music, boss/airdrop SFX, {len(svg_assets)} SVG files and {len(clips)} WAV sound effects.')
           PYCODE
+
+      - name: Set artifact version
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PROJECT_VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
+
+      - name: Install Node.js for room service tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test online room service (when included)
+        if: ${{ hashFiles('server/package.json') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix server test
 
       - name: Import and validate project scripts
         shell: bash
@@ -431,14 +454,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build
-          ./godot --headless --path . --export-debug "Android" build/PixelZombieLAN.apk
-          test -s build/PixelZombieLAN.apk
+          ./godot --headless --path . --export-debug "Android" build/PixelZombieOnline.apk
+          test -s build/PixelZombieOnline.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.37-APK
-          path: build/PixelZombieLAN.apk
+          name: PixelZombieOnline-${{ env.PROJECT_VERSION }}-APK
+          path: build/PixelZombieOnline.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -446,15 +469,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip -r build/PixelZombieLAN-v0.4.37-source.zip \
-            project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools \
-            README.md CHANGELOG.md IMPLEMENTATION_NOTES.md VERSION .gitignore .github/workflows/android.yml
-          test -s build/PixelZombieLAN-v0.4.37-source.zip
+          source_paths=(project.godot Main.tscn export_presets.cfg scripts assets art_source tests tools
+                        README.md CHANGELOG.md IMPLEMENTATION_NOTES.md ONLINE_CHECKLIST.md
+                        VERSION .gitignore .github/workflows/android.yml)
+          if [ -d server ]; then source_paths+=(server); fi
+          zip -r "build/PixelZombieOnline-${PROJECT_VERSION}-source.zip" "${source_paths[@]}"
+          test -s "build/PixelZombieOnline-${PROJECT_VERSION}-source.zip"
 
       - name: Upload project source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelZombieLAN-v0.4.37-source
-          path: build/PixelZombieLAN-v0.4.37-source.zip
+          name: PixelZombieOnline-${{ env.PROJECT_VERSION }}-source
+          path: build/PixelZombieOnline-${{ env.PROJECT_VERSION }}-source.zip
           if-no-files-found: error
           retention-days: 14
